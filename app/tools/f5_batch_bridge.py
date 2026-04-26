@@ -82,7 +82,15 @@ def main() -> int:
         os.makedirs(os.path.dirname(wav_path), exist_ok=True)
         try:
             print(f"Generating F5 audio {index + 1}/{len(jobs)}...")
-            tts.infer(ref_file=ref_audio_path, ref_text=ref_text, gen_text=text, speed=speed, file_wave=wav_path)
+            tts.infer(
+                ref_file=ref_audio_path,
+                ref_text=ref_text,
+                gen_text=text,
+                speed=speed,
+                nfe_step=64,
+                cfg_strength=1.7,
+                file_wave=wav_path,
+            )
             results.append({"ok": True, "wav_path": wav_path})
         except Exception as exc:
             details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()

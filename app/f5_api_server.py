@@ -151,6 +151,8 @@ class F5Runtime:
                         ref_text=ref_text,
                         gen_text=text,
                         speed=speed,
+                        nfe_step=64,
+                        cfg_strength=1.7,
                         file_wave=wav_path,
                         show_info=self._log_info,
                         progress=None,

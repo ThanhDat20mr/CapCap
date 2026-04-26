@@ -122,6 +122,8 @@ def main() -> int:
             ref_text=args.ref_text,
             gen_text=gen_text,
             speed=float(args.speed),
+            nfe_step=64,
+            cfg_strength=1.7,
             file_wave=str(output_wav),
         )
         print(f"done: {output_wav}")
