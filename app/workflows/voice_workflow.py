@@ -18,6 +18,8 @@ class VoiceWorkflow:
     SMART_RETRY_RATIO = 1.15
     HARD_RETRY_RATIO = 1.30
     HARD_OUTLIER_RATIO = 1.20
+    F5_RETRY_RATIO = 1.20
+    F5_MAX_RETRY_ATTEMPTS = 1
     RETRY_MIN_ACCEPT_RATIO = 0.78
     RESCUE_MIN_ACCEPT_RATIO = 0.84
     MAX_SAFE_SEGMENT_SPEED = 1.12
@@ -857,6 +859,11 @@ class VoiceWorkflow:
             applied_action = str(metrics.get("action_taken") or "accept")
             attempt_count = 1
 
+            if voice_provider == "f5":
+                if best_ratio <= self.F5_RETRY_RATIO:
+                    continue
+                retry_cap = min(retry_cap, self.F5_MAX_RETRY_ATTEMPTS)
+
             if self._should_use_speedup_before_rewrite(
                 duration_sec=target_duration,
                 speech_cost=speech_cost,
@@ -1025,7 +1032,7 @@ class VoiceWorkflow:
                     )
                 attempt += 1
 
-            if best_ratio > self.HARD_OUTLIER_RATIO:
+            if voice_provider != "f5" and best_ratio > self.HARD_OUTLIER_RATIO:
                 emergency_text = self._hard_outlier_candidate_text(
                     current_text=best_text,
                     source_text=source_text,
@@ -1473,26 +1480,18 @@ class VoiceWorkflow:
             voice_provider=voice_provider,
             on_progress=on_progress,
         )
-        if voice_provider == "f5":
-            print("[Voice Retry] Skipping F5 text re-synthesis retries. Using timing polish/fit only.")
-            for seg in list(segments or []):
-                metrics = dict(seg.get("_tts_metrics") or {})
-                if str(metrics.get("action_taken") or "").strip().lower() in {"", "accept"}:
-                    metrics["action_taken"] = "accept"
-                    seg["_tts_metrics"] = metrics
-        else:
-            wavs = self._retry_overlong_segments(
-                segments=segments,
-                wavs=wavs,
-                tmp_dir=tmp_dir,
-                voice_name=voice_name,
-                provider_speed=provider_speed,
-                voice_provider=voice_provider,
-                ai_rewrite_dubbing=bool(ai_rewrite_dubbing),
-                source_language=source_language,
-                style_instruction=dubbing_style_instruction,
-                on_progress=on_progress,
-            )
+        wavs = self._retry_overlong_segments(
+            segments=segments,
+            wavs=wavs,
+            tmp_dir=tmp_dir,
+            voice_name=voice_name,
+            provider_speed=provider_speed,
+            voice_provider=voice_provider,
+            ai_rewrite_dubbing=bool(ai_rewrite_dubbing),
+            source_language=source_language,
+            style_instruction=dubbing_style_instruction,
+            on_progress=on_progress,
+        )
         self._update_manifest_entries(
             tmp_dir=tmp_dir,
             segments=segments,

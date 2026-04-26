@@ -527,6 +527,7 @@ class VideoTranslatorGUI(QMainWindow):
         self.f5_saved_voice_map = {}
         self._voice_signals_bound = False
         self._media_backend_ready = False
+        self._blur_region_signal_bound = False
         self._preview_audio_signals_bound = False
         self.media_player = _BootstrapMediaBackend()
         self.voice_preview_dialog = None
@@ -725,11 +726,13 @@ class VideoTranslatorGUI(QMainWindow):
             return
         self.setup_media_player()
         if hasattr(self, "video_view") and hasattr(self.video_view, "blurRegionChanged"):
-            try:
-                self.video_view.blurRegionChanged.disconnect(self.apply_preview_blur_region)
-            except Exception:
-                pass
+            if getattr(self, "_blur_region_signal_bound", False):
+                try:
+                    self.video_view.blurRegionChanged.disconnect(self.apply_preview_blur_region)
+                except Exception:
+                    pass
             self.video_view.blurRegionChanged.connect(self.apply_preview_blur_region)
+            self._blur_region_signal_bound = True
 
     def _configure_local_voice_mode_ui(self):
         if hasattr(self, "use_free_voice_radio"):
@@ -885,6 +888,24 @@ class VideoTranslatorGUI(QMainWindow):
             combo.setEnabled(True)
         self._sync_voice_engine_ui()
 
+    def refresh_f5_runtime_status(self):
+        if not hasattr(self, "f5_status_server_label"):
+            return
+        status = self.f5_voice_service.get_api_status(force=True)
+        if bool(status.get("ok", False)):
+            loaded = "Connected" if bool(status.get("loaded", False)) else "Connected"
+            url = str(status.get("url", "") or "").strip()
+            self.f5_status_server_label.setText(f"Detail Voice server: {loaded}")
+            self.f5_status_server_label.setToolTip(url)
+            self.log(f"[F5 Status] Connected: {url}")
+            return
+
+        url = str(status.get("url", "") or "").strip()
+        error = str(status.get("error", "") or "").strip()
+        self.f5_status_server_label.setText("Detail Voice server: Offline")
+        self.f5_status_server_label.setToolTip(error or url)
+        self.log(f"[F5 Status] Offline: {url} | {error}")
+
     def _current_voice_engine_key(self) -> str:
         combo = getattr(self, "voice_engine_combo", None)
         if combo is None:
@@ -981,6 +1002,10 @@ class VideoTranslatorGUI(QMainWindow):
             self.f5_new_voice_panel.setVisible(detail_selected and not using_saved)
         if hasattr(self, "f5_detail_hint_label"):
             self.f5_detail_hint_label.setVisible(detail_selected)
+        if hasattr(self, "f5_status_server_label"):
+            self.f5_status_server_label.setVisible(detail_selected)
+        if detail_selected:
+            self.refresh_f5_runtime_status()
         self._update_voice_preview_meta()
         self.refresh_ui_state()
 
@@ -3626,6 +3651,13 @@ class VideoTranslatorGUI(QMainWindow):
         if not hasattr(self, "video_view"):
             return
         item = self.video_view.subtitle_item
+        has_video = bool(self.video_path_edit.text().strip())
+        has_segments = bool(self.get_active_segments())
+        if not has_video or not has_segments:
+            item.set_text("")
+            item.hide()
+            self.sync_live_subtitle_preview()
+            return
         source_h = max(1, getattr(self.video_view, "video_source_height", 0) or 1080)
         preview_rect = self.video_view.get_preview_canvas_rect() if hasattr(self.video_view, "get_preview_canvas_rect") else self.video_view.get_video_content_rect()
         preview_h = max(1.0, preview_rect.height() or float(self.video_view.height()) or 1.0)
@@ -6010,6 +6042,31 @@ class VideoTranslatorGUI(QMainWindow):
         remote_divider.setVisible(remote_mode)
         layout.addWidget(remote_divider)
 
+        f5_title = QLabel("Detail Voice")
+        f5_title.setObjectName("statusHeadline")
+        layout.addWidget(f5_title)
+
+        f5_status_label = QLabel("Server: Checking...")
+        f5_status_label.setObjectName("helperLabel")
+        f5_status_label.setWordWrap(True)
+        layout.addWidget(f5_status_label)
+
+        f5_hint_label = QLabel("Run run_f5_api_server.bat before using Detail Voice.")
+        f5_hint_label.setObjectName("helperLabel")
+        f5_hint_label.setWordWrap(True)
+        layout.addWidget(f5_hint_label)
+
+        f5_actions_layout = QHBoxLayout()
+        f5_test_btn = QPushButton("Test Detail Voice Server", dialog)
+        f5_actions_layout.addWidget(f5_test_btn)
+        f5_actions_layout.addStretch()
+        layout.addLayout(f5_actions_layout)
+
+        f5_divider = QFrame()
+        f5_divider.setFrameShape(QFrame.HLine)
+        f5_divider.setStyleSheet("color: #2f4868;")
+        layout.addWidget(f5_divider)
+
         # AI Translation Section
         ai_title = QLabel("AI Polish Settings")
         ai_title.setObjectName("statusHeadline")
@@ -6346,7 +6403,25 @@ class VideoTranslatorGUI(QMainWindow):
                     "Remote API",
                     f"Could not connect to the PC server.\n\n{exc}",
                 )
+
+        def _refresh_f5_settings_status():
+            status = self.f5_voice_service.get_api_status(force=True)
+            if bool(status.get("ok", False)):
+                f5_status_label.setText("Server: Connected")
+                f5_status_label.setToolTip(str(status.get("url", "") or "").strip())
+            else:
+                f5_status_label.setText("Server: Offline")
+                f5_status_label.setToolTip(str(status.get("error", "") or "").strip() or str(status.get("url", "") or "").strip())
+
+        def _test_f5_server():
+            _refresh_f5_settings_status()
+            if f5_status_label.text().endswith("Connected"):
+                QMessageBox.information(dialog, "Detail Voice", "Detail Voice server is connected.")
+            else:
+                QMessageBox.warning(dialog, "Detail Voice", "Detail Voice server is not running.\n\nOpen run_f5_api_server.bat first.")
         test_remote_btn.clicked.connect(_test_remote_connection)
+        f5_test_btn.clicked.connect(_test_f5_server)
+        _refresh_f5_settings_status()
         if not remote_mode:
             update_provider_fields()
 

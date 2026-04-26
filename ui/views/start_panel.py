@@ -535,6 +535,8 @@ def build_start_group(gui, left_layout):
     )
     gui.f5_detail_hint_label.setObjectName("helperLabel")
     gui.f5_detail_hint_label.setWordWrap(True)
+    gui.f5_status_server_label = QLabel("Server: Checking...", gui)
+    gui.f5_status_server_label.setObjectName("helperLabel")
     gui.preview_voice_btn = QPushButton("Preview Selected Voice")
     gui.preview_voice_btn.clicked.connect(gui.preview_selected_voice_sample)
     if not hasattr(gui, "voiceover_btn"):
@@ -585,6 +587,7 @@ def build_start_group(gui, left_layout):
     f5_new_voice_layout.addWidget(gui.f5_save_clone_cb)
     detail_voice_layout.addWidget(gui.f5_new_voice_panel)
     detail_voice_layout.addWidget(gui.f5_detail_hint_label)
+    detail_voice_layout.addWidget(gui.f5_status_server_label)
     voice_setup_layout.addWidget(gui.detail_voice_panel)
     gui.ai_dubbing_rewrite_cb = QCheckBox("Use AI Rewrite Dubbing for voice timing")
     gui.ai_dubbing_rewrite_cb.setChecked(True)
