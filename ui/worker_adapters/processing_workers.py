@@ -1,3 +1,4 @@
+import hashlib
 import os
 import sys
 import traceback
@@ -438,11 +439,13 @@ class SegmentAudioPreviewWorker(QThread):
                 output = base_wav_path
             self.finished.emit(self.index, output, "")
         except Exception as exc:
-            self.finished.emit(self.index, "", str(exc))
+            details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+            self.finished.emit(self.index, "", details or str(exc))
 
 
 class VoiceSamplePreviewWorker(QThread):
     finished = Signal(str, str)
+    progress = Signal(str)
 
     def __init__(self, workspace_root, text, voice_name, voice_speed, temp_dir=""):
         super().__init__()
@@ -456,8 +459,17 @@ class VoiceSamplePreviewWorker(QThread):
         try:
             temp_dir = self.temp_dir or os.path.join(self.workspace_root, "temp", "voice_sample_preview")
             os.makedirs(temp_dir, exist_ok=True)
-            wav_path = os.path.join(temp_dir, f"voice_sample_{os.getpid()}.wav")
-            base_wav_path = os.path.join(temp_dir, f"voice_sample_{os.getpid()}_base.wav")
+            cache_seed = f"{self.voice_name}|{self.voice_speed}|{self.text}".encode("utf-8", errors="replace")
+            cache_key = hashlib.sha1(cache_seed).hexdigest()[:16]
+            wav_path = os.path.join(temp_dir, f"voice_sample_{cache_key}.wav")
+            base_wav_path = os.path.join(temp_dir, f"voice_sample_{cache_key}_base.wav")
+            if abs(float(self.voice_speed) - 1.0) >= 0.02:
+                if os.path.exists(wav_path):
+                    self.finished.emit(wav_path, "")
+                    return
+            elif os.path.exists(base_wav_path):
+                self.finished.emit(base_wav_path, "")
+                return
             engine = EngineRuntime()
             engine.synthesize_segment(
                 text=self.text,
@@ -465,6 +477,7 @@ class VoiceSamplePreviewWorker(QThread):
                 voice=self.voice_name,
                 speed=1.0,
                 tmp_dir=temp_dir,
+                on_progress=self.progress.emit,
             )
             speed_value = float(self.voice_speed)
             if abs(speed_value - 1.0) >= 0.02:
@@ -477,7 +490,8 @@ class VoiceSamplePreviewWorker(QThread):
                 output = base_wav_path
             self.finished.emit(output, "")
         except Exception as exc:
-            self.finished.emit("", str(exc))
+            details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+            self.finished.emit("", details or str(exc))
 
 
 

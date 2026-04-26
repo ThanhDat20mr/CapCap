@@ -7,7 +7,7 @@ import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from runtime_paths import app_path
-from services import EngineRuntime, ProjectService
+from services import EngineRuntime, F5VoiceService, ProjectService
 from tts_processor import normalize_text_for_tts
 
 
@@ -29,6 +29,7 @@ class VoiceWorkflow:
         self.workspace_root = workspace_root
         self.project_service = ProjectService(workspace_root)
         self.engine_runtime = EngineRuntime()
+        self.f5_voice_service = F5VoiceService(workspace_root)
 
     def _load_state(self, project_state_path: str = ""):
         return self.project_service.load_project(project_state_path) if project_state_path else None
@@ -115,6 +116,8 @@ class VoiceWorkflow:
 
     def _voice_provider(self, voice_name: str) -> str:
         raw = str(voice_name or "").strip()
+        if raw.lower().startswith("f5:"):
+            return "f5"
         
         # If has ":" prefix format, parse it
         if ":" in raw:
@@ -151,7 +154,7 @@ class VoiceWorkflow:
 
     def _provider_native_speed(self, *, provider: str, requested_speed: float) -> float:
         speed_value = float(requested_speed)
-        if provider == "edge":
+        if provider in {"edge", "f5"}:
             return speed_value
         return 1.0
 
@@ -1319,7 +1322,7 @@ class VoiceWorkflow:
                     cache_hits += 1
                 except Exception:
                     pass
-            elif voice_provider == "edge":
+            elif voice_provider in {"edge", "f5"}:
                 worker_count = 1
             else:
                 worker_count = max(1, min(self.MAX_TTS_WORKERS, len(pending_jobs)))
@@ -1330,6 +1333,36 @@ class VoiceWorkflow:
             if on_progress:
                 on_progress(f"Synthesizing {len(pending_jobs)} subtitle segments (using {worker_count} workers)...")
             if not pending_jobs:
+                manifest["segments"] = manifest_segments
+                manifest["by_cache_key"] = manifest_by_cache_key
+                self._save_manifest(tmp_dir, manifest)
+                return wavs
+            if voice_provider == "f5":
+                outputs = self.f5_voice_service.synthesize_batch(
+                    voice_token=voice_name,
+                    jobs=[
+                        {
+                            "text": job["text"],
+                            "wav_path": job["wav_path"],
+                            "speed": provider_speed,
+                        }
+                        for job in pending_jobs
+                    ],
+                    temp_dir=tmp_dir,
+                    on_progress=on_progress,
+                )
+                for output_path, job in zip(outputs, pending_jobs):
+                    idx = int(job["idx"])
+                    txt = str(job["text"])
+                    manifest_segments[str(idx)] = {
+                        "cache_key": str(job["cache_key"]),
+                        "wav_path": output_path,
+                        "text": txt,
+                        "voice_name": voice_name,
+                        "provider_speed": provider_speed,
+                    }
+                    manifest_by_cache_key[str(job["cache_key"])] = dict(manifest_segments[str(idx)])
+                    wavs[idx] = output_path
                 manifest["segments"] = manifest_segments
                 manifest["by_cache_key"] = manifest_by_cache_key
                 self._save_manifest(tmp_dir, manifest)
@@ -1440,18 +1473,26 @@ class VoiceWorkflow:
             voice_provider=voice_provider,
             on_progress=on_progress,
         )
-        wavs = self._retry_overlong_segments(
-            segments=segments,
-            wavs=wavs,
-            tmp_dir=tmp_dir,
-            voice_name=voice_name,
-            provider_speed=provider_speed,
-            voice_provider=voice_provider,
-            ai_rewrite_dubbing=bool(ai_rewrite_dubbing),
-            source_language=source_language,
-            style_instruction=dubbing_style_instruction,
-            on_progress=on_progress,
-        )
+        if voice_provider == "f5":
+            print("[Voice Retry] Skipping F5 text re-synthesis retries. Using timing polish/fit only.")
+            for seg in list(segments or []):
+                metrics = dict(seg.get("_tts_metrics") or {})
+                if str(metrics.get("action_taken") or "").strip().lower() in {"", "accept"}:
+                    metrics["action_taken"] = "accept"
+                    seg["_tts_metrics"] = metrics
+        else:
+            wavs = self._retry_overlong_segments(
+                segments=segments,
+                wavs=wavs,
+                tmp_dir=tmp_dir,
+                voice_name=voice_name,
+                provider_speed=provider_speed,
+                voice_provider=voice_provider,
+                ai_rewrite_dubbing=bool(ai_rewrite_dubbing),
+                source_language=source_language,
+                style_instruction=dubbing_style_instruction,
+                on_progress=on_progress,
+            )
         self._update_manifest_entries(
             tmp_dir=tmp_dir,
             segments=segments,

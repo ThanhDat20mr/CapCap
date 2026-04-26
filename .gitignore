@@ -40,3 +40,5 @@ build_debug/
 voice_temp/
 *.gguf
 assets/luts/_archive
+log.txt
+data/*

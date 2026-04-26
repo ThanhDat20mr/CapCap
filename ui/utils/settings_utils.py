@@ -34,6 +34,20 @@ def save_user_settings(gui):
     s.setValue("mixed_audio", gui.mixed_audio_edit.text())
     s.setValue("free_voice_name", gui.free_voice_combo.currentText())
     s.setValue("free_voice_value", gui.free_voice_combo.currentData())
+    if hasattr(gui, "voice_engine_combo"):
+        s.setValue("voice_engine", gui.voice_engine_combo.currentData())
+    if hasattr(gui, "f5_clone_mode_combo"):
+        s.setValue("f5_clone_mode", gui.f5_clone_mode_combo.currentData())
+    if hasattr(gui, "f5_saved_voice_combo"):
+        s.setValue("f5_saved_voice_id", gui.f5_saved_voice_combo.currentData())
+    if hasattr(gui, "f5_ref_audio_edit"):
+        s.setValue("f5_ref_audio", gui.f5_ref_audio_edit.text())
+    if hasattr(gui, "f5_ref_text_edit"):
+        s.setValue("f5_ref_text", gui.f5_ref_text_edit.toPlainText())
+    if hasattr(gui, "f5_clone_name_edit"):
+        s.setValue("f5_clone_name", gui.f5_clone_name_edit.text())
+    if hasattr(gui, "f5_save_clone_cb"):
+        s.setValue("f5_save_clone", gui.f5_save_clone_cb.isChecked())
     s.setValue("premium_voice_name", "")
     s.setValue("premium_voice_value", "")
     s.setValue("voice_tier", "free")
@@ -141,6 +155,26 @@ def load_user_settings(gui):
     gui.bg_music_edit.setText(s.value("background_audio", gui.bg_music_edit.text()))
     gui.mixed_audio_edit.setText(s.value("mixed_audio", gui.mixed_audio_edit.text()))
     gui.set_voice_combo_value(gui.free_voice_combo, s.value("free_voice_value", gui.free_voice_combo.currentData()))
+    if hasattr(gui, "voice_engine_combo"):
+        voice_engine = str(s.value("voice_engine", gui.voice_engine_combo.currentData() or "fast")).strip()
+        index = gui.voice_engine_combo.findData(voice_engine)
+        if index >= 0:
+            gui.voice_engine_combo.setCurrentIndex(index)
+    if hasattr(gui, "f5_clone_mode_combo"):
+        clone_mode = str(s.value("f5_clone_mode", gui.f5_clone_mode_combo.currentData() or "new")).strip()
+        index = gui.f5_clone_mode_combo.findData(clone_mode)
+        if index >= 0:
+            gui.f5_clone_mode_combo.setCurrentIndex(index)
+    if hasattr(gui, "f5_ref_audio_edit"):
+        gui.f5_ref_audio_edit.setText(s.value("f5_ref_audio", gui.f5_ref_audio_edit.text()))
+    if hasattr(gui, "f5_ref_text_edit"):
+        gui.f5_ref_text_edit.setPlainText(str(s.value("f5_ref_text", gui.f5_ref_text_edit.toPlainText())))
+    if hasattr(gui, "f5_clone_name_edit"):
+        gui.f5_clone_name_edit.setText(s.value("f5_clone_name", gui.f5_clone_name_edit.text()))
+    if hasattr(gui, "f5_save_clone_cb"):
+        gui.f5_save_clone_cb.setChecked(str(s.value("f5_save_clone", "false")).lower() == "true")
+    if hasattr(gui, "refresh_f5_saved_voice_list"):
+        gui.refresh_f5_saved_voice_list(selected_id=str(s.value("f5_saved_voice_id", "")))
     if hasattr(gui, "use_premium_voice_radio"):
         gui.use_premium_voice_radio.setChecked(False)
     if hasattr(gui, "use_free_voice_radio"):

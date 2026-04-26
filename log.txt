@@ -1,28 +1,47 @@
-[Preview] media backend: libmpv
-D:\CodingTime\CapCap\ui\main_window.py:724: RuntimeWarning: Failed to disconnect (<bound method VideoTranslatorGUI.apply_preview_blur_region of <main_window.VideoTranslatorGUI(0x2980b60c8b0) at 0x00000298091D7A80>>) from signal "blurRegionChanged()".
-  self.video_view.blurRegionChanged.disconnect(self.apply_preview_blur_region)
-[Pipeline] Starting prepare workflow for: D:/Downloads/download.mp4
---- Step 1: Extracting audio ---
-[Prepare Workflow] Reusing cached extracted audio: D:\CodingTime\CapCap\projects\download_b04217fe\source\extracted_audio.wav
-Success: Audio saved to D:\CodingTime\CapCap\projects\download_b04217fe\source\extracted_audio.wav
-[Timing] Extract audio: 0.00s
-[Audio Handling] Selected mode: clean
+PS D:\CodingTime\CapCap> .\run_f5_api_server.bat
+[CapCap] Starting F5 API server...
+[F5 API] Listening on http://127.0.0.1:8766
+[F5 API] 127.0.0.1 - "GET /health HTTP/1.1" 200 -
+Load vocos from local path D:\CodingTime\CapCap\f5_tts_voice\checkpoints\vocos-mel-24khz
 
---- Step 1.5: Separating vocals/background ---
-[Audio Handling] Clean Voice enabled: running Demucs stem separation before transcription.
-[Demucs] Using device: cuda
-Running Vocal Separation: C:\Users\Thach\AppData\Local\Programs\Python\Python311\python.exe -m demucs --device cuda --two-stems vocals -o D:\CodingTime\CapCap\projects\download_b04217fe\audio\separated 
-D:\CodingTime\CapCap\projects\download_b04217fe\source\extracted_audio.wav
-[Audio Handling] Using separated vocals for Whisper: D:\CodingTime\CapCap\projects\download_b04217fe\audio\separated\htdemucs\extracted_audio\vocals.wav
-[Audio Handling] Background music stem ready: D:\CodingTime\CapCap\projects\download_b04217fe\audio\separated\htdemucs\extracted_audio\no_vocals.wav
-[Timing] Demucs separation: 7.85s
+vocab :  D:\CodingTime\CapCap\models\f5\vocab.txt
+token :  custom
+model :  D:\CodingTime\CapCap\models\f5\model_last_repo_compatible_weights.pt 
 
---- Step 2: Transcribing audio (Whisper) ---
-[ASR] Working audio duration: 35.60s
-[ASR] Using standard single-pass transcription for short audio.
-[Whisper] Loading faster-whisper with CUDA / int8_float16
-OMP: Error #15: Initializing libiomp5md.dll, but found libomp140.x86_64.dll already initialized.
-OMP: Hint This means that multiple copies of the OpenMP runtime have been linked into the program. That is dangerous, since it can degrade performance or cause incorrect results. The best thing to do is to ensure that only a single OpenMP runtime is linked into the process, e.g. by avoiding static linking of the OpenMP runtime in any library. As an unsafe, unsupported, undocumented workaround you can 
-set the environment variable KMP_DUPLICATE_LIB_OK=TRUE to allow the program to continue to execute, but that may cause crashes or silently produce incorrect results. For more information, please see http://www.intel.com/software/products/support/.
-QBasicTimer::stop: Failed. Possibly trying to stop from a different thread
-QBasicTimer::stop: Failed. Possibly trying to stop from a different thread
+[F5 API] Loaded runtime in 2.67s
+[F5 API] python=C:\Users\Thach\AppData\Local\Programs\Python\Python311\python.exe
+[F5 API] device=cuda
+[F5 API] gpu=NVIDIA GeForce RTX 2060
+[F5 API] Synth 1/1 start
+Converting audio...
+Using custom reference text...
+
+ref_text   cả hai bên hãy cố gắng hiểu cho nhau.
+gen_text 0 Chào bạn, đây là bản xem trước giọng nói của mẫu được chọn.
+
+
+Generating audio in 1 batches...
+  0%|                                                                                                                                                                              | 0/1 [00:00<?, ?it/s]D:\CodingTime\CapCap\f5_tts_voice\f5_tts\model\modules.py:490: UserWarning: 1Torch was not compiled with flash attention. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\builder\windows\pytorch\aten\src\ATen\native\transformers\cuda\sdp_utils.cpp:555.)
+  x = F.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
+100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:01<00:00,  1.75s/it]
+[F5 API] Synth 1/1 done in 1.79s
+[F5 API] 127.0.0.1 - "POST /v1/f5/synthesize-batch HTTP/1.1" 200 -
+Windows fatal exception: code 0xc0000374
+
+Thread 0x00003298 (most recent call first):
+  File "C:\Users\Thach\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 331 in wait
+  File "C:\Users\Thach\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 629 in wait
+  File "C:\Users\Thach\AppData\Local\Programs\Python\Python311\Lib\site-packages\tqdm\_monitor.py", line 60 in run
+  File "C:\Users\Thach\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1045 in _bootstrap_inner
+  File "C:\Users\Thach\AppData\Local\Programs\Python\Python311\Lib\threading.py", line 1002 in _bootstrap
+
+Thread 0x000004cc (most recent call first):
+  File "C:\Users\Thach\AppData\Local\Programs\Python\Python311\Lib\selectors.py", line 314 in _select
+  File "C:\Users\Thach\AppData\Local\Programs\Python\Python311\Lib\selectors.py", line 323 in select
+  File "C:\Users\Thach\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 233 in serve_forever
+  File "D:\CodingTime\CapCap\app\f5_api_server.py", line 205 in main
+  File "D:\CodingTime\CapCap\app\f5_api_server.py", line 213 in <module>
+
+[CapCap] F5 API server exited with code -1073740940.
+Press any key to continue . . .
+PS D:\CodingTime\CapCap> 
