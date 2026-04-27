@@ -138,6 +138,7 @@ def _connect_ui_signals(gui):
     gui.extract_btn.clicked.connect(gui.run_extraction)
     gui.vocal_sep_btn.clicked.connect(gui.run_vocal_separation)
     gui.transcribe_btn.clicked.connect(gui.run_transcription)
+    gui.import_original_srt_btn.clicked.connect(gui.import_original_srt)
     gui.translate_btn.clicked.connect(gui.run_translation)
     gui.rewrite_translation_btn.clicked.connect(gui.run_rewrite_translation)
     gui.import_translation_btn.clicked.connect(gui.import_translated_srt)

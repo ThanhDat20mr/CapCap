@@ -5289,6 +5289,48 @@ class VideoTranslatorGUI(QMainWindow):
             handle.write(srt_text)
         QMessageBox.information(self, "Saved", f"Subtitle saved to:\n\n{file_path}")
 
+    def import_original_srt(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Original Subtitle",
+            self.srt_output_folder_edit.text().strip() or self.workspace_root,
+            "Subtitle Files (*.srt)",
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8-sig") as handle:
+                srt_text = handle.read().strip()
+        except Exception as exc:
+            self.show_error("Import Failed", "Could not read the selected subtitle file.", str(exc))
+            return
+
+        if not srt_text:
+            QMessageBox.warning(self, "Import Failed", "The selected subtitle file is empty.")
+            return
+
+        imported_segments = self.parse_srt_to_segments(srt_text)
+        if not imported_segments:
+            QMessageBox.warning(self, "Import Failed", "The selected file could not be parsed as a valid SRT subtitle.")
+            return
+
+        self.current_segments = imported_segments
+        self.transcript_text.setText(srt_text)
+        self.last_original_srt_path = file_path
+        self.persist_transcription_project_data(imported_segments, srt_path=file_path)
+        state = self.ensure_current_project()
+        if state:
+            state.set_setting("transcription_signature", "")
+            self.project_service.save_project(state)
+        self._sync_segment_models_from_current_segments()
+        if hasattr(self, "timeline"):
+            self.timeline.set_segments(self.current_segments)
+            self.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
+        self.log(f"[Import] Original subtitle loaded: {file_path} ({len(imported_segments)} segments)")
+        QMessageBox.information(self, "Import Success", f"Loaded {len(imported_segments)} segments from original subtitle.")
+        self.refresh_ui_state()
+
     def import_translated_srt(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,

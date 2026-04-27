@@ -82,7 +82,7 @@ class PipelineController:
         if is_remote_profile():
             # Backend runs separate + transcribe + translate in one batch.
             # Cleaner voice (separation) is handled inside the batch silently.
-            self.progress_dialog.add_step("ai_process", "AI Processing")
+            self.progress_dialog.add_step("ai_process", "Subtitle Processing (AI)")
         else:
             if includes_separation:
                 self.progress_dialog.add_step("separation", "Isolating Background Music")

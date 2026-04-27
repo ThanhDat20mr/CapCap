@@ -256,10 +256,20 @@ class PrepareWorkflow:
             and cached_transcript_path
             and os.path.exists(cached_transcript_path)
         )
-        if reused_transcript:
+        has_imported_transcript = (
+            not cached_transcription_signature
+            and cached_transcript_path
+            and os.path.exists(cached_transcript_path)
+        )
+        if reused_transcript or has_imported_transcript:
             segment_models = self.project_service.load_segment_artifact(project_state, "transcript_segments")
-            raw_segments = [segment.to_original_subtitle_dict() for segment in segment_models]
-            print("[Prepare Workflow] Reusing cached Whisper transcript. Generate did not transcribe again.")
+            raw_segments = self.project_service.load_json_artifact(project_state, "transcript_raw", default=[])
+            if not raw_segments and segment_models:
+                raw_segments = [segment.to_original_subtitle_dict() for segment in segment_models]
+            if has_imported_transcript:
+                print("[Prepare Workflow] Using imported transcript segments. Skipping transcription.")
+            else:
+                print("[Prepare Workflow] Reusing cached Whisper transcript. Generate did not transcribe again.")
         else:
             audio_duration = self.chunking_service.probe_wav_duration(working_audio_path)
             print(f"[ASR] Working audio duration: {audio_duration:.2f}s")
