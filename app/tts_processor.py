@@ -9,17 +9,14 @@ import wave
 
 import requests
 from dotenv import load_dotenv
-from piper import PiperVoice
-from piper.config import SynthesisConfig
 from runtime_paths import app_path, bin_path, bundle_root, models_path, temp_path
-from vietnormalizer.normalizer import VietnameseNormalizer
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(os.path.dirname(BASE_DIR), ".env")
 if os.path.exists(ENV_PATH):
     load_dotenv(ENV_PATH)
 
 
-_PIPER_VOICE_CACHE: dict[str, PiperVoice] = {}
+_PIPER_VOICE_CACHE = {}
 _PIPER_VOICE_CACHE_LOCK = threading.Lock()
 _VIETNAMESE_NORMALIZER = None
 
@@ -43,7 +40,8 @@ def _resolve_piper_model_path(provider_voice: str) -> str:
     return models_path(normalized)
 
 
-def _get_cached_piper_voice(*, model_path: str, on_progress: callable = None) -> PiperVoice:
+def _get_cached_piper_voice(*, model_path: str, on_progress: callable = None):
+    from piper import PiperVoice
     model_key = os.path.abspath(str(model_path or "").strip())
     if not model_key:
         raise ValueError("model_path is required for Piper TTS")
@@ -110,7 +108,13 @@ def normalize_text_for_tts(text: str, *, provider: str = "piper") -> str:
 
     global _VIETNAMESE_NORMALIZER
     if _VIETNAMESE_NORMALIZER is None:
-        _VIETNAMESE_NORMALIZER = VietnameseNormalizer()
+        try:
+            from vietnormalizer.normalizer import VietnameseNormalizer
+            _VIETNAMESE_NORMALIZER = VietnameseNormalizer()
+        except Exception:
+            _VIETNAMESE_NORMALIZER = False
+    if _VIETNAMESE_NORMALIZER is False:
+        return value
     try:
         normalized = _VIETNAMESE_NORMALIZER.normalize(value)
         return " ".join(str(normalized or "").replace("\n", " ").split()).strip() or value
@@ -185,6 +189,7 @@ def piper_tts_to_wav_16k_mono(
     # Configure synthesis
     if on_progress:
         on_progress(f"Synthesizing speech (speed: {speed}x)...")
+    from piper.config import SynthesisConfig
     syn_config = SynthesisConfig(length_scale=1.0 / speed)
 
     # Synthesize to WAV

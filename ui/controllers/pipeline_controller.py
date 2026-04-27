@@ -154,9 +154,11 @@ class PipelineController:
             if step_id == "transcription":
                 self._hide_whisper_download_dialog()
             elif step_id == "prepare":
-                model_name = getattr(self.gui, "get_whisper_model_name", lambda: "base")()
-                if not self._whisper_model_cached(model_name):
-                    self._show_whisper_download_dialog()
+                from runtime_profile import is_remote_profile
+                if not is_remote_profile():
+                    model_name = getattr(self.gui, "get_whisper_model_name", lambda: "base")()
+                    if not self._whisper_model_cached(model_name):
+                        self._show_whisper_download_dialog()
 
     def on_prepare_workflow_finished(self, project_state_path, error):
         """Callback when the background PrepareWorkflow finishes completely."""
@@ -167,9 +169,14 @@ class PipelineController:
             self.gui.show_error("Prepare Failed", "Could not complete project preparation.", str(error))
             return
 
+        from runtime_profile import is_remote_profile
         if self.progress_dialog:
             self.progress_dialog.finish_step("prepare")
-            self.progress_dialog.finish_step("translation")
+            if is_remote_profile():
+                # Backend completed all prepare sub-steps in one batch.
+                for step in ["extraction", "separation", "transcription", "translation"]:
+                    if step in self.progress_dialog.steps:
+                        self.progress_dialog.finish_step(step)
 
         try:
             state = self.gui.project_service.load_project(project_state_path)

@@ -26,15 +26,15 @@ def join_root(*parts: str) -> str:
 
 def asset_path(*parts: str) -> str:
     return first_existing_path(
-        os.path.join(bundle_root(), "assets", *parts),
         join_root("assets", *parts),
+        os.path.join(bundle_root(), "assets", *parts),
     )
 
 
 def app_path(*parts: str) -> str:
     return first_existing_path(
-        os.path.join(bundle_root(), "app", *parts),
         join_root("app", *parts),
+        os.path.join(bundle_root(), "app", *parts),
     )
 
 
@@ -56,8 +56,8 @@ def bin_path(*parts: str) -> str:
 
 def models_path(*parts: str) -> str:
     return first_existing_path(
-        os.path.join(bundle_root(), "models", *parts),
         join_root("models", *parts),
+        os.path.join(bundle_root(), "models", *parts),
     )
 
 

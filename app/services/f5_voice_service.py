@@ -12,7 +12,6 @@ import time
 from datetime import datetime, timezone
 
 import requests
-from whisper_processor import transcribe_audio
 
 
 DEFAULT_F5_REPO_ROOT = r"D:\CodingTime\CapCap\f5_tts_voice"
@@ -34,6 +33,10 @@ class F5VoiceService:
         self._api_health_checked_at = 0.0
         self._api_health_ok = False
         os.makedirs(self.saved_audio_root, exist_ok=True)
+        try:
+            self.ensure_default_clones()
+        except Exception:
+            pass
 
     @staticmethod
     def is_f5_voice_token(token: str) -> bool:
@@ -166,6 +169,7 @@ class F5VoiceService:
         return None, payload, -1
 
     def list_saved_voices(self) -> list[dict]:
+        print(f"[F5Voice] data_root={self.data_root} registry={self.saved_registry_path}")
         payload = self._load_registry(self.saved_registry_path)
         voices = []
         for entry in list(payload.get("voices", []) or []):
@@ -174,12 +178,47 @@ class F5VoiceService:
             voice_id = str(entry.get("id", "")).strip()
             ref_audio_path = os.path.abspath(str(entry.get("ref_audio_path", "")).strip())
             if not voice_id or not ref_audio_path or not os.path.exists(ref_audio_path):
+                print(f"[F5Voice] Skip invalid entry: id={voice_id} exists={os.path.exists(ref_audio_path)}")
                 continue
             item = dict(entry)
             item["ref_audio_path"] = ref_audio_path
             voices.append(item)
+        print(f"[F5Voice] saved_voices={len(voices)}")
         voices.sort(key=lambda item: (str(item.get("name", "")).strip().lower(), str(item.get("created_at", ""))))
         return voices
+
+    def get_default_clone_samples(self) -> list[dict]:
+        base_samples = [
+            {
+                "name": "Sample Male",
+                "ref_audio_path": os.path.join(self.workspace_root, "f5_tts_voice", "ref.wav"),
+                "ref_text": "Xin chào, đây là giọng nói mẫu cho bản sao tiếng Việt.",
+            },
+        ]
+        return [
+            s for s in base_samples
+            if os.path.exists(str(s.get("ref_audio_path", "")).strip())
+        ]
+
+    def ensure_default_clones(self) -> int:
+        existing = self.list_saved_voices()
+        if existing:
+            return 0
+        samples = self.get_default_clone_samples()
+        if not samples:
+            return 0
+        count = 0
+        for sample in samples:
+            try:
+                self.save_clone(
+                    name=str(sample.get("name", "")).strip(),
+                    ref_audio_path=str(sample.get("ref_audio_path", "")).strip(),
+                    ref_text=str(sample.get("ref_text", "")).strip(),
+                )
+                count += 1
+            except Exception:
+                pass
+        return count
 
     def save_clone(self, *, name: str, ref_audio_path: str, ref_text: str = "") -> dict:
         normalized_audio = os.path.abspath(str(ref_audio_path or "").strip())
@@ -288,18 +327,10 @@ class F5VoiceService:
         if ref_text:
             return entry
 
-        ref_audio_path = str(entry.get("ref_audio_path", "")).strip()
-        if not ref_audio_path or not os.path.exists(ref_audio_path):
-            raise FileNotFoundError(f"Reference audio not found: {ref_audio_path}")
-
-        segments = transcribe_audio(ref_audio_path, "base", language="vi", task="transcribe")
-        transcribed_text = " ".join(str((seg or {}).get("text", "")).strip() for seg in list(segments or [])).strip()
-        if not transcribed_text:
-            raise RuntimeError("Whisper could not transcribe the reference audio for F5 voice cloning.")
-
-        entry["ref_text"] = transcribed_text
-        self._update_voice_entry(scope=str(entry.get("scope", "")).strip().lower(), voice_id=str(entry.get("id", "")).strip(), entry=entry)
-        return entry
+        raise ValueError(
+            "Reference text is required for F5 voice cloning. "
+            "Please enter the reference text in the UI."
+        )
 
     def _synthesize_batch_via_api(self, *, entry: dict, request_jobs: list[dict], on_progress: callable | None = None) -> list[str]:
         base_url = self.f5_api_base_url()

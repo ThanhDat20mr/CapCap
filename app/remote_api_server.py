@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 os.environ.setdefault("CAPCAP_RUNTIME_PROFILE", "local")
 
 from remote_api import remote_api_token
-from services import F5VoiceService
+from services import F5VoiceService, WorkflowRuntime
 from translation.srt_utils import to_srt
 from translator import (
     rewrite_translated_segments,
@@ -75,6 +75,15 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/v1/tts/synthesize":
                 _json_response(self, 200, self._handle_tts_synthesize(payload))
+                return
+            if self.path == "/v1/prepare":
+                _json_response(self, 200, self._handle_prepare(payload))
+                return
+            if self.path == "/v1/voice":
+                _json_response(self, 200, self._handle_voice(payload))
+                return
+            if self.path == "/v1/export":
+                _json_response(self, 200, self._handle_export(payload))
                 return
             _json_response(self, 404, {"ok": False, "error": "Not found"})
         except PermissionError as exc:
@@ -208,6 +217,67 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
                 os.remove(temp_wav_path)
             except Exception:
                 pass
+
+    def _handle_prepare(self, payload: dict) -> dict:
+        video_path = str(payload.get("video_path", "") or "").strip()
+        if not video_path or not os.path.exists(video_path):
+            raise ValueError("video_path required and must exist.")
+        runtime = WorkflowRuntime(WORKSPACE_ROOT)
+        state = runtime.run_prepare(
+            video_path,
+            source_language=str(payload.get("source_language", "auto") or "auto"),
+            target_language=str(payload.get("target_language", "vi") or "vi"),
+            mode=str(payload.get("mode", "subtitle") or "subtitle"),
+            audio_handling_mode=str(payload.get("audio_handling_mode", "fast") or "fast"),
+            translator_ai=bool(payload.get("translator_ai", True)),
+            optimize_subtitles=bool(payload.get("optimize_subtitles", False)),
+            translator_style=str(payload.get("translator_style", "") or ""),
+            whisper_model_name=str(payload.get("whisper_model_name", "base") or "base"),
+        )
+        return {"ok": True, "project_state_path": runtime.project_state_path(state)}
+
+    def _handle_voice(self, payload: dict) -> dict:
+        runtime = WorkflowRuntime(WORKSPACE_ROOT)
+        result = runtime.run_voice(
+            segments=list(payload.get("segments") or []),
+            output_dir=str(payload.get("output_dir", "") or ""),
+            background_path=str(payload.get("background_path", "") or ""),
+            audio_handling_mode=str(payload.get("audio_handling_mode", "fast") or "fast"),
+            voice_name=str(payload.get("voice_name", "vi_VN-vais1000-medium") or "vi_VN-vais1000-medium"),
+            voice_speed=float(payload.get("voice_speed", 1.0) or 1.0),
+            timing_sync_mode=str(payload.get("timing_sync_mode", "off") or "off"),
+            voice_gain_db=float(payload.get("voice_gain_db", 0.0) or 0.0),
+            bg_gain_db=float(payload.get("bg_gain_db", 0.0) or 0.0),
+            ducking_amount_db=float(payload.get("ducking_amount_db", -6.0) or -6.0),
+            project_state_path=str(payload.get("project_state_path", "") or ""),
+            project_temp_dir=str(payload.get("project_temp_dir", "") or ""),
+            ai_rewrite_dubbing=bool(payload.get("ai_rewrite_dubbing", False)),
+            dubbing_style_instruction=str(payload.get("dubbing_style_instruction", "") or ""),
+            source_language=str(payload.get("source_language", "auto") or "auto"),
+        )
+        return {"ok": True, "result": result}
+
+    def _handle_export(self, payload: dict) -> dict:
+        runtime = WorkflowRuntime(WORKSPACE_ROOT)
+        output = runtime.run_export(
+            video_path=str(payload.get("video_path", "") or ""),
+            output_path=str(payload.get("output_path", "") or ""),
+            mode=str(payload.get("mode", "subtitle") or "subtitle"),
+            srt_path=str(payload.get("srt_path", "") or ""),
+            ass_path=str(payload.get("ass_path", "") or ""),
+            audio_path=str(payload.get("audio_path", "") or ""),
+            subtitle_style=dict(payload.get("subtitle_style") or {}),
+            output_quality=str(payload.get("output_quality", "source") or "source"),
+            output_fps=str(payload.get("output_fps", "source") or "source"),
+            output_ratio=str(payload.get("output_ratio", "source") or "source"),
+            output_scale_mode=str(payload.get("output_scale_mode", "fit") or "fit"),
+            output_fill_focus_x=float(payload.get("output_fill_focus_x", 0.5) or 0.5),
+            output_fill_focus_y=float(payload.get("output_fill_focus_y", 0.5) or 0.5),
+            video_filter_state=dict(payload.get("video_filter_state") or {}),
+            project_state_path=str(payload.get("project_state_path", "") or ""),
+            project_temp_dir=str(payload.get("project_temp_dir", "") or ""),
+        )
+        return {"ok": True, "output_path": output}
 
 
 def main() -> None:

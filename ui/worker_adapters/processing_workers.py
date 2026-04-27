@@ -11,7 +11,7 @@ if APP_PATH not in sys.path:
     sys.path.append(APP_PATH)
 
 from runtime_paths import bin_path
-from services import EngineRuntime, ResourceDownloadService, WorkflowRuntime
+from services import EngineRuntime, ResourceDownloadService
 
 
 class VocalSeparationWorker(QThread):
@@ -239,20 +239,23 @@ class PrepareWorkflowWorker(QThread):
 
     def run(self):
         try:
-            runtime = WorkflowRuntime(self.workspace_root)
-            state = runtime.run_prepare(
-                self.video_path,
-                source_language=self.source_language,
-                target_language="vi",
-                mode=self.mode,
-                audio_handling_mode=self.audio_handling_mode,
-                translator_ai=self.translator_ai,
-                optimize_subtitles=self.optimize_subtitles,
-                translator_style=self.translator_style,
-                whisper_model_name=self.whisper_model_name,
-                step_callback=lambda s: self.step_started.emit(s)
+            from remote_api import remote_api_post
+            response = remote_api_post(
+                "/v1/prepare",
+                {
+                    "video_path": self.video_path,
+                    "source_language": self.source_language,
+                    "target_language": "vi",
+                    "mode": self.mode,
+                    "audio_handling_mode": self.audio_handling_mode,
+                    "translator_ai": self.translator_ai,
+                    "optimize_subtitles": self.optimize_subtitles,
+                    "translator_style": self.translator_style,
+                    "whisper_model_name": self.whisper_model_name,
+                },
+                timeout=3600,
             )
-            self.finished.emit(runtime.project_state_path(state), "")
+            self.finished.emit(str(response.get("project_state_path", "")), "")
         except Exception as exc:
             self.finished.emit("", str(exc))
 
@@ -282,28 +285,32 @@ class VoiceOverWorker(QThread):
 
     def run(self):
         try:
+            from remote_api import remote_api_post
             print(f"[VoiceOverWorker DEBUG] Starting with voice_name='{self.voice_name}'")
             self.progress.emit(f"[VoiceOverWorker DEBUG] voice_name='{self.voice_name}'")
             
-            runtime = WorkflowRuntime(self.workspace_root)
-            result = runtime.run_voice(
-                segments=self.segments,
-                output_dir=self.output_dir,
-                background_path=self.background_path,
-                audio_handling_mode=self.audio_handling_mode,
-                voice_name=self.voice_name,
-                voice_speed=self.voice_speed,
-                timing_sync_mode=self.timing_sync_mode,
-                voice_gain_db=self.voice_gain_db,
-                bg_gain_db=self.bg_gain_db,
-                ducking_amount_db=self.ducking_amount_db,
-                project_state_path=self.project_state_path,
-                project_temp_dir=self.project_temp_dir,
-                ai_rewrite_dubbing=self.ai_rewrite_dubbing,
-                dubbing_style_instruction=self.dubbing_style_instruction,
-                source_language=self.source_language,
-                on_progress=self.progress.emit,  # Pass callback
+            response = remote_api_post(
+                "/v1/voice",
+                {
+                    "segments": self.segments,
+                    "output_dir": self.output_dir,
+                    "background_path": self.background_path,
+                    "audio_handling_mode": self.audio_handling_mode,
+                    "voice_name": self.voice_name,
+                    "voice_speed": self.voice_speed,
+                    "timing_sync_mode": self.timing_sync_mode,
+                    "voice_gain_db": self.voice_gain_db,
+                    "bg_gain_db": self.bg_gain_db,
+                    "ducking_amount_db": self.ducking_amount_db,
+                    "project_state_path": self.project_state_path,
+                    "project_temp_dir": self.project_temp_dir,
+                    "ai_rewrite_dubbing": self.ai_rewrite_dubbing,
+                    "dubbing_style_instruction": self.dubbing_style_instruction,
+                    "source_language": self.source_language,
+                },
+                timeout=3600,
             )
+            result = response.get("result", {})
             self.finished.emit(
                 result.get("voice_track", ""),
                 result.get("mixed_path", ""),
@@ -341,27 +348,32 @@ class FinalExportWorker(QThread):
 
     def run(self):
         try:
-            runtime = WorkflowRuntime(self.workspace_root)
-            output = runtime.run_export(
-                video_path=self.video_path,
-                output_path=self.output_path,
-                mode=self.mode,
-                srt_path=self.srt_path,
-                ass_path=self.ass_path,
-                audio_path=self.audio_path,
-                subtitle_style=self.subtitle_style,
-                output_quality=self.output_quality,
-                output_fps=self.output_fps,
-                output_ratio=self.output_ratio,
-                output_scale_mode=self.output_scale_mode,
-                output_fill_focus_x=self.output_fill_focus_x,
-                output_fill_focus_y=self.output_fill_focus_y,
-                video_filter_state=self.video_filter_state,
-                project_state_path=self.project_state_path,
-                project_temp_dir=self.project_temp_dir,
-                on_progress=self.progress.emit,
+            from remote_api import remote_api_post
+            self.progress.emit(0, "Sending export request to backend...")
+            response = remote_api_post(
+                "/v1/export",
+                {
+                    "video_path": self.video_path,
+                    "output_path": self.output_path,
+                    "mode": self.mode,
+                    "srt_path": self.srt_path,
+                    "ass_path": self.ass_path,
+                    "audio_path": self.audio_path,
+                    "subtitle_style": self.subtitle_style,
+                    "output_quality": self.output_quality,
+                    "output_fps": self.output_fps,
+                    "output_ratio": self.output_ratio,
+                    "output_scale_mode": self.output_scale_mode,
+                    "output_fill_focus_x": self.output_fill_focus_x,
+                    "output_fill_focus_y": self.output_fill_focus_y,
+                    "video_filter_state": self.video_filter_state,
+                    "project_state_path": self.project_state_path,
+                    "project_temp_dir": self.project_temp_dir,
+                },
+                timeout=3600,
             )
-            self.finished.emit(output, "")
+            self.progress.emit(100, "Export complete.")
+            self.finished.emit(str(response.get("output_path", "")), "")
         except Exception as exc:
             self.finished.emit("", str(exc))
 

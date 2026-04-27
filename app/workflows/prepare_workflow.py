@@ -2,7 +2,7 @@ import os
 import time
 
 from runtime_profile import is_remote_profile
-from services import AsrMergeService, ChunkingService, EngineRuntime, ProjectService, SegmentRegroupService, SegmentService
+from services import ChunkingService, EngineRuntime, ProjectService, SegmentRegroupService, SegmentService
 
 
 class PrepareWorkflow:
@@ -18,7 +18,6 @@ class PrepareWorkflow:
         self.project_service = ProjectService(workspace_root)
         self.segment_service = SegmentService()
         self.chunking_service = ChunkingService(workspace_root)
-        self.asr_merge_service = AsrMergeService()
         self.segment_regroup_service = SegmentRegroupService()
         self.engine_runtime = EngineRuntime()
 
@@ -58,7 +57,9 @@ class PrepareWorkflow:
             [chunk.to_dict() for chunk in chunks],
         )
         asr_started = time.perf_counter()
-        chunk_results = self.asr_merge_service.transcribe_chunks(
+        from services import AsrMergeService
+        asr_merge_service = AsrMergeService()
+        chunk_results = asr_merge_service.transcribe_chunks(
             chunks,
             whisper_adapter=self.engine_runtime.whisper,
             model_path=model_path,
@@ -84,7 +85,7 @@ class PrepareWorkflow:
             ],
         )
         merge_started = time.perf_counter()
-        merged_segments = self.asr_merge_service.merge_chunk_results(chunk_results)
+        merged_segments = asr_merge_service.merge_chunk_results(chunk_results)
         merge_elapsed = time.perf_counter() - merge_started
         self.project_service.save_json_artifact(
             project_state,

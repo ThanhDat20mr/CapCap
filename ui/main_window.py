@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
                              QHBoxLayout, QPushButton, QLabel, QLineEdit,
                              QFileDialog, QCheckBox, QTextEdit, QComboBox,
                              QGroupBox, QSlider, QFrame, QProgressBar, QMessageBox,
-                             QScrollArea,
+                             QScrollArea, QGridLayout,
                              QSpinBox, QColorDialog, QDoubleSpinBox, QTabWidget, QDialog, QSizePolicy, QInputDialog,
                              QRadioButton)
 from PySide6.QtCore import Qt, QUrl, QTimer, QSettings, QSize, QEvent
@@ -839,6 +839,9 @@ class VideoTranslatorGUI(QMainWindow):
                 self.preview_voice_btn.setVisible(True)
                 ready = bool(self.f5_saved_voice_combo.currentData()) if self._current_f5_clone_mode() == "saved" and hasattr(self, "f5_saved_voice_combo") else bool(self._current_f5_ref_audio_path())
                 self.preview_voice_btn.setEnabled(ready)
+            if hasattr(self, "save_preview_voice_btn"):
+                self.save_preview_voice_btn.setVisible(True)
+                self.save_preview_voice_btn.setEnabled(self._current_f5_clone_mode() == "new" and bool(self._current_f5_ref_audio_path()))
             if self._current_f5_clone_mode() == "saved":
                 if total_entries <= 0:
                     self.voice_preview_meta_label.setText("No saved F5 clone voices yet.")
@@ -853,6 +856,8 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "preview_voice_btn"):
             self.preview_voice_btn.setVisible(True)
             self.preview_voice_btn.setEnabled(total_entries > 0)
+        if hasattr(self, "save_preview_voice_btn"):
+            self.save_preview_voice_btn.setVisible(False)
         if total_entries <= 0:
             self.voice_preview_meta_label.setText("No voices are available in the catalog yet.")
             return
@@ -941,9 +946,18 @@ class VideoTranslatorGUI(QMainWindow):
         ref_audio_path = self._current_f5_ref_audio_path()
         if not ref_audio_path:
             return ""
+        ref_text = self._current_f5_ref_text()
+        if not ref_text:
+            QMessageBox.warning(
+                self,
+                "Missing Reference Text",
+                "Reference text is required for Detail Voice.\n\n"
+                "Please enter what the speaker says in the reference audio clip.",
+            )
+            return ""
         payload = self.f5_voice_service.create_temporary_clone(
             ref_audio_path=ref_audio_path,
-            ref_text=self._current_f5_ref_text(),
+            ref_text=ref_text,
             display_name=self._current_f5_clone_name(),
         )
         return str(payload.get("token", "")).strip()
@@ -1606,13 +1620,13 @@ class VideoTranslatorGUI(QMainWindow):
         service = self._resource_service()
         missing: list[tuple[str, str]] = []
 
-        if include_whisper:
+        if include_whisper and not is_remote_profile():
             model_name = self.get_whisper_model_name()
             resource_id = f"whisper:{model_name}"
             if not service.is_resource_installed(resource_id):
                 missing.append((resource_id, f"Whisper {model_name.title()} model"))
 
-        if include_voice:
+        if include_voice and not is_remote_profile():
             voice_name = self.get_active_voice_name()
             if voice_name and not str(voice_name).startswith("edge:") and not str(voice_name).startswith("f5:"):
                 resource_id = f"voice:{voice_name}"
@@ -5127,6 +5141,88 @@ class VideoTranslatorGUI(QMainWindow):
             self.log(f"[Voice Preview] playing generated sample: {audio_path}")
         except Exception as exc:
             self.show_error("Voice Preview Failed", "Could not play the generated preview audio.", str(exc))
+
+    def save_preview_as_clone_voice(self):
+        if not self._is_detail_voice_selected():
+            QMessageBox.warning(self, "Save Clone Voice", "Detail Voice mode must be selected to save clone voices.")
+            return
+
+        ref_audio_path = self._current_f5_ref_audio_path()
+        if not ref_audio_path or not os.path.exists(ref_audio_path):
+            QMessageBox.warning(self, "Save Clone Voice", "Please select a reference audio file first.")
+            return
+
+        ref_text = self._current_f5_ref_text()
+        if not ref_text:
+            QMessageBox.warning(
+                self,
+                "Missing Reference Text",
+                "Reference text is required to save a clone voice.\n\n"
+                "Please enter what the speaker says in the reference audio clip.",
+            )
+            return
+
+        default_name = os.path.splitext(os.path.basename(ref_audio_path))[0]
+
+        input_dialog = QDialog(self)
+        input_dialog.setWindowTitle("Save Clone Voice")
+        input_dialog.setMinimumWidth(400)
+        input_dialog.setStyleSheet(
+            """
+            QDialog { background-color: #0f1724; }
+            QLabel { color: #d7e3f4; background-color: transparent; }
+            QLineEdit {
+                background-color: #1a2a3d; color: #f8fbff; border: 1px solid #34506f;
+                border-radius: 8px; padding: 8px; selection-background-color: #34506f;
+            }
+            QPushButton {
+                background-color: #22344d; color: #f8fbff; border: 1px solid #34506f;
+                border-radius: 10px; padding: 8px 16px; font-weight: 600;
+            }
+            QPushButton:hover { background-color: #29405d; }
+            """
+        )
+        layout = QVBoxLayout(input_dialog)
+
+        label = QLabel("Enter a name for this clone voice:", input_dialog)
+        layout.addWidget(label)
+
+        name_edit = QLineEdit(default_name, input_dialog)
+        layout.addWidget(name_edit)
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        cancel_btn = QPushButton("Cancel", input_dialog)
+        cancel_btn.clicked.connect(input_dialog.reject)
+        button_layout.addWidget(cancel_btn)
+
+        save_btn = QPushButton("Save", input_dialog)
+        save_btn.setDefault(True)
+        save_btn.clicked.connect(input_dialog.accept)
+        button_layout.addWidget(save_btn)
+
+        layout.addLayout(button_layout)
+
+        if not input_dialog.exec():
+            return
+
+        name = name_edit.text()
+        if not str(name or "").strip():
+            return
+
+        try:
+            entry = self.f5_voice_service.save_clone(
+                name=str(name).strip(),
+                ref_audio_path=ref_audio_path,
+                ref_text=str(getattr(self, "f5_ref_text_edit", None).toPlainText() or "").strip(),
+            )
+            QMessageBox.information(self, "Save Clone Voice", f"Clone voice saved successfully!\n\nName: {entry.get('name', '-')}\nID: {entry.get('id', '-')}")
+            self.f5_saved_voice_entries = self.f5_voice_service.list_saved_voices()
+            self.refresh_f5_saved_voice_list()
+            self.log(f"[F5] Clone voice saved: {entry.get('name', '-')} ({entry.get('id', '-')})")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Clone Voice", f"Failed to save clone voice:\n\n{str(exc)}")
 
     def preview_segment_audio(self, index: int):
         if index < 0 or index >= len(self.current_translated_segments or self.current_segments):

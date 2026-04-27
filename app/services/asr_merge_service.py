@@ -8,7 +8,6 @@ import re
 from difflib import SequenceMatcher
 
 from core.models import AudioChunk
-from whisper_processor import load_whisper_model, transcribe_audio_with_model
 
 
 _ASR_WORKER_MODEL = None
@@ -16,6 +15,7 @@ _ASR_WORKER_MODEL = None
 
 def _init_asr_worker(model_path: str) -> None:
     global _ASR_WORKER_MODEL
+    from whisper_processor import load_whisper_model
     _ASR_WORKER_MODEL = load_whisper_model(model_path)
 
 
@@ -23,6 +23,7 @@ def _transcribe_chunk_job(audio_path: str, language: str) -> list[dict]:
     global _ASR_WORKER_MODEL
     if _ASR_WORKER_MODEL is None:
         raise RuntimeError("ASR worker model is not initialized.")
+    from whisper_processor import transcribe_audio_with_model
     return transcribe_audio_with_model(_ASR_WORKER_MODEL, audio_path, language=language)
 
 

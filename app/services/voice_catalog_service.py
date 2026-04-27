@@ -4,6 +4,7 @@ import json
 import os
 
 from runtime_paths import app_path, models_path
+from runtime_profile import is_remote_profile
 
 
 class VoiceCatalogService:
@@ -56,6 +57,8 @@ class VoiceCatalogService:
             payload = self._read_payload()
             voices = list(payload.get("voices", []) or [])
             piper_model_ids = self._iter_piper_model_ids()
+            is_remote = is_remote_profile()
+            print(f"[VoiceCatalog] catalog_path={self.catalog_path} voices_in_file={len(voices)} piper_models={len(piper_model_ids)} is_remote={is_remote}")
 
             normalized_voices: list[dict] = []
             for voice in voices:
@@ -67,12 +70,16 @@ class VoiceCatalogService:
                 if provider not in {"piper", "edge"}:
                     continue
                 voice_id = str(voice.get("id", "")).strip()
-                if provider == "piper" and voice_id and voice_id not in piper_model_ids:
+                # In remote mode the backend API owns the models, so skip the local file check.
+                if not is_remote and provider == "piper" and voice_id and voice_id not in piper_model_ids:
+                    print(f"[VoiceCatalog] Skip piper voice (no model): {voice_id}")
                     continue
                 if provider == "piper" and not voice_id:
                     continue
                 normalized_voices.append(self._normalize_loaded_voice(voice))
 
+            print(f"[VoiceCatalog] loaded={len(normalized_voices)}")
             return normalized_voices
-        except Exception:
+        except Exception as exc:
+            print(f"[VoiceCatalog] ERROR loading catalog: {exc}")
             return []

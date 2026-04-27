@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from runtime_paths import app_path
 from services import EngineRuntime, F5VoiceService, ProjectService
-from tts_processor import normalize_text_for_tts
 
 
 class VoiceWorkflow:
@@ -171,6 +170,7 @@ class VoiceWorkflow:
         return len([token for token in re.split(r"\s+", str(text or "").strip()) if token])
 
     def _normalized_tts_text(self, text: str, *, voice_provider: str = "") -> str:
+        from tts_processor import normalize_text_for_tts
         return " ".join(
             str(normalize_text_for_tts(text, provider=voice_provider or "piper") or "").replace("\n", " ").split()
         ).strip()
