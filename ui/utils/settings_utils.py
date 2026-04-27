@@ -1,4 +1,5 @@
 import json
+import os
 
 
 def save_user_settings(gui):
@@ -46,8 +47,6 @@ def save_user_settings(gui):
         s.setValue("f5_ref_text", gui.f5_ref_text_edit.toPlainText())
     if hasattr(gui, "f5_clone_name_edit"):
         s.setValue("f5_clone_name", gui.f5_clone_name_edit.text())
-    if hasattr(gui, "f5_save_clone_cb"):
-        s.setValue("f5_save_clone", gui.f5_save_clone_cb.isChecked())
     s.setValue("premium_voice_name", "")
     s.setValue("premium_voice_value", "")
     s.setValue("voice_tier", "free")
@@ -171,8 +170,6 @@ def load_user_settings(gui):
         gui.f5_ref_text_edit.setPlainText(str(s.value("f5_ref_text", gui.f5_ref_text_edit.toPlainText())))
     if hasattr(gui, "f5_clone_name_edit"):
         gui.f5_clone_name_edit.setText(s.value("f5_clone_name", gui.f5_clone_name_edit.text()))
-    if hasattr(gui, "f5_save_clone_cb"):
-        gui.f5_save_clone_cb.setChecked(str(s.value("f5_save_clone", "false")).lower() == "true")
     if hasattr(gui, "refresh_f5_saved_voice_list"):
         gui.refresh_f5_saved_voice_list(selected_id=str(s.value("f5_saved_voice_id", "")))
     if hasattr(gui, "use_premium_voice_radio"):
@@ -255,4 +252,15 @@ def load_user_settings(gui):
     gui.on_subtitle_preset_changed()
     gui.update_subtitle_preview_style()
     gui.on_output_mode_changed(gui.output_mode_combo.currentText())
+
+    # Clear stale audio/project cache if no video is selected
+    video_path = gui.video_path_edit.text().strip() if hasattr(gui, "video_path_edit") else ""
+    if not video_path or not os.path.exists(video_path):
+        if hasattr(gui, "audio_source_edit"):
+            gui.audio_source_edit.clear()
+        if hasattr(gui, "current_project_state"):
+            gui.current_project_state = None
+        if hasattr(gui, "processed_artifacts"):
+            gui.processed_artifacts.clear()
+
     gui.refresh_ui_state()

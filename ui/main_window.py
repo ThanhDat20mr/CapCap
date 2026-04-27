@@ -987,17 +987,6 @@ class VideoTranslatorGUI(QMainWindow):
         ref_audio_path = self._current_f5_ref_audio_path()
         if not ref_audio_path:
             return ""
-        ref_text = self._current_f5_ref_text()
-        clone_name = self._current_f5_clone_name()
-        if persist_new_clone and bool(getattr(self, "f5_save_clone_cb", None) and self.f5_save_clone_cb.isChecked()):
-            saved_entry = self.f5_voice_service.save_clone(name=clone_name, ref_audio_path=ref_audio_path, ref_text=ref_text)
-            saved_id = str(saved_entry.get("id", "")).strip()
-            self.refresh_f5_saved_voice_list(selected_id=saved_id)
-            if hasattr(self, "f5_clone_mode_combo"):
-                index = self.f5_clone_mode_combo.findData("saved")
-                if index >= 0:
-                    self.f5_clone_mode_combo.setCurrentIndex(index)
-            return f"f5:clone:{saved_id}" if saved_id else ""
         return self._build_unsaved_f5_voice_token()
 
     def _sync_voice_engine_ui(self):
@@ -1999,8 +1988,10 @@ class VideoTranslatorGUI(QMainWindow):
 
     def refresh_timeline_waveform(self):
         if not hasattr(self, "timeline"):
+            print("[Timeline] no timeline widget")
             return
         audio_path = self.resolve_timeline_audio_visualization_path()
+        print(f"[Timeline] refresh_waveform audio_path={audio_path} exists={os.path.exists(audio_path) if audio_path else False}")
         if not audio_path or not os.path.exists(audio_path):
             self._timeline_waveform_cache_key = None
             self._timeline_waveform_samples = []
@@ -2079,11 +2070,14 @@ class VideoTranslatorGUI(QMainWindow):
                 self._timeline_waveform_cache_key = cache_key
                 self._timeline_waveform_samples = waveform
                 self._timeline_waveform_duration_s = duration_s
-            except Exception:
+                print(f"[Timeline] waveform generated: samples={len(waveform)} duration={duration_s:.1f}s")
+            except Exception as exc:
+                print(f"[Timeline] waveform generation failed: {exc}")
                 self._timeline_waveform_cache_key = cache_key
                 self._timeline_waveform_samples = []
                 self._timeline_waveform_duration_s = 0.0
 
+        print(f"[Timeline] set_waveform_data: samples={len(self._timeline_waveform_samples)} duration={self._timeline_waveform_duration_s:.1f}s")
         self.timeline.set_waveform_data(self._timeline_waveform_samples, self._timeline_waveform_duration_s)
 
     def schedule_timeline_visual_refresh(self, *, waveform: bool = True, thumbnails: bool = True, delay_ms: int = 40):
@@ -4121,12 +4115,16 @@ class VideoTranslatorGUI(QMainWindow):
             widget = item.widget()
             child_layout = item.layout()
             if widget:
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
             elif child_layout:
                 while child_layout.count():
                     child_item = child_layout.takeAt(0)
                     child_widget = child_item.widget()
                     if child_widget:
+                        child_widget.hide()
+                        child_widget.setParent(None)
                         child_widget.deleteLater()
 
     def toggle_original_subtitle_visibility(self):
@@ -5720,8 +5718,6 @@ class VideoTranslatorGUI(QMainWindow):
             self.f5_clone_name_edit.setEnabled(generated_mode and mode in ("voice", "both") and self._is_detail_voice_selected() and self._current_f5_clone_mode() == "new")
         if hasattr(self, "f5_ref_text_edit"):
             self.f5_ref_text_edit.setEnabled(generated_mode and mode in ("voice", "both") and self._is_detail_voice_selected() and self._current_f5_clone_mode() == "new")
-        if hasattr(self, "f5_save_clone_cb"):
-            self.f5_save_clone_cb.setEnabled(generated_mode and mode in ("voice", "both") and self._is_detail_voice_selected() and self._current_f5_clone_mode() == "new")
         if hasattr(self, "premium_voice_combo"):
             self.premium_voice_combo.setEnabled(False)
         if hasattr(self, "bg_music_edit"):
@@ -5816,6 +5812,7 @@ class VideoTranslatorGUI(QMainWindow):
         file_basename = os.path.splitext(os.path.basename(v_path))[0]
         a_path = os.path.join(target_dir, file_basename + ".wav")
         
+        print(f"[Extraction] start: video={v_path} audio={a_path}")
         self.progress_bar.setValue(10)
         self.update_project_step("extract_audio", "running")
         self.extraction_thread = ExtractionWorker(v_path, a_path)
@@ -5823,6 +5820,7 @@ class VideoTranslatorGUI(QMainWindow):
         self.extraction_thread.start()
 
     def on_extraction_finished(self, success, path):
+        print(f"[Extraction] finished: success={success} path={path}")
         self.progress_bar.setValue(30)
         self.extract_btn.setEnabled(True)
         if success:
@@ -5831,7 +5829,8 @@ class VideoTranslatorGUI(QMainWindow):
             self.processed_artifacts["audio_extracted"] = path
             self.update_project_artifact("extracted_audio", path)
             self.update_project_step("extract_audio", "done")
-            QMessageBox.information(self, "Success", "Audio extraction completed!")
+            self.log(f"[Audio] Original audio extracted: {path}")
+            self.schedule_timeline_visual_refresh(waveform=True, thumbnails=False)
         else:
             self.update_project_step("extract_audio", "failed")
             self.show_error("Error", "Extraction failed.", str(path))
@@ -7021,6 +7020,13 @@ class VideoTranslatorGUI(QMainWindow):
         self.live_preview_segments = []
         self.live_preview_editor_name = ""
         self._live_preview_signature = None
+        self._timeline_waveform_cache_key = None
+        self._timeline_waveform_samples = []
+        self._timeline_waveform_duration_s = 0.0
+        self._timeline_video_thumb_cache_key = None
+        self._timeline_video_thumbnails = []
+        self._pending_timeline_waveform_refresh = False
+        self._pending_timeline_thumbnail_refresh = False
         if hasattr(self, "transcript_text"):
             self.transcript_text.clear()
         if hasattr(self, "translated_text"):
@@ -7031,11 +7037,44 @@ class VideoTranslatorGUI(QMainWindow):
             self.bg_music_edit.clear()
         if hasattr(self, "mixed_audio_edit"):
             self.mixed_audio_edit.clear()
+        if hasattr(self, "video_path_edit"):
+            self.video_path_edit.clear()
+        if hasattr(self, "f5_ref_audio_edit"):
+            self.f5_ref_audio_edit.clear()
+        if hasattr(self, "f5_ref_text_edit"):
+            self.f5_ref_text_edit.clear()
+        if hasattr(self, "f5_clone_name_edit"):
+            self.f5_clone_name_edit.clear()
         if hasattr(self, "timeline"):
             self.timeline.set_segments([])
+            self.timeline.set_duration(0)
+            self.timeline.set_waveform_data([], 0.0)
+            self.timeline.set_video_thumbnails([])
             self.timeline.set_playing(False)
+        if hasattr(self, "media_player"):
+            try:
+                self.media_player.clear_subtitle()
+                self.media_player.stop()
+                from PySide6.QtCore import QUrl
+                self.media_player.setSource(QUrl())
+            except Exception:
+                pass
+        if hasattr(self, "video_view"):
+            try:
+                self.video_view.clear_blur_region()
+            except Exception:
+                pass
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.setValue(0)
+        # Force-clear segment editor directly
+        self._clear_segment_editor_rows()
+        self._segment_editor_rows = []
+        self._selected_segment_index = -1
         self.sync_segment_editor_rows()
+        self.update_progress_checklist()
         self.refresh_ui_state()
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
 
     def _has_cleanable_project_data(self) -> bool:
         project_root = str(getattr(getattr(self, "current_project_state", None), "project_root", "") or "").strip()

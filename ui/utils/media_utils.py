@@ -175,6 +175,11 @@ def browse_video(gui):
     gui.current_project_state = gui.ensure_current_project()
     gui.load_project_context(gui.current_project_state)
 
+    # Auto-extract original audio when video is selected
+    if hasattr(gui, "run_extraction"):
+        print(f"[BrowseVideo] queue auto-extraction for {file_path}")
+        QTimer.singleShot(50, gui.run_extraction)
+
     try:
         gui.media_player.pause()
     except Exception:

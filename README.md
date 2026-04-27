@@ -15,7 +15,7 @@ The current editor combines workflow controls, subtitle style presets, a centere
   - `subtitle only`
   - `voice only`
   - `subtitle + voice`
-- Speech-to-text with `faster-whisper`
+- Speech-to-text with `faster-whisper` (local or remote backend)
 - Subtitle translation and rewrite with local / remote AI support
 - AI polish and subtitle rewrite tools for timing-friendly phrasing
 - Vietnamese voice generation with `Piper`, `edge-tts`, and `F5` voice cloning
@@ -25,7 +25,7 @@ The current editor combines workflow controls, subtitle style presets, a centere
 - Audio mix and export with `FFmpeg`
 - Live video preview with subtitle overlay
 - Timeline editing for subtitle, audio, and video alignment
-- Remote mode for offloading heavy `Whisper + AI` work to another PC
+- **Remote mode** for offloading ALL heavy processing (Whisper + AI + TTS + Export) to a backend API server
 
 ## Editor UI / Tools
 
@@ -78,6 +78,32 @@ Current editor interactions:
 - `requests` for remote integrations
 - `PyInstaller` for packaging
 
+## Architecture
+
+### Local Mode (Full Desktop)
+Everything runs on the local machine. Requires all heavy ML dependencies (whisper, demucs, piper, F5-TTS, AI models).
+
+### Remote Mode (Thin Client + Backend API)
+The remote GUI is a thin client. All heavy processing runs on a backend API server:
+
+- **Remote GUI** (`CapCap.remote.spec`) — bundles only UI + FFmpeg + MPV. No heavy ML models.
+- **Backend API** (`app/remote_api_server.py`) — handles Whisper, translation, TTS, and export workflows.
+
+Backend endpoints:
+- `POST /v1/prepare` — runs PrepareWorkflow (extract, transcribe, translate)
+- `POST /v1/voice` — runs VoiceWorkflow (TTS synthesis + audio mix)
+- `POST /v1/export` — runs ExportWorkflow (video mux)
+- `POST /v1/tts/synthesize` — single-segment TTS
+- `POST /v1/transcribe` — speech-to-text
+- `POST /v1/translate-*` — translation endpoints
+
+Set `CAPCAP_REMOTE_API_URL` (default `http://127.0.0.1:8765`) and `CAPCAP_REMOTE_API_TOKEN` to connect.
+
+In remote mode:
+- Voice catalog is bundled with the GUI (no local `.onnx` files needed)
+- F5 clone voices are cached locally in `data/f5_voice/` on the GUI machine
+- The backend owns Piper models and synthesizes audio remotely
+
 ## Workflow
 
 1. Load a video and choose the source and target language.
@@ -123,25 +149,25 @@ python app/remote_api_server.py
 ### Local release
 
 ```bash
-python -m PyInstaller D:\CodingTime\CapCap\CapCap.spec --noconfirm --clean
+python -m PyInstaller CapCap.spec --noconfirm --clean
 ```
 
 ### Local debug
 
 ```bash
-python -m PyInstaller D:\CodingTime\CapCap\CapCap.debug.spec --noconfirm --clean
+python -m PyInstaller CapCap.debug.spec --noconfirm --clean
 ```
 
 ### Remote client
 
 ```bash
-python -m PyInstaller D:\CodingTime\CapCap\CapCap.remote.spec --noconfirm --clean
+python -m PyInstaller CapCap.remote.spec --noconfirm --clean
 ```
 
 ### Server
 
 ```bash
-python -m PyInstaller D:\CodingTime\CapCap\CapCap.server.spec --noconfirm --clean
+python -m PyInstaller CapCap.server.spec --noconfirm --clean
 ```
 
 ## Repo Guide
@@ -156,4 +182,5 @@ This project is licensed under the Apache License 2.0. See [LICENSE](./LICENSE).
 
 - The app is currently optimized for Windows.
 - Some AI, ASR, separation, and voice synthesis steps can be slow on weaker machines.
-- Remote mode currently focuses on `Whisper + AI translation/rewrite`; preview and export still run locally on the client.
+- **Remote mode** offloads the entire processing pipeline to the backend API server. The remote GUI only needs UI dependencies (PySide6, FFmpeg, MPV).
+- F5 voice cloning requires reference audio + reference text. The backend synthesizes cloned voices using the cached reference data.

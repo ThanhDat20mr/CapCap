@@ -14,12 +14,16 @@ from datetime import datetime, timezone
 import requests
 
 
-DEFAULT_F5_REPO_ROOT = r"D:\CodingTime\CapCap\f5_tts_voice"
+DEFAULT_F5_REPO_ROOT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "f5_tts_voice",
+)
 DEFAULT_F5_PYTHON = sys.executable or "python"
 DEFAULT_F5_API_URL = "http://127.0.0.1:8766"
-PREFERRED_F5_PYTHONS = [
-    r"C:\Users\Thach\AppData\Local\Programs\Python\Python311\python.exe",
-]
+PREFERRED_F5_PYTHONS = []
+_env_f5_python = os.getenv("CAPCAP_F5_PYTHON", "")
+if _env_f5_python and os.path.isfile(_env_f5_python):
+    PREFERRED_F5_PYTHONS.append(_env_f5_python)
 
 
 class F5VoiceService:
@@ -35,8 +39,8 @@ class F5VoiceService:
         os.makedirs(self.saved_audio_root, exist_ok=True)
         try:
             self.ensure_default_clones()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[F5Voice] ensure_default_clones failed: {exc}")
 
     @staticmethod
     def is_f5_voice_token(token: str) -> bool:
@@ -58,7 +62,8 @@ class F5VoiceService:
         raw = str(os.getenv("CAPCAP_F5_API_TIMEOUT", "3600") or "3600").strip()
         try:
             return max(30, int(raw))
-        except Exception:
+        except Exception as exc:
+            print(f"[F5Voice] invalid timeout '{raw}', using default: {exc}")
             return 3600
 
     def _f5_api_is_available(self, *, force: bool = False) -> bool:
@@ -123,8 +128,8 @@ class F5VoiceService:
                 payload.setdefault("voices", [])
                 if isinstance(payload.get("voices"), list):
                     return payload
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[F5Voice] _load_registry failed for {path}: {exc}")
         return {"schema_version": 1, "voices": []}
 
     def _save_registry(self, path: str, payload: dict) -> None:
@@ -216,8 +221,8 @@ class F5VoiceService:
                     ref_text=str(sample.get("ref_text", "")).strip(),
                 )
                 count += 1
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[F5Voice] save_clone for sample failed: {exc}")
         return count
 
     def save_clone(self, *, name: str, ref_audio_path: str, ref_text: str = "") -> dict:
@@ -449,7 +454,8 @@ class F5VoiceService:
                 try:
                     with open(response_path, "r", encoding="utf-8") as handle:
                         payload = json.load(handle)
-                except Exception:
+                except Exception as exc:
+                    print(f"[F5Voice] failed to parse bridge response: {exc}")
                     payload = {}
             response_jobs = list(payload.get("jobs", []) or [])
             if result.returncode != 0 and response_jobs:

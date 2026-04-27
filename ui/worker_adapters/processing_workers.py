@@ -243,6 +243,7 @@ class PrepareWorkflowWorker(QThread):
             response = remote_api_post(
                 "/v1/prepare",
                 {
+                    "workspace_root": self.workspace_root,
                     "video_path": self.video_path,
                     "source_language": self.source_language,
                     "target_language": "vi",
@@ -292,6 +293,7 @@ class VoiceOverWorker(QThread):
             response = remote_api_post(
                 "/v1/voice",
                 {
+                    "workspace_root": self.workspace_root,
                     "segments": self.segments,
                     "output_dir": self.output_dir,
                     "background_path": self.background_path,
@@ -353,6 +355,7 @@ class FinalExportWorker(QThread):
             response = remote_api_post(
                 "/v1/export",
                 {
+                    "workspace_root": self.workspace_root,
                     "video_path": self.video_path,
                     "output_path": self.output_path,
                     "mode": self.mode,
@@ -399,13 +402,19 @@ class SegmentAudioPreviewWorker(QThread):
             cache_temp_dir = self.cache_temp_dir or preview_temp_dir
             os.makedirs(cache_temp_dir, exist_ok=True)
 
-            from workflows.voice_workflow import VoiceWorkflow
+            from utils.voice_preview_utils import (
+                clamp_requested_speed,
+                load_manifest,
+                provider_native_speed,
+                save_manifest,
+                segment_cache_key,
+                voice_provider,
+            )
 
-            workflow = VoiceWorkflow(self.workspace_root)
-            requested_speed = workflow._clamp_requested_speed(float(self.voice_speed))
-            voice_provider = workflow._voice_provider(self.voice_name)
-            provider_speed = workflow._provider_native_speed(
-                provider=voice_provider,
+            requested_speed = clamp_requested_speed(float(self.voice_speed))
+            v_provider = voice_provider(self.voice_name)
+            provider_speed = provider_native_speed(
+                provider=v_provider,
                 requested_speed=requested_speed,
             )
             residual_speed = (requested_speed / provider_speed) if provider_speed > 0.0 else requested_speed
@@ -419,10 +428,10 @@ class SegmentAudioPreviewWorker(QThread):
                 tmp_dir=cache_temp_dir,
             )
 
-            manifest = workflow._load_manifest(cache_temp_dir)
+            manifest = load_manifest(cache_temp_dir)
             manifest_segments = dict(manifest.get("segments", {}) or {})
             manifest_by_cache_key = dict(manifest.get("by_cache_key", {}) or {})
-            cache_key = workflow._segment_cache_key(
+            cache_key = segment_cache_key(
                 text=self.text,
                 voice_name=self.voice_name,
                 provider_speed=provider_speed,
@@ -438,7 +447,7 @@ class SegmentAudioPreviewWorker(QThread):
             manifest_by_cache_key[cache_key] = dict(manifest_entry)
             manifest["segments"] = manifest_segments
             manifest["by_cache_key"] = manifest_by_cache_key
-            workflow._save_manifest(cache_temp_dir, manifest)
+            save_manifest(cache_temp_dir, manifest)
 
             wav_path = os.path.join(preview_temp_dir, f"segment_{self.index}_{os.getpid()}.wav")
             if abs(residual_speed - 1.0) >= 0.02:

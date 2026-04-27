@@ -222,7 +222,8 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
         video_path = str(payload.get("video_path", "") or "").strip()
         if not video_path or not os.path.exists(video_path):
             raise ValueError("video_path required and must exist.")
-        runtime = WorkflowRuntime(WORKSPACE_ROOT)
+        workspace_root = str(payload.get("workspace_root", "") or "").strip() or WORKSPACE_ROOT
+        runtime = WorkflowRuntime(workspace_root)
         state = runtime.run_prepare(
             video_path,
             source_language=str(payload.get("source_language", "auto") or "auto"),
@@ -237,7 +238,8 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
         return {"ok": True, "project_state_path": runtime.project_state_path(state)}
 
     def _handle_voice(self, payload: dict) -> dict:
-        runtime = WorkflowRuntime(WORKSPACE_ROOT)
+        workspace_root = str(payload.get("workspace_root", "") or "").strip() or WORKSPACE_ROOT
+        runtime = WorkflowRuntime(workspace_root)
         result = runtime.run_voice(
             segments=list(payload.get("segments") or []),
             output_dir=str(payload.get("output_dir", "") or ""),
@@ -258,7 +260,8 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
         return {"ok": True, "result": result}
 
     def _handle_export(self, payload: dict) -> dict:
-        runtime = WorkflowRuntime(WORKSPACE_ROOT)
+        workspace_root = str(payload.get("workspace_root", "") or "").strip() or WORKSPACE_ROOT
+        runtime = WorkflowRuntime(workspace_root)
         output = runtime.run_export(
             video_path=str(payload.get("video_path", "") or ""),
             output_path=str(payload.get("output_path", "") or ""),

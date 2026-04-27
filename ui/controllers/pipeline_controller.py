@@ -77,12 +77,17 @@ class PipelineController:
         self.progress_dialog = PipelineProgressDialog(self.gui)
         if hasattr(self.gui, "_register_progress_dialog"):
             self.gui._register_progress_dialog(self.progress_dialog)
-        self.progress_dialog.add_step("prepare", "Preparing Project")
-        self.progress_dialog.add_step("extraction", "Extracting Original Audio")
-        if includes_separation:
-            self.progress_dialog.add_step("separation", "Isolating Background Music")
-        self.progress_dialog.add_step("transcription", "Transcribing Speech (AI)")
-        self.progress_dialog.add_step("translation", "Translating & Polishing Contents")
+        from runtime_profile import is_remote_profile
+        from runtime_profile import is_remote_profile
+        if is_remote_profile():
+            # Backend runs separate + transcribe + translate in one batch.
+            # Cleaner voice (separation) is handled inside the batch silently.
+            self.progress_dialog.add_step("ai_process", "AI Processing")
+        else:
+            if includes_separation:
+                self.progress_dialog.add_step("separation", "Isolating Background Music")
+            self.progress_dialog.add_step("transcription", "Transcribing Speech (AI)")
+            self.progress_dialog.add_step("translation", "Translating & Polishing Contents")
         self.progress_dialog.add_step("voiceover", "Synthesizing AI Voiceover")
         self.progress_dialog.add_step("preview", "Preparing Video Preview")
         self.progress_dialog.show()
@@ -115,7 +120,11 @@ class PipelineController:
             self.gui.run_all_btn.setText("Processing...")
             
         self._setup_progress_dialog(includes_separation=requires_separation)
-        self.progress_dialog.start_step("prepare")
+        from runtime_profile import is_remote_profile
+        if is_remote_profile():
+            self.progress_dialog.start_step("ai_process")
+        else:
+            self.progress_dialog.start_step("transcription")
         
         # Start the background worker
         self.gui.log(f"[Pipeline] Starting prepare workflow for: {video_path}")
@@ -143,7 +152,14 @@ class PipelineController:
         if not self.progress_dialog:
             return
 
-        order = ["prepare", "extraction", "separation", "transcription", "translation"]
+        from runtime_profile import is_remote_profile
+        if is_remote_profile():
+            # Remote mode: backend does everything in one batch, ignore internal sub-step signals
+            if step_id == "transcription":
+                self._hide_whisper_download_dialog()
+            return
+
+        order = ["separation", "transcription", "translation"]
         if step_id in order:
             idx = order.index(step_id)
             for i in range(idx):
@@ -153,12 +169,6 @@ class PipelineController:
 
             if step_id == "transcription":
                 self._hide_whisper_download_dialog()
-            elif step_id == "prepare":
-                from runtime_profile import is_remote_profile
-                if not is_remote_profile():
-                    model_name = getattr(self.gui, "get_whisper_model_name", lambda: "base")()
-                    if not self._whisper_model_cached(model_name):
-                        self._show_whisper_download_dialog()
 
     def on_prepare_workflow_finished(self, project_state_path, error):
         """Callback when the background PrepareWorkflow finishes completely."""
@@ -169,12 +179,12 @@ class PipelineController:
             self.gui.show_error("Prepare Failed", "Could not complete project preparation.", str(error))
             return
 
-        from runtime_profile import is_remote_profile
         if self.progress_dialog:
-            self.progress_dialog.finish_step("prepare")
+            from runtime_profile import is_remote_profile
             if is_remote_profile():
-                # Backend completed all prepare sub-steps in one batch.
-                for step in ["extraction", "separation", "transcription", "translation"]:
+                self.progress_dialog.finish_step("ai_process")
+            else:
+                for step in ["separation", "transcription", "translation"]:
                     if step in self.progress_dialog.steps:
                         self.progress_dialog.finish_step(step)
 

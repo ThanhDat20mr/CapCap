@@ -19,7 +19,8 @@ datas = [
 # Collect all submodules from heavy packages to exclude them properly
 excludes = collect_submodules("torch")
 excludes += collect_submodules("scipy")
-excludes += collect_submodules("numpy")
+# NOTE: numpy kept for timeline audio waveform visualization (FFT analysis)
+# excludes += collect_submodules("numpy")
 excludes += collect_submodules("matplotlib")
 excludes += collect_submodules("PIL")
 excludes += collect_submodules("cv2")
@@ -102,6 +103,10 @@ a = Analysis(
         "translation.providers.google_web_translator",
         "translation.providers.local_polisher",
         "translation.providers.microsoft_translator",
+        # Required for timeline audio waveform visualization (imported dynamically)
+        "numpy",
+        "pydub",
+        "audio_mixer",
     ],
     hookspath=[],
     hooksconfig={},

@@ -527,8 +527,6 @@ def build_start_group(gui, left_layout):
     gui.f5_ref_text_edit = QTextEdit()
     gui.f5_ref_text_edit.setPlaceholderText("Required reference text for the audio sample (e.g., what the speaker says in the clip).")
     gui.f5_ref_text_edit.setFixedHeight(88)
-    gui.f5_save_clone_cb = QCheckBox("Save this clone voice for later")
-    gui.f5_save_clone_cb.setChecked(False)
     gui.f5_detail_hint_label = QLabel(
         "Detail Voice uses F5-TTS Vietnamese. For new clones, pick a reference audio clip and optionally a voice name.",
         gui,
@@ -587,7 +585,6 @@ def build_start_group(gui, left_layout):
     f5_new_voice_layout.addLayout(f5_audio_row)
     f5_new_voice_layout.addWidget(QLabel("Reference text"))
     f5_new_voice_layout.addWidget(gui.f5_ref_text_edit)
-    f5_new_voice_layout.addWidget(gui.f5_save_clone_cb)
     detail_voice_layout.addWidget(gui.f5_new_voice_panel)
     detail_voice_layout.addWidget(gui.f5_detail_hint_label)
     detail_voice_layout.addWidget(gui.f5_status_server_label)

@@ -8,6 +8,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from runtime_paths import app_path
 from services import EngineRuntime, F5VoiceService, ProjectService
+from utils.voice_preview_utils import (
+    clamp_requested_speed,
+    load_manifest,
+    manifest_path,
+    provider_native_speed,
+    save_manifest,
+    segment_cache_key,
+    voice_provider,
+)
 
 
 class VoiceWorkflow:
@@ -62,38 +71,21 @@ class VoiceWorkflow:
             self.project_service.update_step(state, "mix_audio", "skipped", save=False)
         self.project_service.save_project(state)
 
-    def _manifest_path(self, tmp_dir: str) -> str:
-        return os.path.join(tmp_dir, "tts_cache_manifest.json")
-
     def _load_manifest(self, tmp_dir: str) -> dict:
-        manifest_path = self._manifest_path(tmp_dir)
-        if not os.path.exists(manifest_path):
-            return {"segments": {}, "by_cache_key": {}}
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-            if isinstance(payload, dict):
-                payload.setdefault("segments", {})
-                payload.setdefault("by_cache_key", {})
-                return payload
-        except Exception:
-            pass
-        return {"segments": {}, "by_cache_key": {}}
+        return load_manifest(tmp_dir)
 
     def _save_manifest(self, tmp_dir: str, manifest: dict) -> None:
-        manifest_path = self._manifest_path(tmp_dir)
-        with open(manifest_path, "w", encoding="utf-8") as handle:
-            json.dump(manifest, handle, ensure_ascii=False, indent=2)
+        save_manifest(tmp_dir, manifest)
 
     def _update_manifest_entries(self, *, tmp_dir: str, segments, wavs, voice_name: str, provider_speed: float) -> None:
-        manifest = self._load_manifest(tmp_dir)
+        manifest = load_manifest(tmp_dir)
         manifest_segments = dict(manifest.get("segments", {}) or {})
         manifest_by_cache_key = dict(manifest.get("by_cache_key", {}) or {})
         for idx, (seg, wav_path) in enumerate(zip(list(segments or []), list(wavs or []))):
             text = str((seg or {}).get("tts_text") or (seg or {}).get("text") or "").strip()
             if not text or not wav_path or not os.path.exists(wav_path):
                 continue
-            cache_key = self._segment_cache_key(
+            cache_key = segment_cache_key(
                 text=text,
                 voice_name=voice_name,
                 provider_speed=provider_speed,
@@ -109,62 +101,19 @@ class VoiceWorkflow:
             manifest_by_cache_key[cache_key] = dict(entry)
         manifest["segments"] = manifest_segments
         manifest["by_cache_key"] = manifest_by_cache_key
-        self._save_manifest(tmp_dir, manifest)
+        save_manifest(tmp_dir, manifest)
 
     def _segment_cache_key(self, *, text: str, voice_name: str, provider_speed: float) -> str:
-        payload = f"{voice_name}|{provider_speed:.3f}|{text.strip()}"
-        return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+        return segment_cache_key(text=text, voice_name=voice_name, provider_speed=provider_speed)
 
     def _voice_provider(self, voice_name: str) -> str:
-        raw = str(voice_name or "").strip()
-        if raw.lower().startswith("f5:"):
-            return "f5"
-        
-        # If has ":" prefix format, parse it
-        if ":" in raw:
-            provider, _voice_id = raw.split(":", 1)
-            return provider.strip().lower() or "edge"
-        
-        # Otherwise, assume it's a voice ID - load from catalog to find provider
-        import json
-        import os as os_module
-        
-        # Try multiple paths to find catalog
-        catalog_paths = [
-            app_path("voice_preview_catalog.json"),
-            os_module.path.join(os_module.path.dirname(os_module.path.dirname(__file__)), "voice_preview_catalog.json"),
-            os_module.path.join(os_module.getcwd(), "app", "voice_preview_catalog.json"),
-        ]
-        
-        for catalog_path in catalog_paths:
-            try:
-                if os_module.path.exists(catalog_path):
-                    with open(catalog_path, "r", encoding="utf-8") as f:
-                        catalog = json.load(f)
-                    for voice in catalog.get("voices", []):
-                        if voice.get("id") == raw:
-                            provider = voice.get("provider", "edge").strip().lower()
-                            print(f"[Voice] Found voice '{raw}' with provider: {provider}")
-                            return provider
-            except Exception as e:
-                print(f"[Voice] Error reading catalog from {catalog_path}: {e}")
-        
-        print(f"[Voice] Voice '{raw}' not found in catalog, defaulting to 'piper'")
-        # Default to piper for local voices
-        return "piper"
+        return voice_provider(voice_name)
 
     def _provider_native_speed(self, *, provider: str, requested_speed: float) -> float:
-        speed_value = float(requested_speed)
-        if provider in {"edge", "f5"}:
-            return speed_value
-        return 1.0
+        return provider_native_speed(provider=provider, requested_speed=requested_speed)
 
     def _clamp_requested_speed(self, requested_speed: float) -> float:
-        speed_value = max(0.5, float(requested_speed or 1.0))
-        if speed_value > 1.30:
-            print(f"[Voice Workflow] Requested speed {speed_value:.2f} exceeds safe cap. Clamping to 1.30.")
-            return 1.30
-        return speed_value
+        return clamp_requested_speed(requested_speed)
 
     def _count_words(self, text: str) -> int:
         return len([token for token in re.split(r"\s+", str(text or "").strip()) if token])

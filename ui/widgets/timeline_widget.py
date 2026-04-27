@@ -498,6 +498,58 @@ class TimelineWidget(QGraphicsView):
                 text_item.setDefaultTextColor(QColor("#1c1204") if is_active else QColor("#fff3df"))
                 text_item.setPos(start_x + 6, subtitle_row["y"] + 16)
 
+        # Draw full-track background waveform when no segments exist yet
+        if audio_row.get("visible") and self._waveform_samples and self._waveform_duration_s > 0.0 and not self.segments:
+            duration_s = self._waveform_duration_s
+            start_x = 0.0
+            end_x = duration_s * self.pixels_per_second
+            seg_w = max(16, end_x - start_x)
+            self._scene.addRect(
+                start_x,
+                audio_row["y"] + 11,
+                seg_w,
+                audio_row["h"] - 22,
+                QPen(QColor("#6bd6d2"), 1),
+                QColor(87, 211, 206, 72),
+            )
+            waveform_values = self._waveform_slice(0.0, duration_s, max(18, int(seg_w // 2)))
+            if waveform_values:
+                wave_top = audio_row["y"] + 8.0
+                wave_bottom = audio_row["y"] + audio_row["h"] - 6.0
+                wave_height = max(10.0, wave_bottom - wave_top)
+                step = seg_w / max(1, len(waveform_values))
+                column_energies = []
+                for amp in waveform_values:
+                    if isinstance(amp, list):
+                        band_values = [float(value) for value in amp]
+                        if band_values:
+                            energy = sum(value * value for value in band_values) / len(band_values)
+                            column_energies.append(energy ** 0.5)
+                        else:
+                            column_energies.append(0.0)
+                    else:
+                        column_energies.append(float(amp))
+                smoothed = []
+                for idx_energy, value in enumerate(column_energies):
+                    prev_v = column_energies[idx_energy - 1] if idx_energy > 0 else value
+                    next_v = column_energies[idx_energy + 1] if idx_energy + 1 < len(column_energies) else value
+                    smoothed.append((prev_v * 0.2) + (value * 0.6) + (next_v * 0.2))
+                for wave_idx, amp in enumerate(smoothed):
+                    x_pos = start_x + (wave_idx * step) + (step / 2.0)
+                    intensity = max(0.12, float(amp) ** 0.78)
+                    spike_height = max(3.0, wave_height * intensity)
+                    hue = int((wave_idx / max(1, len(smoothed) - 1)) * 300.0)
+                    color = QColor.fromHsv(hue, 165, 235, 235)
+                    wave_pen = QPen(color, max(1.2, min(2.4, step * 0.34)))
+                    wave_pen.setCapStyle(Qt.RoundCap)
+                    self._scene.addLine(
+                        x_pos,
+                        wave_bottom - spike_height,
+                        x_pos,
+                        wave_bottom,
+                        wave_pen,
+                    )
+
         self.playhead = self._scene.addLine(0, 0, 0, scene_height, QPen(QColor("#60f7ea"), 2))
         if self.playhead:
             self.playhead.setZValue(1000)
