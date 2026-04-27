@@ -174,6 +174,17 @@ python -m PyInstaller CapCap.server.spec --noconfirm --clean
 
 See [structure.md](./structure.md) for a codebase map and important entrypoints.
 
+## References
+
+This project builds on and references the following open-source projects:
+
+- [F5-TTS-Vietnamese](https://github.com/nguyenthienhy/F5-TTS-Vietnamese) — Vietnamese voice cloning
+- [llama-cpp-python](https://github.com/JamePeng/llama-cpp-python) — Local LLM inference
+- [vietnormalizer](https://github.com/nghimestudio/vietnormalizer) — Vietnamese text normalization
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — Speech-to-text transcription
+- [piper](https://github.com/rhasspy/piper) — Local text-to-speech synthesis
+- [demucs](https://github.com/facebookresearch/demucs) — Vocal/background audio separation
+
 ## License
 
 This project is licensed under the Apache License 2.0. See [LICENSE](./LICENSE).
