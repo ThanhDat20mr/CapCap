@@ -1,4 +1,4 @@
-# CapCap
+# CapCap 🦆
 
 ![CapCap Editor Preview](assets/preview.jpg)
 
