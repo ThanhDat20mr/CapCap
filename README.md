@@ -185,6 +185,22 @@ This project builds on and references the following open-source projects:
 - [piper](https://github.com/rhasspy/piper) — Local text-to-speech synthesis
 - [demucs](https://github.com/facebookresearch/demucs) — Vocal/background audio separation
 
+## CUDA Requirements
+
+GPU acceleration is **strongly recommended** for a smooth experience but not strictly required.
+
+| Component | GPU recommended | Notes |
+|---|---|---|
+| **faster-whisper** | Optional | CPU works but is much slower; GPU (CUDA 11/12) speeds up transcription significantly |
+| **Demucs** | Recommended | Vocal separation on CPU is very slow; GPU inference is preferred |
+| **F5-TTS** | **Required** for cloning | F5 voice cloning is practically unusable on CPU; needs CUDA-capable GPU |
+| **llama-cpp-python** | Optional | Local LLM inference can use CPU; GPU (CUDA) speeds up translation/polish |
+
+**Minimum:** NVIDIA GPU with Compute Capability >= 5.0 (e.g., GTX 1050 Ti) and CUDA toolkit installed.
+**Recommended:** RTX 2060 or better with at least 6GB VRAM.
+
+For CPU-only setups, expect transcription and voice synthesis to be significantly slower.
+
 ## License
 
 This project is licensed under the Apache License 2.0. See [LICENSE](./LICENSE).
