@@ -42,3 +42,4 @@ voice_temp/
 assets/luts/_archive
 log.txt
 data/*
+run_servers_wezterm.bat
