@@ -205,6 +205,8 @@ For CPU-only setups, expect transcription and voice synthesis to be significantl
 
 This project is licensed under the Apache License 2.0. See [LICENSE](./LICENSE).
 
+## Resource
+[Hugging Face](https://huggingface.co/Hacht/CapCapResource)
 ## Notes
 
 - The app is currently optimized for Windows.
