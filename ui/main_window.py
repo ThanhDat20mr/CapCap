@@ -6770,6 +6770,13 @@ class VideoTranslatorGUI(QMainWindow):
             cached_voice_track = self._normalize_local_file_path(state.artifacts.get("voice_vi", "") or self.last_voice_vi_path)
             cached_mixed_track = self._normalize_local_file_path(state.artifacts.get("mixed_vi", "") or self.last_mixed_vi_path)
             required_output = cached_mixed_track if bg_path else cached_voice_track
+            self.log(
+                f"[Voiceover] Cache check: force={force_refresh}, "
+                f"cached_sig={'<empty>' if not cached_voice_signature else cached_voice_signature[:16]+'...'}, "
+                f"new_sig={'<empty>' if not voice_signature else voice_signature[:16]+'...'}, "
+                f"match={cached_voice_signature == voice_signature}, "
+                f"required_output={required_output}, exists={os.path.exists(required_output) if required_output else False}"
+            )
             if not force_refresh and cached_voice_signature == voice_signature and required_output and os.path.exists(required_output):
                 self.last_voice_vi_path = cached_voice_track if cached_voice_track and os.path.exists(cached_voice_track) else self.last_voice_vi_path
                 self.last_mixed_vi_path = cached_mixed_track if cached_mixed_track and os.path.exists(cached_mixed_track) else ""

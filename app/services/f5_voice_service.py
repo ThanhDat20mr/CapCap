@@ -33,7 +33,7 @@ class F5VoiceService:
         self.saved_audio_root = os.path.join(self.data_root, "saved_audio")
         self.saved_registry_path = os.path.join(self.data_root, "saved_clones.json")
         self.temp_registry_path = os.path.join(self.data_root, "temp_clones.json")
-        self.bridge_script_path = os.path.join(self.workspace_root, "app", "tools", "f5_batch_bridge.py")
+        self.bridge_script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tools", "f5_batch_bridge.py"))
         self._api_health_checked_at = 0.0
         self._api_health_ok = False
         os.makedirs(self.saved_audio_root, exist_ok=True)

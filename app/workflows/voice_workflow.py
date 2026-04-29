@@ -44,6 +44,39 @@ class VoiceWorkflow:
     def _load_state(self, project_state_path: str = ""):
         return self.project_service.load_project(project_state_path) if project_state_path else None
 
+    def _measure_audio_loudness_db(self, audio_path: str) -> float:
+        """Measure mean loudness in dBFS using pydub."""
+        try:
+            from pydub import AudioSegment
+            audio = AudioSegment.from_file(audio_path)
+            return float(audio.dBFS)
+        except Exception as exc:
+            print(f"[Voice Workflow] Loudness measurement failed for {audio_path}: {exc}")
+            return 0.0
+
+    def _compute_background_gain_compensation(self, original_audio_path: str, background_path: str) -> float:
+        """Compute gain needed to make separated background match original audio loudness."""
+        if not original_audio_path or not os.path.exists(original_audio_path):
+            return 0.0
+        if not background_path or not os.path.exists(background_path):
+            return 0.0
+        try:
+            orig_loudness = self._measure_audio_loudness_db(original_audio_path)
+            bg_loudness = self._measure_audio_loudness_db(background_path)
+            if orig_loudness == float("-inf") or bg_loudness == float("-inf"):
+                return 0.0
+            compensation = orig_loudness - bg_loudness
+            # Clamp to reasonable range (-12 to +12 dB)
+            compensation = max(-12.0, min(12.0, compensation))
+            print(
+                f"[Voice Workflow] Auto-gain: original={orig_loudness:.2f}dBFS, "
+                f"background={bg_loudness:.2f}dBFS, compensation={compensation:+.2f}dB"
+            )
+            return compensation
+        except Exception as exc:
+            print(f"[Voice Workflow] Auto-gain compensation failed: {exc}")
+            return 0.0
+
     def _mark_started(self, state, *, with_background: bool):
         if not state:
             return
@@ -1475,6 +1508,18 @@ class VoiceWorkflow:
         mixed = ""
         if background_path and os.path.exists(background_path):
             mixed = os.path.normpath(os.path.join(output_dir, "mixed_vi.wav"))
+            effective_bg_gain = float(bg_gain_db)
+            # Auto-gain compensation for Demucs-separated background
+            if audio_mode_key == "clean" and state:
+                original_audio = state.artifacts.get("extracted_audio", "")
+                if original_audio and os.path.exists(original_audio):
+                    auto_compensation = self._compute_background_gain_compensation(original_audio, background_path)
+                    if auto_compensation != 0.0:
+                        effective_bg_gain += auto_compensation
+                        print(
+                            f"[Voice Workflow] Auto-gain applied: +{auto_compensation:+.2f}dB "
+                            f"(manual={bg_gain_db:+.2f}dB, total={effective_bg_gain:+.2f}dB)"
+                        )
             if audio_mode_key == "fast":
                 print(f"[Voice Workflow] Fast Mode mix: ducking original/extracted background source {background_path}")
             else:
@@ -1484,7 +1529,7 @@ class VoiceWorkflow:
                 background_wav_path=background_path,
                 voice_wav_path=voice_track,
                 output_wav_path=mixed,
-                background_gain_db=float(bg_gain_db),
+                background_gain_db=effective_bg_gain,
                 voice_gain_db=0.0,
                 ducking_mode="timeline" if audio_mode_key == "fast" else "off",
                 ducking_segments=segments if audio_mode_key == "fast" else None,

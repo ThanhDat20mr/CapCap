@@ -504,7 +504,7 @@ def build_start_group(gui, left_layout):
     gui.voice_timing_sync_combo.setCurrentText("Smart")
     gui.audio_handling_combo = QComboBox()
     gui.audio_handling_combo.addItem("Fast (recommended)", "fast")
-    gui.audio_handling_combo.addItem("Cleaner voice (slower)", "clean")
+    gui.audio_handling_combo.addItem("Cleaner voice", "clean")
     gui.audio_handling_combo.setCurrentIndex(0)
     gui.audio_handling_hint_label = QLabel("Fast keeps things quick. Cleaner voice removes more background noise before voice generation.", gui)
     gui.audio_handling_hint_label.setObjectName("helperLabel")

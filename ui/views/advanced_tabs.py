@@ -198,7 +198,7 @@ def _build_hidden_runtime_widgets(gui):
     gui.voice_gain_spin = QDoubleSpinBox(gui)
     gui.voice_gain_spin.setRange(-30.0, 30.0)
     gui.voice_gain_spin.setSingleStep(1.0)
-    gui.voice_gain_spin.setValue(6.0)
+    gui.voice_gain_spin.setValue(0.0)
     gui.bg_gain_spin = QDoubleSpinBox(gui)
     gui.bg_gain_spin.setRange(-30.0, 30.0)
     gui.bg_gain_spin.setSingleStep(1.0)

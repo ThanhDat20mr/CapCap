@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import traceback
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 os.environ.setdefault("CAPCAP_RUNTIME_PROFILE", "local")
@@ -55,9 +56,11 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             _json_response(self, 500, {"ok": False, "error": str(exc)})
 
     def do_POST(self):
+        print(f"[Remote API] POST {self.path} from {self.address_string()}")
         try:
             self._check_auth()
             payload = self._read_json_body()
+            print(f"[Remote API] POST {self.path} payload keys: {list(payload.keys())}")
             if self.path == "/v1/transcribe":
                 _json_response(self, 200, self._handle_transcribe(payload))
                 return
@@ -89,8 +92,15 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
         except PermissionError as exc:
             _json_response(self, 401, {"ok": False, "error": str(exc)})
         except Exception as exc:
+            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
             print("[Remote API] Request failed:")
-            print("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip())
+            print(tb)
+            try:
+                log_path = os.path.join(tempfile.gettempdir(), "capcap_remote_api_errors.log")
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"[{datetime.now().isoformat()}] {self.path}\n{tb}\n\n")
+            except Exception:
+                pass
             _json_response(self, 500, {"ok": False, "error": str(exc)})
 
     def log_message(self, format, *args):
@@ -238,6 +248,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
         return {"ok": True, "project_state_path": runtime.project_state_path(state)}
 
     def _handle_voice(self, payload: dict) -> dict:
+        print(f"[Remote API] _handle_voice called. voice_name={payload.get('voice_name')}, segments_count={len(payload.get('segments', []))}")
         workspace_root = str(payload.get("workspace_root", "") or "").strip() or WORKSPACE_ROOT
         runtime = WorkflowRuntime(workspace_root)
         result = runtime.run_voice(
