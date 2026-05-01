@@ -429,8 +429,8 @@ def build_preview_panel(gui):
 
     inspector_card = QFrame()
     inspector_card.setObjectName("statusCard")
-    inspector_card.setMinimumWidth(320)
-    inspector_card.setMaximumWidth(380)
+    inspector_card.setMinimumWidth(360)
+    inspector_card.setMaximumWidth(560)
     inspector_layout = QVBoxLayout(inspector_card)
     inspector_layout.setContentsMargins(14, 14, 14, 14)
     inspector_layout.setSpacing(10)
@@ -492,7 +492,7 @@ def build_preview_panel(gui):
     workspace_row = QHBoxLayout()
     workspace_row.setSpacing(10)
     workspace_row.addWidget(preview_card, 1)
-    workspace_row.addWidget(inspector_card, 0)
+    workspace_row.addWidget(inspector_card, 1)
 
     right_layout.addLayout(workspace_row, 5)
     right_layout.addWidget(timeline_card, 3)

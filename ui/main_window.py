@@ -3581,8 +3581,8 @@ class VideoTranslatorGUI(QMainWindow):
     def set_controls_panel_visible(self, visible: bool):
         if hasattr(self, "left_panel_scroll_area"):
             self.left_panel_scroll_area.setVisible(visible)
-        if hasattr(self, "toggle_controls_action"):
-            self.toggle_controls_action.setText("Hide Controls" if visible else "Show Controls")
+        if hasattr(self, "toggle_panel_btn"):
+            self.toggle_panel_btn.setText("Hide Controls" if visible else "Show Controls")
 
     def update_progress_checklist(self):
         steps = getattr(getattr(self, "current_project_state", None), "steps", {}) or {}
@@ -4130,6 +4130,8 @@ class VideoTranslatorGUI(QMainWindow):
                         child_widget.setParent(None)
                         child_widget.deleteLater()
 
+
+
     def toggle_original_subtitle_visibility(self):
         show_original = bool(getattr(self, "show_original_subtitle_cb", None) and self.show_original_subtitle_cb.isChecked())
         for row in getattr(self, "_segment_editor_rows", []):
@@ -4675,18 +4677,42 @@ class VideoTranslatorGUI(QMainWindow):
                 original_label.setWordWrap(True)
                 original_label.setObjectName("helperLabel")
                 original_label.setVisible(show_original and bool(row["original"].strip()))
-                subtitle_title = QLabel("Subtitle", card)
-                subtitle_title.setObjectName("helperLabel")
-                subtitle_title.setStyleSheet("font-size: 12px; font-weight: 700; color: #8ad7ff;")
 
-                arrow_label = QLabel("→", card)
-                arrow_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #8ad7ff;")
-                translated_editor = QTextEdit(card)
+                card_layout.addLayout(timing_meta_layout)
+                card_layout.addWidget(original_label)
+
+                segment_tabs = QTabWidget(card)
+                segment_tabs.setStyleSheet("""
+                    QTabWidget::pane { padding: 0px; border-left: none; border-right: none; border-bottom: none; border-top: 1px solid #27425d; }
+                    QTabBar::tab {
+                        padding: 4px 14px;
+                        font-weight: 700;
+                        font-size: 11px;
+                        color: #8899aa;
+                        background: transparent;
+                        border: none;
+                        border-bottom: 2px solid transparent;
+                    }
+                    QTabBar::tab:selected {
+                        color: #6ee7d6;
+                        border-bottom: 2px solid #6ee7d6;
+                    }
+                    QTabBar::tab:hover { color: #cfe6ff; }
+                """)
+                segment_tabs.setDocumentMode(True)
+                segment_tabs.tabBar().setExpanding(True)
+
+                subtitle_tab_page = QWidget()
+                subtitle_tab_layout = QVBoxLayout(subtitle_tab_page)
+                subtitle_tab_layout.setContentsMargins(0, 0, 0, 0)
+                subtitle_tab_layout.setSpacing(8)
+
+                translated_editor = QTextEdit()
                 translated_editor.setObjectName("segmentInspectorEditor")
                 translated_editor.setAcceptRichText(False)
                 translated_editor.setPlainText(row["translated"])
                 translated_editor.setMinimumHeight(96)
-                translated_editor.setMaximumHeight(120)
+                translated_editor.setMaximumHeight(96)
                 translated_editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
                 translated_editor.setPlaceholderText("Text shown on screen.")
                 translated_editor.textChanged.connect(
@@ -4695,40 +4721,11 @@ class VideoTranslatorGUI(QMainWindow):
                 translated_editor.selectionChanged.connect(
                     lambda idx=idx, editor=translated_editor: self._update_segment_highlight_button_state(idx, editor)
                 )
-                highlight_btn = QPushButton("Add highlight from selection", card)
+                highlight_btn = QPushButton("Add highlight from selection")
                 highlight_btn.setEnabled(False)
                 highlight_btn.clicked.connect(
                     lambda _=False, idx=idx, editor=translated_editor: self.add_segment_manual_highlight(idx, editor)
                 )
-                spoken_title = QLabel("Voice", card)
-                spoken_title.setObjectName("helperLabel")
-                spoken_title.setStyleSheet("font-size: 12px; font-weight: 700; color: #8ad7ff;")
-                spoken_status_label = QLabel("", card)
-                spoken_status_label.setObjectName("helperLabel")
-                spoken_status_label.setWordWrap(True)
-                spoken_status_label.hide()
-                spoken_editor = QTextEdit(card)
-                spoken_editor.setObjectName("segmentInspectorEditor")
-                spoken_editor.setAcceptRichText(False)
-                spoken_editor.setPlainText(row["spoken"])
-                spoken_editor.setMinimumHeight(72)
-                spoken_editor.setMaximumHeight(92)
-                spoken_editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-                spoken_editor.setPlaceholderText("Text spoken by the voice.")
-                spoken_editor.textChanged.connect(
-                    lambda idx=idx, editor=spoken_editor: self.on_segment_spoken_text_edited(idx, editor)
-                )
-
-                spoken_action_layout = QHBoxLayout()
-                spoken_action_layout.setContentsMargins(0, 0, 0, 0)
-                spoken_action_layout.setSpacing(8)
-                match_subtitle_btn = QPushButton("Use voice for subtitle", card)
-                match_subtitle_btn.clicked.connect(lambda _=False, idx=idx: self.use_spoken_text_for_subtitle(idx))
-                preview_btn = QPushButton("Regenerate voice", card)
-                preview_btn.clicked.connect(lambda _=False, idx=idx: self.preview_segment_audio(idx))
-                spoken_action_layout.addWidget(match_subtitle_btn)
-                spoken_action_layout.addWidget(preview_btn)
-                spoken_action_layout.addStretch()
 
                 highlight_action_layout = QHBoxLayout()
                 highlight_action_layout.setContentsMargins(0, 0, 0, 0)
@@ -4739,35 +4736,62 @@ class VideoTranslatorGUI(QMainWindow):
                 highlight_meta_layout = QHBoxLayout()
                 highlight_meta_layout.setContentsMargins(0, 0, 0, 0)
                 highlight_meta_layout.setSpacing(6)
-                highlight_placeholder = QLabel("", card)
+                highlight_placeholder = QLabel("")
                 highlight_placeholder.setObjectName("helperLabel")
-                highlight_chip_container = QWidget(card)
+                highlight_chip_container = QWidget()
                 highlight_chip_layout = QHBoxLayout(highlight_chip_container)
                 highlight_chip_layout.setContentsMargins(0, 0, 0, 0)
                 highlight_chip_layout.setSpacing(6)
                 highlight_meta_layout.addWidget(highlight_placeholder)
                 highlight_meta_layout.addWidget(highlight_chip_container, 1)
 
-                card_layout.addLayout(timing_meta_layout)
-                card_layout.addWidget(original_label)
-                divider = QFrame(card)
-                divider.setFrameShape(QFrame.HLine)
-                divider.setStyleSheet("color: #27425d;")
-                card_layout.addWidget(divider)
-                card_layout.addWidget(subtitle_title)
-                card_layout.addWidget(translated_editor, 0)
-                card_layout.addLayout(highlight_action_layout)
-                card_layout.addLayout(highlight_meta_layout)
-                section_divider = QFrame(card)
-                section_divider.setFrameShape(QFrame.HLine)
-                section_divider.setStyleSheet("color: #20364d;")
-                card_layout.addWidget(section_divider)
-                card_layout.addWidget(spoken_title)
-                card_layout.addWidget(spoken_editor, 0)
-                card_layout.addLayout(spoken_action_layout)
+                subtitle_tab_layout.addWidget(translated_editor, 0)
+                subtitle_tab_layout.addLayout(highlight_action_layout)
+                subtitle_tab_layout.addLayout(highlight_meta_layout)
+
+                voice_tab_page = QWidget()
+                voice_tab_layout = QVBoxLayout(voice_tab_page)
+                voice_tab_layout.setContentsMargins(0, 0, 0, 0)
+                voice_tab_layout.setSpacing(8)
+
+                spoken_status_label = QLabel("")
+                spoken_status_label.setObjectName("helperLabel")
+                spoken_status_label.setWordWrap(True)
+                spoken_status_label.hide()
+                spoken_editor = QTextEdit()
+                spoken_editor.setObjectName("segmentInspectorEditor")
+                spoken_editor.setAcceptRichText(False)
+                spoken_editor.setPlainText(row["spoken"])
+                spoken_editor.setMinimumHeight(96)
+                spoken_editor.setMaximumHeight(96)
+                spoken_editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                spoken_editor.setPlaceholderText("Text spoken by the voice.")
+                spoken_editor.textChanged.connect(
+                    lambda idx=idx, editor=spoken_editor: self.on_segment_spoken_text_edited(idx, editor)
+                )
+
+                spoken_action_layout = QHBoxLayout()
+                spoken_action_layout.setContentsMargins(0, 0, 0, 0)
+                spoken_action_layout.setSpacing(8)
+                match_subtitle_btn = QPushButton("Use voice for subtitle")
+                match_subtitle_btn.clicked.connect(lambda _=False, idx=idx: self.use_spoken_text_for_subtitle(idx))
+                preview_btn = QPushButton("Regenerate voice")
+                preview_btn.clicked.connect(lambda _=False, idx=idx: self.preview_segment_audio(idx))
+                spoken_action_layout.addWidget(match_subtitle_btn)
+                spoken_action_layout.addWidget(preview_btn)
+                spoken_action_layout.addStretch()
+
+                voice_tab_layout.addWidget(spoken_editor, 0)
+                voice_tab_layout.addLayout(spoken_action_layout)
+                voice_tab_layout.addStretch()
+
+                segment_tabs.addTab(subtitle_tab_page, "Subtitle")
+                segment_tabs.addTab(voice_tab_page, "Voice")
+                card_layout.addWidget(segment_tabs)
 
                 for label in card.findChildren(QLabel):
-                    if label.text().strip() in {"→", "â†’"}:
+                    label_text = label.text().strip()
+                    if len(label_text) <= 2 and not label_text.isascii():
                         label.hide()
                 self.segment_editor_layout.addWidget(card, 0)
                 self._segment_editor_rows.append(
@@ -4775,7 +4799,6 @@ class VideoTranslatorGUI(QMainWindow):
                         "segment_index": idx,
                         "frame": card,
                         "original_label": original_label,
-                        "subtitle_title": subtitle_title,
                         "translated_editor": translated_editor,
                         "spoken_editor": spoken_editor,
                         "spoken_status_label": spoken_status_label,

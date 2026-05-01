@@ -65,6 +65,16 @@ def _build_header_bar(gui):
     layout.addWidget(gui.export_btn)
     layout.addSpacing(8)
 
+    gui.toggle_panel_btn = QPushButton("Control")
+    gui.toggle_panel_btn.setObjectName("secondaryActionBtn")
+    gui.toggle_panel_btn.setMinimumHeight(42)
+    gui.toggle_panel_btn.setMinimumWidth(180)
+    gui.toggle_panel_btn.setToolTip("Toggle side panel")
+    gui.toggle_panel_btn.setText("Controls")
+    gui.toggle_panel_btn.clicked.connect(gui.toggle_controls_panel)
+    layout.addWidget(gui.toggle_panel_btn)
+    layout.addSpacing(6)
+
     gui.more_actions_btn = QPushButton("More")
     gui.more_actions_btn.setObjectName("secondaryActionBtn")
     gui.more_actions_btn.setMinimumHeight(42)
@@ -79,8 +89,6 @@ def _build_header_bar(gui):
     more_menu.addSeparator()
     gui.clean_project_action = more_menu.addAction("Clean")
     gui.clean_project_action.triggered.connect(gui.clean_current_project)
-    gui.toggle_controls_action = more_menu.addAction("Hide Controls")
-    gui.toggle_controls_action.triggered.connect(gui.toggle_controls_panel)
     gui.settings_action = more_menu.addAction("Settings")
     gui.settings_action.triggered.connect(gui.open_model_settings_dialog)
 
@@ -269,4 +277,5 @@ def _initialize_ui_state(gui):
     gui.update_project_header()
     gui.refresh_ui_state()
     gui.sync_segment_editor_rows()
+    gui.set_controls_panel_visible(False)
 

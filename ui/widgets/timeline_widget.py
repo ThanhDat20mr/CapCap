@@ -338,14 +338,27 @@ class TimelineWidget(QGraphicsView):
                 wave_pen.setCapStyle(Qt.RoundCap)
                 self._scene.addLine(x_pos, wave_bottom - spike_height, x_pos, wave_bottom, wave_pen)
 
-    def _draw_audio_segment(self, row, idx, seg, start_x, end_x, seg_w, is_active):
+    def _draw_audio_segment(self, row, idx, seg, start_x, end_x, seg_w, is_active, ratio=1.0):
         if not row.get("visible"):
             return
-        rect_pen = QPen(QColor("#8ef7ee") if is_active else QColor("#6bd6d2"), 1)
-        rect_fill = QColor(117, 241, 235, 110) if is_active else QColor(87, 211, 206, 72)
-        handle_color = QColor("#c7fffb")
-        wave_hue_sat = (190 if is_active else 165, 255 if is_active else 235)
-        fallback_color = QColor("#8fece5" if is_active else "#67cfc8")
+        if ratio <= 1.05:
+            rect_pen = QPen(QColor("#4ecdc4") if is_active else QColor("#6bd6d2"), 1)
+            rect_fill = QColor(78, 205, 196, 110) if is_active else QColor(87, 211, 206, 72)
+            handle_color = QColor("#6ee7d6")
+            wave_hue_sat = (170 if is_active else 165, 255 if is_active else 235)
+            fallback_color = QColor("#5fd6cc" if is_active else "#67cfc8")
+        elif ratio <= 1.15:
+            rect_pen = QPen(QColor("#f5c842") if is_active else QColor("#c9a030"), 1)
+            rect_fill = QColor(245, 200, 66, 110) if is_active else QColor(200, 160, 48, 72)
+            handle_color = QColor("#fad974")
+            wave_hue_sat = (45 if is_active else 40, 200 if is_active else 170)
+            fallback_color = QColor("#e8b828" if is_active else "#bf9a20")
+        else:
+            rect_pen = QPen(QColor("#f54242") if is_active else QColor("#cc2828"), 1)
+            rect_fill = QColor(245, 66, 66, 110) if is_active else QColor(200, 40, 40, 72)
+            handle_color = QColor("#f56262")
+            wave_hue_sat = (0 if is_active else 0, 220 if is_active else 190)
+            fallback_color = QColor("#e82828" if is_active else "#c01818")
 
         self._scene.addRect(start_x, row["y"] + 11, seg_w, row["h"] - 22, rect_pen, rect_fill)
         if is_active:
@@ -409,6 +422,15 @@ class TimelineWidget(QGraphicsView):
             badge_label.setDefaultTextColor(QColor("#dff7ff"))
             badge_label.setPos(start_x + 8, row["y"] - 19)
             badge_label.setZValue(16)
+        if ratio >= 1.15:
+            badge_txt = f"{ratio*100:.0f}%"
+            badge_w = max(28, len(badge_txt) * 7 + 8)
+            r_badge = self._scene.addRect(start_x, row["y"] + row["h"] - 18, badge_w, 14, QPen(Qt.NoPen), QColor(220, 40, 40, 200))
+            r_badge.setZValue(10)
+            r_label = self._scene.addText(badge_txt, QFont("Segoe UI", 6, QFont.Bold))
+            r_label.setDefaultTextColor(QColor("#ffffff"))
+            r_label.setPos(start_x + 2, row["y"] + row["h"] - 18)
+            r_label.setZValue(11)
 
     def refresh(self):
         self._scene.clear()
@@ -505,8 +527,9 @@ class TimelineWidget(QGraphicsView):
             end_x = float(seg.get("end", 0.0)) * self.pixels_per_second
             seg_w = max(16, end_x - start_x)
             is_active = idx == self._active_segment_index
+            ratio = float(seg.get("ratio", 1.0) or 1.0)
 
-            self._draw_audio_segment(audio_row, idx, seg, start_x, end_x, seg_w, is_active)
+            self._draw_audio_segment(audio_row, idx, seg, start_x, end_x, seg_w, is_active, ratio=ratio)
 
             if text_row.get("visible"):
                 fill_color = QColor(245, 190, 92, 180) if is_active else QColor(229, 172, 75, 92)
