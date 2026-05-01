@@ -14,11 +14,11 @@ class TimelineWidget(QGraphicsView):
     layoutChanged = Signal()
 
     RULER_HEIGHT = 28
-    TRACK_GAP = 6
-    VIDEO_ROW_H = 46
-    AUDIO_ROW_H = 46
-    SUBTITLE_ROW_H = 60
-    FIXED_SCENE_HEIGHT = 212
+    TRACK_GAP = 8
+    VIDEO_ROW_H = 80
+    AUDIO_ROW_H = 80
+    TEXT_ROW_H = 100
+    FIXED_SCENE_HEIGHT = 340
     VIEW_CHROME_HEIGHT = 24
 
     RESIZE_HANDLE_PX = 10
@@ -79,8 +79,8 @@ class TimelineWidget(QGraphicsView):
         self._drag_feedback_end = 0.0
         self._track_visibility = {
             "video": True,
+            "text": True,
             "audio": True,
-            "subtitle": True,
         }
         self._video_thumbnails = []
         self._waveform_samples = []
@@ -90,9 +90,9 @@ class TimelineWidget(QGraphicsView):
     def _compute_layout(self):
         layout = {}
         track_specs = (
-            ("subtitle", self.SUBTITLE_ROW_H),
-            ("audio", self.AUDIO_ROW_H),
             ("video", self.VIDEO_ROW_H),
+            ("text", self.TEXT_ROW_H),
+            ("audio", self.AUDIO_ROW_H),
         )
         visible_tracks = [(name, base_h) for name, base_h in track_specs if self._track_visibility.get(name, True)]
         visible_count = len(visible_tracks)
@@ -209,10 +209,12 @@ class TimelineWidget(QGraphicsView):
         x_pos = float(scene_pos.x())
         y_pos = float(scene_pos.y())
         audio_row = self._layout.get("audio", {})
-        subtitle_row = self._layout.get("subtitle", {})
+        audio2_row = self._layout.get("audio2", {})
+        text_row = self._layout.get("text", {})
         in_audio_lane = audio_row.get("visible") and audio_row["y"] <= y_pos <= (audio_row["y"] + audio_row["h"])
-        in_subtitle_lane = subtitle_row.get("visible") and subtitle_row["y"] <= y_pos <= (subtitle_row["y"] + subtitle_row["h"])
-        if not (in_audio_lane or in_subtitle_lane):
+        in_audio2_lane = audio2_row.get("visible") and audio2_row["y"] <= y_pos <= (audio2_row["y"] + audio2_row["h"])
+        in_text_lane = text_row.get("visible") and text_row["y"] <= y_pos <= (text_row["y"] + text_row["h"])
+        if not (in_audio_lane or in_audio2_lane or in_text_lane):
             return -1
         for idx, seg in enumerate(self.segments):
             start_x = float(seg.get("start", 0.0)) * self.pixels_per_second
@@ -224,7 +226,11 @@ class TimelineWidget(QGraphicsView):
     def _in_audio_lane(self, scene_pos):
         y_pos = float(scene_pos.y())
         audio_row = self._layout.get("audio", {})
-        return bool(audio_row.get("visible") and audio_row["y"] <= y_pos <= (audio_row["y"] + audio_row["h"]))
+        audio2_row = self._layout.get("audio2", {})
+        return bool(
+            (audio_row.get("visible") and audio_row["y"] <= y_pos <= (audio_row["y"] + audio_row["h"]))
+            or (audio2_row.get("visible") and audio2_row["y"] <= y_pos <= (audio2_row["y"] + audio2_row["h"]))
+        )
 
     def _resize_edge_at_scene_pos(self, scene_pos, segment_index):
         if segment_index < 0 or segment_index >= len(self.segments):
@@ -292,6 +298,118 @@ class TimelineWidget(QGraphicsView):
             self._active_segment_index = index
             self.refresh()
 
+    def _draw_audio_background(self, row, pen_color, fill_color, hue_sat):
+        if not row.get("visible"):
+            return
+        duration_s = self._waveform_duration_s
+        start_x = 0.0
+        end_x = duration_s * self.pixels_per_second
+        seg_w = max(16, end_x - start_x)
+        self._scene.addRect(start_x, row["y"] + 11, seg_w, row["h"] - 22, QPen(pen_color, 1), fill_color)
+        waveform_values = self._waveform_slice(0.0, duration_s, max(18, int(seg_w // 2)))
+        if waveform_values:
+            wave_top = row["y"] + 8.0
+            wave_bottom = row["y"] + row["h"] - 6.0
+            wave_height = max(10.0, wave_bottom - wave_top)
+            step = seg_w / max(1, len(waveform_values))
+            column_energies = []
+            for amp in waveform_values:
+                if isinstance(amp, list):
+                    band_values = [float(value) for value in amp]
+                    if band_values:
+                        energy = sum(value * value for value in band_values) / len(band_values)
+                        column_energies.append(energy ** 0.5)
+                    else:
+                        column_energies.append(0.0)
+                else:
+                    column_energies.append(float(amp))
+            smoothed = []
+            for idx_energy, value in enumerate(column_energies):
+                prev_v = column_energies[idx_energy - 1] if idx_energy > 0 else value
+                next_v = column_energies[idx_energy + 1] if idx_energy + 1 < len(column_energies) else value
+                smoothed.append((prev_v * 0.2) + (value * 0.6) + (next_v * 0.2))
+            for wave_idx, amp in enumerate(smoothed):
+                x_pos = start_x + (wave_idx * step) + (step / 2.0)
+                intensity = max(0.12, float(amp) ** 0.78)
+                spike_height = max(3.0, wave_height * intensity)
+                hue = int((wave_idx / max(1, len(smoothed) - 1)) * 300.0)
+                color = QColor.fromHsv(hue, hue_sat, 235, 235)
+                wave_pen = QPen(color, max(1.2, min(2.4, step * 0.34)))
+                wave_pen.setCapStyle(Qt.RoundCap)
+                self._scene.addLine(x_pos, wave_bottom - spike_height, x_pos, wave_bottom, wave_pen)
+
+    def _draw_audio_segment(self, row, idx, seg, start_x, end_x, seg_w, is_active):
+        if not row.get("visible"):
+            return
+        rect_pen = QPen(QColor("#8ef7ee") if is_active else QColor("#6bd6d2"), 1)
+        rect_fill = QColor(117, 241, 235, 110) if is_active else QColor(87, 211, 206, 72)
+        handle_color = QColor("#c7fffb")
+        wave_hue_sat = (190 if is_active else 165, 255 if is_active else 235)
+        fallback_color = QColor("#8fece5" if is_active else "#67cfc8")
+
+        self._scene.addRect(start_x, row["y"] + 11, seg_w, row["h"] - 22, rect_pen, rect_fill)
+        if is_active:
+            left_handle = self._scene.addRect(start_x - 2, row["y"] + 10, 4, row["h"] - 20, QPen(handle_color, 1), handle_color)
+            right_handle = self._scene.addRect(end_x - 2, row["y"] + 10, 4, row["h"] - 20, QPen(handle_color, 1), handle_color)
+            left_handle.setZValue(5)
+            right_handle.setZValue(5)
+
+        waveform_values = self._waveform_slice(
+            float(seg.get("start", 0.0)),
+            float(seg.get("end", 0.0)),
+            max(18, min(160, int(seg_w // 2))),
+        )
+        if waveform_values:
+            wave_top = row["y"] + 8.0
+            wave_bottom = row["y"] + row["h"] - 6.0
+            wave_height = max(10.0, wave_bottom - wave_top)
+            step = seg_w / max(1, len(waveform_values))
+            column_energies = []
+            for amp in waveform_values:
+                if isinstance(amp, list):
+                    band_values = [float(value) for value in amp]
+                    if band_values:
+                        energy = sum(value * value for value in band_values) / len(band_values)
+                        column_energies.append(energy ** 0.5)
+                    else:
+                        column_energies.append(0.0)
+                else:
+                    column_energies.append(float(amp))
+
+            smoothed = []
+            for idx_energy, value in enumerate(column_energies):
+                prev_v = column_energies[idx_energy - 1] if idx_energy > 0 else value
+                next_v = column_energies[idx_energy + 1] if idx_energy + 1 < len(column_energies) else value
+                smoothed.append((prev_v * 0.2) + (value * 0.6) + (next_v * 0.2))
+
+            for wave_idx, amp in enumerate(smoothed):
+                x_pos = start_x + (wave_idx * step) + (step / 2.0)
+                intensity = max(0.12, float(amp) ** 0.78)
+                spike_height = max(3.0, wave_height * intensity)
+                hue = int((wave_idx / max(1, len(smoothed) - 1)) * 300.0)
+                color = QColor.fromHsv(hue, wave_hue_sat[0], wave_hue_sat[1], 235)
+                wave_pen = QPen(color, max(1.2, min(2.4, step * 0.34)))
+                wave_pen.setCapStyle(Qt.RoundCap)
+                self._scene.addLine(x_pos, wave_bottom - spike_height, x_pos, wave_bottom, wave_pen)
+        else:
+            fallback_pen = QPen(fallback_color, 1.0)
+            fallback_pen.setCapStyle(Qt.RoundCap)
+            baseline_y = row["y"] + (row["h"] / 2.0)
+            step = max(3.0, min(8.0, seg_w / 10.0))
+            x_pos = start_x + 4.0
+            while x_pos < end_x - 2.0:
+                self._scene.addLine(x_pos, baseline_y - 2.0, x_pos, baseline_y + 2.0, fallback_pen)
+                x_pos += step
+        if is_active and self._drag_mode and idx == self._drag_segment_index:
+            badge_text = f"{self._format_time(self._drag_feedback_start)} - {self._format_time(self._drag_feedback_end)}"
+            badge_width = max(124, len(badge_text) * 7)
+            badge = self._scene.addRect(start_x, row["y"] - 20, badge_width, 18, QPen(QColor("#5fb9ff"), 1), QColor(17, 33, 51, 220))
+            badge.setZValue(15)
+            badge_label = self._scene.addText(badge_text, QFont("Segoe UI", 7, QFont.Bold))
+            badge_label.setDefaultTextColor(QColor("#dff7ff"))
+            badge_label.setPos(start_x + 8, row["y"] - 19)
+            badge_label.setZValue(16)
+
     def refresh(self):
         self._scene.clear()
         self._layout = self._compute_layout()
@@ -318,7 +436,7 @@ class TimelineWidget(QGraphicsView):
         lane_fills = {
             "video": QColor("#0f1b2b"),
             "audio": QColor("#101c2f"),
-            "subtitle": QColor("#0e1828"),
+            "text": QColor("#0e1828"),
         }
         for track_name, fill in lane_fills.items():
             row = self._layout.get(track_name, {})
@@ -381,174 +499,30 @@ class TimelineWidget(QGraphicsView):
                     item.setZValue(-5)
 
         audio_row = self._layout.get("audio", {})
-        subtitle_row = self._layout.get("subtitle", {})
+        text_row = self._layout.get("text", {})
         for idx, seg in enumerate(self.segments):
             start_x = float(seg.get("start", 0.0)) * self.pixels_per_second
             end_x = float(seg.get("end", 0.0)) * self.pixels_per_second
             seg_w = max(16, end_x - start_x)
             is_active = idx == self._active_segment_index
 
-            if audio_row.get("visible"):
-                self._scene.addRect(
-                    start_x,
-                    audio_row["y"] + 11,
-                    seg_w,
-                    audio_row["h"] - 22,
-                    QPen(QColor("#8ef7ee") if is_active else QColor("#6bd6d2"), 1),
-                    QColor(117, 241, 235, 110) if is_active else QColor(87, 211, 206, 72),
-                )
-                if is_active:
-                    left_handle = self._scene.addRect(
-                        start_x - 2,
-                        audio_row["y"] + 10,
-                        4,
-                        audio_row["h"] - 20,
-                        QPen(QColor("#c7fffb"), 1),
-                        QColor("#c7fffb"),
-                    )
-                    right_handle = self._scene.addRect(
-                        end_x - 2,
-                        audio_row["y"] + 10,
-                        4,
-                        audio_row["h"] - 20,
-                        QPen(QColor("#c7fffb"), 1),
-                        QColor("#c7fffb"),
-                    )
-                    left_handle.setZValue(5)
-                    right_handle.setZValue(5)
+            self._draw_audio_segment(audio_row, idx, seg, start_x, end_x, seg_w, is_active)
 
-                waveform_values = self._waveform_slice(
-                    float(seg.get("start", 0.0)),
-                    float(seg.get("end", 0.0)),
-                    max(18, min(160, int(seg_w // 2))),
-                )
-                if waveform_values:
-                    wave_top = audio_row["y"] + 8.0
-                    wave_bottom = audio_row["y"] + audio_row["h"] - 6.0
-                    wave_height = max(10.0, wave_bottom - wave_top)
-                    step = seg_w / max(1, len(waveform_values))
-                    column_energies = []
-                    for amp in waveform_values:
-                        if isinstance(amp, list):
-                            band_values = [float(value) for value in amp]
-                            if band_values:
-                                energy = sum(value * value for value in band_values) / len(band_values)
-                                column_energies.append(energy ** 0.5)
-                            else:
-                                column_energies.append(0.0)
-                        else:
-                            column_energies.append(float(amp))
-
-                    smoothed = []
-                    for idx_energy, value in enumerate(column_energies):
-                        prev_v = column_energies[idx_energy - 1] if idx_energy > 0 else value
-                        next_v = column_energies[idx_energy + 1] if idx_energy + 1 < len(column_energies) else value
-                        smoothed.append((prev_v * 0.2) + (value * 0.6) + (next_v * 0.2))
-
-                    for wave_idx, amp in enumerate(smoothed):
-                        x_pos = start_x + (wave_idx * step) + (step / 2.0)
-                        intensity = max(0.12, float(amp) ** 0.78)
-                        spike_height = max(3.0, wave_height * intensity)
-                        hue = int((wave_idx / max(1, len(smoothed) - 1)) * 300.0)
-                        color = QColor.fromHsv(hue, 190 if is_active else 165, 255 if is_active else 235, 235)
-                        wave_pen = QPen(color, max(1.2, min(2.4, step * 0.34)))
-                        wave_pen.setCapStyle(Qt.RoundCap)
-                        self._scene.addLine(
-                            x_pos,
-                            wave_bottom - spike_height,
-                            x_pos,
-                            wave_bottom,
-                            wave_pen,
-                        )
-                else:
-                    fallback_pen = QPen(QColor("#8fece5" if is_active else "#67cfc8"), 1.0)
-                    fallback_pen.setCapStyle(Qt.RoundCap)
-                    baseline_y = audio_row["y"] + (audio_row["h"] / 2.0)
-                    step = max(3.0, min(8.0, seg_w / 10.0))
-                    x_pos = start_x + 4.0
-                    while x_pos < end_x - 2.0:
-                        self._scene.addLine(x_pos, baseline_y - 2.0, x_pos, baseline_y + 2.0, fallback_pen)
-                        x_pos += step
-                if is_active and self._drag_mode and idx == self._drag_segment_index:
-                    badge_text = f"{self._format_time(self._drag_feedback_start)} - {self._format_time(self._drag_feedback_end)}"
-                    badge_width = max(124, len(badge_text) * 7)
-                    badge = self._scene.addRect(
-                        start_x,
-                        audio_row["y"] - 20,
-                        badge_width,
-                        18,
-                        QPen(QColor("#5fb9ff"), 1),
-                        QColor(17, 33, 51, 220),
-                    )
-                    badge.setZValue(15)
-                    badge_label = self._scene.addText(badge_text, QFont("Segoe UI", 7, QFont.Bold))
-                    badge_label.setDefaultTextColor(QColor("#dff7ff"))
-                    badge_label.setPos(start_x + 8, audio_row["y"] - 19)
-                    badge_label.setZValue(16)
-
-            if subtitle_row.get("visible"):
+            if text_row.get("visible"):
                 fill_color = QColor(245, 190, 92, 180) if is_active else QColor(229, 172, 75, 92)
                 border_color = QColor(250, 220, 120) if is_active else QColor(120, 92, 40)
-                rect = self._scene.addRect(0, 0, max(12, seg_w), subtitle_row["h"] - 18, QPen(border_color, 1), fill_color)
-                rect.setPos(start_x, subtitle_row["y"] + 9)
+                rect = self._scene.addRect(0, 0, max(12, seg_w), text_row["h"] - 18, QPen(border_color, 1), fill_color)
+                rect.setPos(start_x, text_row["y"] + 9)
                 clean_txt = str(seg.get("text", "")).replace("\n", " ").strip()
                 if len(clean_txt) > 30:
                     clean_txt = clean_txt[:27] + "..."
                 text_item = self._scene.addText(clean_txt, QFont("Segoe UI", 8, QFont.Bold if is_active else QFont.Normal))
                 text_item.setDefaultTextColor(QColor("#1c1204") if is_active else QColor("#fff3df"))
-                text_item.setPos(start_x + 6, subtitle_row["y"] + 16)
+                text_item.setPos(start_x + 6, text_row["y"] + 16)
 
         # Draw full-track background waveform when no segments exist yet
-        if audio_row.get("visible") and self._waveform_samples and self._waveform_duration_s > 0.0 and not self.segments:
-            duration_s = self._waveform_duration_s
-            start_x = 0.0
-            end_x = duration_s * self.pixels_per_second
-            seg_w = max(16, end_x - start_x)
-            self._scene.addRect(
-                start_x,
-                audio_row["y"] + 11,
-                seg_w,
-                audio_row["h"] - 22,
-                QPen(QColor("#6bd6d2"), 1),
-                QColor(87, 211, 206, 72),
-            )
-            waveform_values = self._waveform_slice(0.0, duration_s, max(18, int(seg_w // 2)))
-            if waveform_values:
-                wave_top = audio_row["y"] + 8.0
-                wave_bottom = audio_row["y"] + audio_row["h"] - 6.0
-                wave_height = max(10.0, wave_bottom - wave_top)
-                step = seg_w / max(1, len(waveform_values))
-                column_energies = []
-                for amp in waveform_values:
-                    if isinstance(amp, list):
-                        band_values = [float(value) for value in amp]
-                        if band_values:
-                            energy = sum(value * value for value in band_values) / len(band_values)
-                            column_energies.append(energy ** 0.5)
-                        else:
-                            column_energies.append(0.0)
-                    else:
-                        column_energies.append(float(amp))
-                smoothed = []
-                for idx_energy, value in enumerate(column_energies):
-                    prev_v = column_energies[idx_energy - 1] if idx_energy > 0 else value
-                    next_v = column_energies[idx_energy + 1] if idx_energy + 1 < len(column_energies) else value
-                    smoothed.append((prev_v * 0.2) + (value * 0.6) + (next_v * 0.2))
-                for wave_idx, amp in enumerate(smoothed):
-                    x_pos = start_x + (wave_idx * step) + (step / 2.0)
-                    intensity = max(0.12, float(amp) ** 0.78)
-                    spike_height = max(3.0, wave_height * intensity)
-                    hue = int((wave_idx / max(1, len(smoothed) - 1)) * 300.0)
-                    color = QColor.fromHsv(hue, 165, 235, 235)
-                    wave_pen = QPen(color, max(1.2, min(2.4, step * 0.34)))
-                    wave_pen.setCapStyle(Qt.RoundCap)
-                    self._scene.addLine(
-                        x_pos,
-                        wave_bottom - spike_height,
-                        x_pos,
-                        wave_bottom,
-                        wave_pen,
-                    )
+        if self._waveform_samples and self._waveform_duration_s > 0.0 and not self.segments:
+            self._draw_audio_background(audio_row, QColor("#6bd6d2"), QColor(87, 211, 206, 72), 165)
 
         self.playhead = self._scene.addLine(0, 0, 0, scene_height, QPen(QColor("#60f7ea"), 2))
         if self.playhead:

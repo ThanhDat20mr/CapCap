@@ -28,8 +28,8 @@ class VoiceWorkflow:
     HARD_OUTLIER_RATIO = 1.20
     F5_RETRY_RATIO = 1.20
     F5_MAX_RETRY_ATTEMPTS = 1
-    RETRY_MIN_ACCEPT_RATIO = 0.78
-    RESCUE_MIN_ACCEPT_RATIO = 0.84
+    RETRY_MIN_ACCEPT_RATIO = 0.88
+    RESCUE_MIN_ACCEPT_RATIO = 0.88
     MAX_SAFE_SEGMENT_SPEED = 1.12
     MAX_STUBBORN_SEGMENT_SPEED = 1.10
     TARGET_RATIO_FLOOR = 0.84
@@ -818,6 +818,7 @@ class VoiceWorkflow:
     ):
         updated_wavs = list(wavs or [])
         retry_count = 0
+        print(f"[Voice Retry] ai_rewrite_dubbing={bool(ai_rewrite_dubbing)} segments_with_overrun=0")
         for idx, seg in enumerate(list(segments or [])):
             wav_path = updated_wavs[idx] if idx < len(updated_wavs) else ""
             if not wav_path or not os.path.exists(wav_path):
@@ -828,6 +829,8 @@ class VoiceWorkflow:
             ratio = (actual_duration / target_duration) if target_duration > 0 else 0.0
             if ratio <= self.AI_REWRITE_RATIO:
                 continue
+
+            print(f"[Voice Retry] Seg {idx+1}: ratio={ratio:.3f} target={target_duration:.2f}s actual={actual_duration:.2f}s")
 
             metrics = dict(seg.get("_tts_metrics") or {})
             max_words_vi = max(1, int(metrics.get("max_words_vi") or self._max_words_vi(target_duration, int(metrics.get("speech_cost") or 0))))
@@ -852,6 +855,7 @@ class VoiceWorkflow:
                 ratio=best_ratio,
             ):
                 applied_action = "speed_light"
+                print(f"[Voice Retry] Seg {idx+1}: speed_light takes priority (ratio={best_ratio:.3f}), skip retry")
                 metrics["retry_applied"] = True
                 metrics["retry_action"] = applied_action
                 seg["_tts_metrics"] = metrics
@@ -868,6 +872,7 @@ class VoiceWorkflow:
                     attempt=attempt,
                     retry_cap=retry_cap,
                 )
+                print(f"[Voice Retry] Seg {idx+1} attempt {attempt}/{retry_cap}: action={action} ratio={best_ratio:.3f}")
                 if action == "accept":
                     break
 
@@ -1082,6 +1087,8 @@ class VoiceWorkflow:
             return False
         if self._is_target_ratio_band(new_ratio):
             return True
+        if old_ratio > 1.0 and new_ratio < 1.0 and new_ratio < 0.92:
+            return False
         return abs(new_ratio - 1.0) < abs(old_ratio - 1.0)
 
     def _apply_segment_speed(self, *, wavs, tmp_dir: str, voice_speed: float):
@@ -1218,7 +1225,82 @@ class VoiceWorkflow:
                 tmp_dir=tmp_dir,
                 voice_speed=voice_speed,
             )
+        if (sync_mode or "off").strip().lower() == "force":
+            for idx, (seg, wav_path) in enumerate(zip(list(segments or []), polished_wavs)):
+                if not wav_path or not os.path.exists(wav_path):
+                    continue
+                target_duration = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
+                actual_duration = self._probe_wav_duration_seconds(wav_path)
+                ratio = (actual_duration / target_duration) if target_duration > 0 else 0.0
+                if ratio > 1.0:
+                    synced_path = os.path.join(tmp_dir, f"seg_{idx:04d}_forcefit.wav")
+                    polished_wavs[idx] = self.engine_runtime.fit_wav_to_duration(
+                        input_wav_path=wav_path,
+                        output_wav_path=synced_path,
+                        target_duration_seconds=target_duration,
+                        mode="force",
+                    )
+                    seg["action_taken"] = (seg.get("action_taken") or "") + "+force_fit"
+                    seg["ratio"] = 1.0
         return polished_wavs
+
+    def _apply_deficit_timing_polish(self, *, segments, wavs, tmp_dir, sync_mode):
+        polished_wavs = list(wavs or [])
+        segments = list(segments or [])
+        total_shift_s = 0.0
+
+        for idx, wav_path in enumerate(polished_wavs):
+            if not wav_path or not os.path.exists(wav_path):
+                continue
+            seg = segments[idx]
+            target_d = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
+            actual_d = self._probe_wav_duration_seconds(wav_path)
+            ratio = (actual_d / target_d) if target_d > 0 else 1.0
+
+            if ratio >= 1.0 or ratio <= 0.01:
+                if total_shift_s > 0:
+                    seg["start"] += total_shift_s
+                    seg["end"] += total_shift_s
+                continue
+
+            if total_shift_s > 0:
+                seg["start"] += total_shift_s
+                seg["end"] += total_shift_s
+                target_d = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
+                ratio = (actual_d / target_d) if target_d > 0 else 1.0
+
+            gap_ms = int((target_d - actual_d) * 1000)
+            if gap_ms <= 20:
+                print(f"[Voice Deficit] Segment {idx + 1}: gap={gap_ms}ms → overlap (build_voice_track)")
+                continue
+
+            mode_key = (sync_mode or "off").strip().lower()
+
+            if ratio >= 0.87 and mode_key == "smart":
+                synced_path = os.path.join(tmp_dir, f"seg_{idx:04d}_deficit_stretch.wav")
+                polished_wavs[idx] = self.engine_runtime.fit_wav_to_duration(
+                    input_wav_path=wav_path,
+                    output_wav_path=synced_path,
+                    target_duration_seconds=target_d,
+                    mode="smart",
+                )
+                seg["action_taken"] = "deficit_stretch"
+                new_actual = self._probe_wav_duration_seconds(polished_wavs[idx])
+                gap_ms = max(0, int((target_d - new_actual) * 1000))
+                print(f"[Voice Deficit] Segment {idx + 1}: ratio={ratio:.3f} → deficit_stretch (gap_after={gap_ms}ms)")
+                if gap_ms <= 20:
+                    continue
+            elif ratio >= 0.85:
+                print(f"[Voice Deficit] Segment {idx + 1}: ratio={ratio:.3f} gap={gap_ms}ms → no action (silence+fade)")
+                continue
+
+            if gap_ms > 0 and ratio < 0.85:
+                print(f"[Voice Deficit] Segment {idx + 1}: ratio={ratio:.3f} gap={gap_ms}ms → silence+fade")
+                continue
+
+        if total_shift_s > 0:
+            print(f"[Voice Deficit] Total timeline shift: +{total_shift_s:.2f}s")
+        return segments, polished_wavs
 
     def _fit_segment_wavs_to_timeline(self, *, segments, wavs, tmp_dir: str, sync_mode: str):
         mode_key = (sync_mode or "off").strip().lower()
@@ -1489,6 +1571,14 @@ class VoiceWorkflow:
             sync_mode=timing_sync_mode,
         )
         self._log_segment_fit_metrics(segments=segments, wavs=wavs)
+
+        segments, wavs = self._apply_deficit_timing_polish(
+            segments=segments,
+            wavs=wavs,
+            tmp_dir=tmp_dir,
+            sync_mode=timing_sync_mode,
+        )
+
         synth_elapsed = time.perf_counter() - synth_started
         print(
             "[Voice Workflow] Speed plan: "

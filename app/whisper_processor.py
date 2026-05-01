@@ -151,13 +151,16 @@ def _faster_whisper_cache_dir():
 
 
 def _detect_faster_whisper_runtime() -> dict:
-    _ensure_openmp_runtime_compat()
-    _ensure_cuda_runtime_on_path()
+    forced_device = str(os.environ.get("CAPCAP_WHISPER_DEVICE", "") or "").strip().lower()
     runtime = {
         "device": "cpu",
         "compute_type": "int8",
         "label": "CPU / int8",
     }
+    if forced_device == "cpu":
+        return runtime
+    _ensure_openmp_runtime_compat()
+    _ensure_cuda_runtime_on_path()
     try:
         import ctranslate2
 
@@ -198,7 +201,24 @@ def _load_whisper_model(model_name):
 
         try:
             print(f"[Whisper] Loading faster-whisper with {runtime['label']}")
-            model = WhisperModel(model_name, **model_kwargs)
+            import threading
+            load_error = [None]  # type: ignore
+            load_result = [None]  # type: ignore
+
+            def _do_load():
+                try:
+                    load_result[0] = WhisperModel(model_name, **model_kwargs)
+                except Exception as e:
+                    load_error[0] = e
+
+            load_thread = threading.Thread(target=_do_load, daemon=True)
+            load_thread.start()
+            load_thread.join(timeout=120)
+            if load_thread.is_alive():
+                raise TimeoutError("WhisperModel load timed out after 120s (CUDA may be hanging)")
+            if load_error[0]:
+                raise load_error[0]
+            model = load_result[0]
             _WHISPER_MODEL_CACHE[cache_key] = model
             return model
         except Exception as exc:
@@ -214,7 +234,24 @@ def _load_whisper_model(model_name):
                 cached_fallback = _WHISPER_MODEL_CACHE.get(fallback_key)
                 if cached_fallback is not None:
                     return cached_fallback
-                model = WhisperModel(model_name, **fallback_kwargs)
+                import threading
+                fb_error = [None]  # type: ignore
+                fb_result = [None]  # type: ignore
+
+                def _do_fb_load():
+                    try:
+                        fb_result[0] = WhisperModel(model_name, **fallback_kwargs)
+                    except Exception as e:
+                        fb_error[0] = e
+
+                fb_thread = threading.Thread(target=_do_fb_load, daemon=True)
+                fb_thread.start()
+                fb_thread.join(timeout=120)
+                if fb_thread.is_alive():
+                    raise TimeoutError("WhisperModel CPU fallback load timed out after 120s")
+                if fb_error[0]:
+                    raise fb_error[0]
+                model = fb_result[0]
                 _WHISPER_MODEL_CACHE[fallback_key] = model
                 return model
             raise

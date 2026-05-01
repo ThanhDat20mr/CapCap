@@ -84,10 +84,7 @@ class PipelineController:
             # Cleaner voice (separation) is handled inside the batch silently.
             self.progress_dialog.add_step("ai_process", "Subtitle Processing (AI)")
         else:
-            if includes_separation:
-                self.progress_dialog.add_step("separation", "Isolating Background Music")
-            self.progress_dialog.add_step("transcription", "Transcribing Speech (AI)")
-            self.progress_dialog.add_step("translation", "Translating & Polishing Contents")
+            self.progress_dialog.add_step("ai_process", "Subtitle Processing (AI)")
         self.progress_dialog.add_step("voiceover", "Synthesizing AI Voiceover")
         self.progress_dialog.add_step("preview", "Preparing Video Preview")
         self.progress_dialog.show()
@@ -120,11 +117,7 @@ class PipelineController:
             self.gui.run_all_btn.setText("Processing...")
             
         self._setup_progress_dialog(includes_separation=requires_separation)
-        from runtime_profile import is_remote_profile
-        if is_remote_profile():
-            self.progress_dialog.start_step("ai_process")
-        else:
-            self.progress_dialog.start_step("transcription")
+        self.progress_dialog.start_step("ai_process")
         
         # Start the background worker
         self.gui.log(f"[Pipeline] Starting prepare workflow for: {video_path}")
@@ -148,27 +141,10 @@ class PipelineController:
         self.gui.prepare_workflow_thread.start()
 
     def _on_prepare_step_started(self, step_id):
-        """Callback from PrepareWorkflowWorker when an internal stage begins."""
         if not self.progress_dialog:
             return
-
-        from runtime_profile import is_remote_profile
-        if is_remote_profile():
-            # Remote mode: backend does everything in one batch, ignore internal sub-step signals
-            if step_id == "transcription":
-                self._hide_whisper_download_dialog()
-            return
-
-        order = ["separation", "transcription", "translation"]
-        if step_id in order:
-            idx = order.index(step_id)
-            for i in range(idx):
-                self.progress_dialog.finish_step(order[i])
-            self.progress_dialog.start_step(step_id)
-            self.gui._pipeline_step = step_id
-
-            if step_id == "transcription":
-                self._hide_whisper_download_dialog()
+        if step_id == "transcription":
+            self._hide_whisper_download_dialog()
 
     def on_prepare_workflow_finished(self, project_state_path, error):
         """Callback when the background PrepareWorkflow finishes completely."""
@@ -180,13 +156,7 @@ class PipelineController:
             return
 
         if self.progress_dialog:
-            from runtime_profile import is_remote_profile
-            if is_remote_profile():
-                self.progress_dialog.finish_step("ai_process")
-            else:
-                for step in ["separation", "transcription", "translation"]:
-                    if step in self.progress_dialog.steps:
-                        self.progress_dialog.finish_step(step)
+            self.progress_dialog.finish_step("ai_process")
 
         try:
             state = self.gui.project_service.load_project(project_state_path)

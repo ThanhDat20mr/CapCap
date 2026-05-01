@@ -263,7 +263,7 @@ def build_voice_track_from_srt_segments(
 
     base = AudioSegment.silent(duration=max(0, total_duration_ms), frame_rate=16000).set_channels(1)
 
-    for seg, wav_path in zip(segments, tts_wav_paths):
+    for idx, (seg, wav_path) in enumerate(zip(segments, tts_wav_paths)):
         if not wav_path or not os.path.exists(wav_path):
             continue
         start_ms = int(float(seg.get("start", 0.0)) * 1000)
@@ -274,8 +274,39 @@ def build_voice_track_from_srt_segments(
         clip = clip.set_frame_rate(16000).set_channels(1)
         if gain_db:
             clip = clip + gain_db
+
         if max_len > 0:
-            clip = clip[:max_len]
+            clip_len = len(clip)
+            if clip_len > max_len:
+                clip = clip[:max_len]
+                clip = clip.fade_out(duration=min(10, max_len))
+            elif clip_len < max_len:
+                gap_ms = max_len - clip_len
+                clip_end_ms = start_ms + clip_len
+                if idx + 1 < len(segments):
+                    next_start_ms = int(float(segments[idx + 1].get("start", 0.0)) * 1000)
+                    next_gap = next_start_ms - clip_end_ms
+                    if 0 < next_gap <= 20:
+                        overlap_ms = 10
+                        extend_ms = min(next_gap + overlap_ms, clip_len)
+                        clip = clip.fade_out(duration=extend_ms)
+                        clip = clip + AudioSegment.silent(duration=extend_ms, frame_rate=16000)
+                        gap_ms = 0
+                        print(f"[BuildTrack] Segment {idx + 1}: overlap ({next_gap}ms gap + {overlap_ms}ms cross)")
+                if gap_ms > 0:
+                    fade_ms = min(gap_ms, 50)
+                    clip = clip.fade_out(duration=fade_ms)
+                    silent_ms = gap_ms - fade_ms
+                    if silent_ms > 0:
+                        clip = clip + AudioSegment.silent(duration=silent_ms, frame_rate=16000)
+                    print(f"[BuildTrack] Segment {idx + 1}: fade_tail({fade_ms}ms)" + (f" + silence({silent_ms}ms)" if silent_ms > 0 else ""))
+
+        final_clip_len = len(clip)
+        print(f"[BuildTrack] Seg {idx + 1}: slot=[{start_ms}..{end_ms}]ms({max_len}ms) "
+              f"clip={clip_len}ms -> {final_clip_len}ms "
+              f"pos={start_ms}ms slot_end={start_ms + final_clip_len}ms"
+              + (" (truncated)" if clip_len > max_len else ""))
+
         base = base.overlay(clip, position=max(0, start_ms))
 
     os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)

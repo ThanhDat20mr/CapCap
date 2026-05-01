@@ -32,21 +32,34 @@ def remote_api_headers() -> dict[str, str]:
     return headers
 
 
-def remote_api_post(path: str, payload: dict, *, timeout: int | None = None) -> dict:
+def remote_api_post(path: str, payload: dict, *, timeout: int | None = None, retries: int = 3) -> dict:
     url = f"{remote_api_base_url()}{path}"
-    response = requests.post(
-        url,
-        json=payload,
-        headers=remote_api_headers(),
-        timeout=timeout or remote_api_timeout_seconds(),
-    )
-    response.raise_for_status()
-    data = response.json()
-    if not isinstance(data, dict):
-        raise RuntimeError("Remote API returned an invalid response.")
-    if not data.get("ok", False):
-        raise RuntimeError(str(data.get("error") or "Remote API request failed."))
-    return data
+    last_error = None
+    for attempt in range(max(1, retries)):
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                headers=remote_api_headers(),
+                timeout=timeout or remote_api_timeout_seconds(),
+            )
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("Remote API returned an invalid response.")
+            if not data.get("ok", False):
+                raise RuntimeError(str(data.get("error") or "Remote API request failed."))
+            return data
+        except (requests.ConnectionError, ConnectionError, ConnectionResetError, TimeoutError) as exc:
+            last_error = exc
+            if attempt < retries - 1:
+                import time
+                wait_s = (attempt + 1) * 2
+                print(f"[Remote API] Connection error (attempt {attempt+1}/{retries}), retrying in {wait_s}s: {exc}")
+                time.sleep(wait_s)
+                continue
+            raise
+    raise last_error  # type: ignore[misc]
 
 
 def remote_api_get(path: str, *, timeout: int | None = None) -> dict:

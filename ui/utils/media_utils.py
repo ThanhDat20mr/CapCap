@@ -162,6 +162,10 @@ def browse_video(gui):
     if hasattr(gui, "ensure_media_backend_ready"):
         gui.ensure_media_backend_ready()
     gui.video_path_edit.setText(file_path)
+    gui._current_video_path = os.path.abspath(file_path)
+    if hasattr(gui, "settings"):
+        from views.launcher import LauncherWindow
+        LauncherWindow.add_recent(gui.settings, file_path)
     gui.media_player.setSource(QUrl.fromLocalFile(file_path))
     gui.refresh_video_dimensions(file_path)
 

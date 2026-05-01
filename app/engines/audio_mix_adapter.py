@@ -22,12 +22,16 @@ class AudioMixAdapter:
         output_wav_path: str,
         target_duration_seconds: float,
         mode: str = "off",
+        smart_min_ratio: float = 0.77,
+        smart_max_ratio: float = 1.15,
     ) -> str:
         return fit_wav_to_duration(
             input_wav_path=input_wav_path,
             output_wav_path=output_wav_path,
             target_duration_seconds=target_duration_seconds,
             mode=mode,
+            smart_min_ratio=smart_min_ratio,
+            smart_max_ratio=smart_max_ratio,
         )
 
     def build_voice_track(self, *, segments, tts_wav_paths, output_wav_path: str, gain_db: float = 0.0) -> str:

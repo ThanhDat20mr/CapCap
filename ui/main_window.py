@@ -163,6 +163,7 @@ class VideoTranslatorGUI(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self._current_video_path = ""
         title = "CapCap Video Translator"
         if is_remote_profile():
             title += " (Remote)"
@@ -3528,10 +3529,12 @@ class VideoTranslatorGUI(QMainWindow):
         if video_path:
             video_name = os.path.basename(video_path)
             self.project_title_label.setText(f"Project: {video_name}")
-            self.upload_status_label.setText(f"[OK] {video_name} uploaded")
+            if hasattr(self, "upload_status_label"):
+                self.upload_status_label.setText(f"[OK] {video_name} uploaded")
         else:
             self.project_title_label.setText("Project: No video selected")
-            self.upload_status_label.setText("No video uploaded yet")
+            if hasattr(self, "upload_status_label"):
+                self.upload_status_label.setText("No video uploaded yet")
 
     def sync_left_panel_container_width(self):
         scroll_area = getattr(self, "left_panel_scroll_area", None)
@@ -4762,7 +4765,7 @@ class VideoTranslatorGUI(QMainWindow):
                 card_layout.addWidget(spoken_title)
                 card_layout.addWidget(spoken_editor, 0)
                 card_layout.addLayout(spoken_action_layout)
-                
+
                 for label in card.findChildren(QLabel):
                     if label.text().strip() in {"→", "â†’"}:
                         label.hide()
@@ -7239,6 +7242,26 @@ class VideoTranslatorGUI(QMainWindow):
                 "Clean Project",
                 "No removable intermediate files were found for the current project.",
             )
+        self._return_to_launcher(project_removed_from_recent=bool(removed_paths))
+
+    def _return_to_launcher(self, project_removed_from_recent=True):
+        video_path = getattr(self, "_current_video_path", "")
+        if not video_path:
+            video_path = os.path.normpath(self.video_path_edit.text().strip())
+        self.log(f"[Clean] _return_to_launcher: video_path={video_path}")
+        if video_path and project_removed_from_recent:
+            try:
+                from views.launcher import _load_recent_projects, _save_recent_projects
+                projects = _load_recent_projects()
+                projects = [p for p in projects if os.path.normpath(p.get("video_path", "")) != os.path.normpath(video_path)]
+                _save_recent_projects(None, projects)
+                self.log(f"[Clean] Removed from recent: {video_path} -> {len(projects)} remaining")
+            except Exception as e:
+                self.log(f"[Clean] Failed: {e}")
+        self._current_video_path = ""
+        QApplication.setQuitOnLastWindowClosed(False)
+        self.close()
+        QTimer.singleShot(400, _relaunch_launcher)
 
     def closeEvent(self, event):
         try:
@@ -7362,6 +7385,27 @@ class VideoTranslatorGUI(QMainWindow):
         except Exception:
             self._preview_speed = 1.0
         self._apply_preview_audio_state()
+
+
+def _relaunch_launcher():
+    from views.launcher import show_launcher, LauncherWindow
+    video_path = show_launcher(None)
+    if not video_path:
+        QApplication.quit()
+        return
+    QApplication.setQuitOnLastWindowClosed(True)
+    LauncherWindow.add_recent(None, video_path)
+    new_window = VideoTranslatorGUI()
+    new_window.show()
+    def _init():
+        new_window.ensure_media_backend_ready()
+        new_window.video_path_edit.setText(video_path)
+        new_window.media_player.setSource(QUrl.fromLocalFile(video_path))
+        if hasattr(new_window, "refresh_video_dimensions"):
+            new_window.refresh_video_dimensions(video_path)
+        new_window.current_project_state = new_window.ensure_current_project()
+        new_window.load_project_context(new_window.current_project_state)
+    QTimer.singleShot(100, _init)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
