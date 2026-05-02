@@ -845,9 +845,7 @@ class VoiceWorkflow:
             attempt_count = 1
 
             if voice_provider == "f5":
-                if best_ratio <= self.F5_RETRY_RATIO:
-                    continue
-                retry_cap = min(retry_cap, self.F5_MAX_RETRY_ATTEMPTS)
+                continue
 
             if self._should_use_speedup_before_rewrite(
                 duration_sec=target_duration,

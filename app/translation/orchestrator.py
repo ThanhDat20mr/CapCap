@@ -764,17 +764,6 @@ class TranslationOrchestrator:
         if len(compact) <= max_chars or len(compact.split()) <= 4:
             return [compact]
 
-        ai_chunks = self._try_ai_split_single_line_chunks(
-            compact,
-            duration,
-            polisher=polisher,
-            provider_type=provider_type,
-            target_lang=target_lang,
-            max_chars=max_chars,
-        )
-        if ai_chunks:
-            return ai_chunks
-
         sentence_parts = [part.strip(' ,') for part in re.split(r'(?<=[,.;:!?])\s+', compact) if part.strip(' ,')]
         if len(sentence_parts) > 1:
             chunks: list[str] = []
