@@ -257,26 +257,12 @@ class SubtitleController:
             QMessageBox.warning(self.gui, "Rewrite Unavailable", "Please select a subtitle block in the inspector first.")
             return
 
-        style_instruction = (self.gui.get_ai_style_instruction() or "").strip()
         selected_source = [dict(source_segments[index])]
         selected_translation = [dict(translated_segments[index])]
         self.gui._rewrite_source_segments = selected_source
         self.gui._rewrite_base_translated_segments = selected_translation
         self.gui._rewrite_selected_segment_index = index
-        self.gui._rewrite_selected_segment_original_label = self.gui.rewrite_selected_segment_btn.text()
-        self.gui.rewrite_selected_segment_btn.setEnabled(False)
-        self.gui.rewrite_selected_segment_btn.setText("Rewriting...")
-        self.gui.progress_bar.setValue(90)
-        self.gui.update_project_step("refine_translation", "running")
-
-        self.gui.rewrite_selected_segment_thread = RewriteTranslationWorker(
-            selected_source,
-            selected_translation,
-            self.gui.get_source_language_code(),
-            style_instruction=style_instruction,
-        )
-        self.gui.rewrite_selected_segment_thread.finished.connect(self.gui.on_rewrite_selected_segment_finished)
-        self.gui.rewrite_selected_segment_thread.start()
+        self._open_rewrite_dialog(selected_source, selected_translation)
 
     def _validate_rewrite_srt(self, srt_text: str):
         normalized_text = str(srt_text or "").strip()
@@ -396,10 +382,18 @@ class SubtitleController:
 
         rewrite_source_segments = getattr(self.gui, "_rewrite_source_segments", None) or list(self.gui.current_segments or [])
         applied_segments = self._expand_rewrite_segments_for_current_layout(parsed_segments, rewrite_source_segments)
-        self.gui.current_translated_segments = applied_segments
-        self.gui.current_translated_segment_models = self.gui._dict_segments_to_models(applied_segments, translated=True)
+
+        segment_index = int(getattr(self.gui, "_rewrite_selected_segment_index", -1))
+        if segment_index >= 0 and segment_index < len(self.gui.current_translated_segments or []):
+            self.gui.current_translated_segments[segment_index] = applied_segments[0] if applied_segments else dict(self.gui.current_translated_segments[segment_index])
+            self.gui.current_translated_segment_models = self.gui._dict_segments_to_models(self.gui.current_translated_segments, translated=True)
+            normalized_srt = self.gui.format_to_srt(self.gui.current_translated_segments)
+        else:
+            self.gui.current_translated_segments = applied_segments
+            self.gui.current_translated_segment_models = self.gui._dict_segments_to_models(applied_segments, translated=True)
+            normalized_srt = self.gui.format_to_srt(self.gui.current_translated_segments)
+
         self.gui.refresh_ai_keyword_highlights(force=True)
-        normalized_srt = self.gui.format_to_srt(self.gui.current_translated_segments)
         self.gui.translated_text.setText(normalized_srt)
         self.gui.apply_segments_to_timeline()
 
@@ -425,12 +419,14 @@ class SubtitleController:
             dialog.accept()
         self.gui.schedule_live_subtitle_preview_refresh()
         self.gui.schedule_auto_frame_preview()
+        self.gui.sync_segment_editor_rows()
         QMessageBox.information(self.gui, "Rewrite Applied", "The rewritten SRT was applied to the subtitle editor.")
         self.gui.refresh_ui_state()
 
     def _open_rewrite_dialog(self, source_segments, translated_segments):
+        is_single = len(source_segments) == 1 and len(translated_segments) == 1
         dialog = QDialog(self.gui)
-        dialog.setWindowTitle("Rewrite Subtitle")
+        dialog.setWindowTitle("Rewrite Selected Subtitle" if is_single else "Rewrite Subtitle")
         dialog.setModal(True)
         dialog.setMinimumWidth(760)
         dialog.setMinimumHeight(640)
@@ -469,7 +465,7 @@ class SubtitleController:
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(12)
 
-        title = QLabel("Rewrite subtitle")
+        title = QLabel("Rewrite selected subtitle" if is_single else "Rewrite subtitle")
         title.setObjectName("statusHeadline")
         layout.addWidget(title)
 

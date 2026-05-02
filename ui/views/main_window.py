@@ -89,6 +89,8 @@ def _build_header_bar(gui):
     more_menu.addSeparator()
     gui.clean_project_action = more_menu.addAction("Clean")
     gui.clean_project_action.triggered.connect(gui.clean_current_project)
+    gui.exit_project_action = more_menu.addAction("Exit")
+    gui.exit_project_action.triggered.connect(gui.exit_to_launcher)
     gui.settings_action = more_menu.addAction("Settings")
     gui.settings_action.triggered.connect(gui.open_model_settings_dialog)
 
@@ -150,7 +152,6 @@ def _connect_ui_signals(gui):
     gui.translate_btn.clicked.connect(gui.run_translation)
     gui.rewrite_translation_btn.clicked.connect(gui.run_rewrite_translation)
     gui.import_translation_btn.clicked.connect(gui.import_translated_srt)
-    gui.voiceover_btn.clicked.connect(gui.run_voiceover)
     gui.preview_btn.clicked.connect(gui.preview_video)
     if hasattr(gui, "reset_framing_btn"):
         gui.reset_framing_btn.clicked.connect(gui.reset_preview_framing)
@@ -178,6 +179,8 @@ def _connect_ui_signals(gui):
     gui.bg_music_edit.textChanged.connect(gui.refresh_ui_state)
     gui.mixed_audio_edit.textChanged.connect(gui.refresh_ui_state)
     gui.use_generated_audio_radio.toggled.connect(gui.on_audio_source_mode_changed)
+    if hasattr(gui, "subtitle_single_line_cb"):
+        gui.subtitle_single_line_cb.toggled.connect(gui.on_single_line_toggled)
     gui.use_existing_audio_radio.toggled.connect(gui.on_audio_source_mode_changed)
     gui.blur_area_btn.toggled.connect(gui.toggle_blur_area_editing)
     if hasattr(gui, "video_view") and hasattr(gui.video_view, "framingChanged"):

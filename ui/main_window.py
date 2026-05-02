@@ -3429,8 +3429,6 @@ class VideoTranslatorGUI(QMainWindow):
         show_voice = mode in ("voice", "both")
         if hasattr(self, "voice_section_card"):
             self.voice_section_card.setVisible(show_voice)
-        if hasattr(self, "voiceover_btn"):
-            self.voiceover_btn.setVisible(show_voice)
         if hasattr(self, "quick_preview_btn"):
             self.quick_preview_btn.setVisible(show_voice)
         if hasattr(self, "styled_preview_btn"):
@@ -3516,12 +3514,6 @@ class VideoTranslatorGUI(QMainWindow):
             pipeline_active=getattr(self, "_pipeline_active", False),
             mode_label=self.output_mode_combo.currentText(),
         )
-
-        self.workflow_status_badge.setText(guidance["badge"])
-        self.next_step_label.setText(guidance["headline"])
-        self.readiness_label.setText(guidance["readiness"])
-        self.readiness_label.hide()
-        self.update_progress_checklist()
         self.update_preview_context_label(guidance["has_subtitles"], guidance["has_voice_audio"])
 
     def update_project_header(self):
@@ -3585,47 +3577,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.toggle_panel_btn.setText("Hide Controls" if visible else "Show Controls")
 
     def update_progress_checklist(self):
-        steps = getattr(getattr(self, "current_project_state", None), "steps", {}) or {}
-
-        def set_status_chip_state(label, state: str):
-            if not label:
-                return
-            label.setProperty("state", state)
-            label.style().unpolish(label)
-            label.style().polish(label)
-            label.update()
-
-        has_audio = bool(
-            (self.last_extracted_audio and os.path.exists(self.last_extracted_audio))
-            or (self.audio_source_edit.text().strip() and os.path.exists(self.audio_source_edit.text().strip()))
-            or steps.get("extract_audio") == "done"
-        )
-        has_subtitle = bool(self.current_segments or self.transcript_text.toPlainText().strip()) or steps.get("transcribe") == "done"
-        has_translation = bool(self.current_translated_segments or self.last_translated_srt_path) or steps.get("translate_raw") == "done"
-        has_voice = bool(self.resolve_selected_audio_path() and os.path.exists(self.resolve_selected_audio_path()))
-        translation_running = steps.get("translate_raw") == "running" or steps.get("refine_translation") == "running"
-        voice_running = steps.get("generate_tts") == "running" or steps.get("mix_audio") == "running"
-
-        self.progress_audio_label.setText(("[OK] " if has_audio else "[ ] ") + "Audio")
-        set_status_chip_state(self.progress_audio_label, "ok" if has_audio else "pending")
-        self.progress_subtitle_label.setText(("[OK] " if has_subtitle else "[ ] ") + "Original")
-        set_status_chip_state(self.progress_subtitle_label, "ok" if has_subtitle else "pending")
-        if translation_running:
-            self.progress_translate_label.setText("[...] Vietnamese")
-            set_status_chip_state(self.progress_translate_label, "running")
-        else:
-            self.progress_translate_label.setText(("[OK] " if has_translation else "[ ] ") + "Vietnamese")
-            set_status_chip_state(self.progress_translate_label, "ok" if has_translation else "pending")
-
-        if self.get_output_mode_key() == "subtitle":
-            self.progress_voice_label.setText("[ ] Voice N/A")
-            set_status_chip_state(self.progress_voice_label, "na")
-        elif voice_running:
-            self.progress_voice_label.setText("[...] Voice")
-            set_status_chip_state(self.progress_voice_label, "running")
-        else:
-            self.progress_voice_label.setText(("[OK] " if has_voice else "[ ] ") + "Voice")
-            set_status_chip_state(self.progress_voice_label, "ok" if has_voice else "pending")
+        pass
 
     def update_preview_context_label(self, has_subtitles: bool, has_voice_audio: bool):
         subtitle_source = "Vietnamese review track" if self.current_translated_segments else ("original subtitle track" if self.current_segments else "no subtitle track yet")
@@ -3674,9 +3626,6 @@ class VideoTranslatorGUI(QMainWindow):
         preview_h = max(1.0, preview_rect.height() or float(self.video_view.height()) or 1.0)
         preset = self.get_subtitle_preset_config()
         export_font_size = int(self.subtitle_font_size_spin.value())
-        single_line_enabled = bool(getattr(self, "subtitle_single_line_cb", None) and self.subtitle_single_line_cb.isChecked())
-        if single_line_enabled:
-            export_font_size = max(10, int(round(export_font_size * 0.84)))
         preview_font_size = max(10, int(round(export_font_size * (preview_h / source_h))))
         font_name = (
             self.subtitle_font_combo.currentText().strip()
@@ -3708,6 +3657,32 @@ class VideoTranslatorGUI(QMainWindow):
         self.sync_live_subtitle_preview()
         self.schedule_auto_frame_preview()
 
+    def on_single_line_toggled(self, checked: bool):
+        self.update_subtitle_preview_style()
+        if not self.current_translated_segments:
+            return
+        if checked:
+            self._split_segments_for_single_line()
+        else:
+            self._single_line_split_cache = None
+        self.apply_segments_to_timeline()
+        self.schedule_live_subtitle_preview_refresh()
+
+    def _split_segments_for_single_line(self):
+        from translation import TranslationOrchestrator
+        source = list(self.current_translated_segments or [])
+        if not source:
+            return
+        orchestrator = TranslationOrchestrator()
+        provider_type, polisher = orchestrator._resolve_ai_provider()
+        if not polisher or not polisher.is_configured():
+            polisher = None
+        split = orchestrator._split_segments_for_single_line(
+            source, polisher=polisher, provider_type=provider_type, target_lang=self.get_target_language_code()
+        )
+        if split and split != source:
+            self._single_line_split_cache = split
+
     def get_subtitle_export_style(self, segments=None):
         alignment_map = {
             "Bottom Left": 1,
@@ -3721,8 +3696,6 @@ class VideoTranslatorGUI(QMainWindow):
         preset = self.get_subtitle_preset_config()
         is_custom = self.get_selected_subtitle_preset() == "custom"
         export_font_size = max(1, int(round(int(self.subtitle_font_size_spin.value()) * self.subtitle_export_font_scale)))
-        if bool(getattr(self, "subtitle_single_line_cb", None) and self.subtitle_single_line_cb.isChecked()):
-            export_font_size = max(10, int(round(export_font_size * 0.84)))
         style_segments = segments if segments is not None else self.get_active_segments()
         return {
             "font_name": (
@@ -5272,6 +5245,10 @@ class VideoTranslatorGUI(QMainWindow):
             row["preview_button"].setEnabled(False)
             row["preview_button"].setText("...")
 
+        existing = self._segment_preview_threads.get(index)
+        if existing and existing.isRunning():
+            existing.quit()
+            existing.wait(2000)
         worker = SegmentAudioPreviewWorker(
             self.workspace_root,
             index,
@@ -5289,18 +5266,26 @@ class VideoTranslatorGUI(QMainWindow):
         row = self._find_segment_editor_row(index)
         if row:
             row["preview_button"].setEnabled(True)
-            row["preview_button"].setText("Regenerate voice")
-            row["preview_button"].setIcon(load_icon(asset_path("icons", "audio_preview.svg"), 18))
+
         self._segment_preview_threads.pop(index, None)
 
         if error:
+            if row:
+                row["preview_button"].setText("Regenerate voice")
             self.show_error("Audio Preview Failed", "Could not generate preview audio for this subtitle.", error)
             return
 
-        try:
-            self.play_audio_preview_file(audio_path)
-        except Exception as exc:
-            self.show_error("Audio Preview Failed", "Could not play the generated preview audio.", str(exc))
+        self._voiceover_force_refresh = True
+        if row:
+            row["preview_button"].setText("Regenerate voice")
+
+        if getattr(self, "last_voice_vi_path", "") and os.path.exists(self.last_voice_vi_path):
+            self.run_voiceover()
+        else:
+            try:
+                self.play_audio_preview_file(audio_path)
+            except Exception as exc:
+                self.show_error("Audio Preview Failed", "Could not play the generated preview audio.", str(exc))
 
     def download_subtitle(self):
         srt_text = self.translated_text.toPlainText().strip()
@@ -5445,7 +5430,12 @@ class VideoTranslatorGUI(QMainWindow):
     # Subtitle source handling
     # -----------------------------
     def get_active_segments(self):
-        return self.current_translated_segments or self.current_segments or []
+        base = self.current_translated_segments or self.current_segments or []
+        if base and bool(getattr(self, "subtitle_single_line_cb", None) and self.subtitle_single_line_cb.isChecked()):
+            split = getattr(self, "_single_line_split_cache", None)
+            if split is not None:
+                return split
+        return base
 
     def apply_segments_to_timeline(self):
         segs = self.get_active_segments()
@@ -5573,6 +5563,10 @@ class VideoTranslatorGUI(QMainWindow):
         return self.live_preview_subtitle_path, self.live_preview_ass_path
 
     def _resolve_live_preview_segments(self):
+        single_line = bool(getattr(self, "subtitle_single_line_cb", None) and self.subtitle_single_line_cb.isChecked())
+        if single_line and self.current_translated_segments:
+            return self.get_active_segments(), "translated"
+
         translated_text = self.translated_text.toPlainText().strip()
         if translated_text and not translated_text.lower().startswith("translating with "):
             base_segments = self.current_translated_segments or self.current_segments
@@ -5722,7 +5716,8 @@ class VideoTranslatorGUI(QMainWindow):
                 bool(self.transcript_text.toPlainText().strip()) and has_translated_text and has_selected_segment
             )
         generated_mode = not self.using_existing_audio_source()
-        self.voiceover_btn.setEnabled(has_translated_text and generated_mode and mode in ("voice", "both"))
+        if hasattr(self, "voiceover_btn"):
+            self.voiceover_btn.setEnabled(has_translated_text and generated_mode and mode in ("voice", "both"))
         preview_enabled = v_ok and not voice_running
         if hasattr(self, "quick_preview_btn"):
             self.quick_preview_btn.setEnabled(preview_enabled)
@@ -6853,8 +6848,9 @@ class VideoTranslatorGUI(QMainWindow):
         except Exception:
             pass
 
-        self.voiceover_btn.setEnabled(False)
-        self.voiceover_btn.setText("Generating... (TTS)")
+        if hasattr(self, "voiceover_btn"):
+            self.voiceover_btn.setEnabled(False)
+            self.voiceover_btn.setText("Generating... (TTS)")
         self.progress_bar.setValue(85)
         self.update_project_step("generate_tts", "running")
         if bg_path:
@@ -6943,8 +6939,9 @@ class VideoTranslatorGUI(QMainWindow):
         return updated
 
     def on_voiceover_finished(self, voice_track, mixed, voice_segments, error):
-        self.voiceover_btn.setEnabled(True)
-        self.voiceover_btn.setText("Generate Voice / Mix")
+        if hasattr(self, "voiceover_btn"):
+            self.voiceover_btn.setEnabled(True)
+            self.voiceover_btn.setText("Generate Voice / Mix")
         self.progress_bar.setValue(100)
 
         if error:
@@ -6971,6 +6968,7 @@ class VideoTranslatorGUI(QMainWindow):
         elif self.bg_music_edit.text().strip():
             self.update_project_step("mix_audio", "skipped")
         if self._apply_generated_tts_texts(voice_segments):
+            self._single_line_split_cache = None
             self.current_translated_segment_models = self._dict_segments_to_models(self.current_translated_segments, translated=True)
             self._sync_hidden_translated_text_from_segments()
             self.apply_segments_to_timeline()
@@ -7009,6 +7007,36 @@ class VideoTranslatorGUI(QMainWindow):
 
     def on_preview_ready(self, preview_path, error, styled_signature=""):
         self.preview_controller.on_preview_ready(preview_path, error, styled_signature)
+
+    def smart_generate(self):
+        if getattr(self, "_pipeline_active", False):
+            return
+        has_subtitles = bool(self.current_segments)
+        has_translated = bool(self.current_translated_segments and self.translated_text.toPlainText().strip())
+        mode = self.get_output_mode_key()
+        need_voice = mode in ("voice", "both")
+
+        if not has_subtitles or (not has_translated and mode != "voice"):
+            self.run_all_pipeline()
+        elif need_voice:
+            self.run_voiceover_with_progress()
+        else:
+            self.preview_video()
+
+    def run_voiceover_with_progress(self):
+        existing = getattr(self, "voice_thread", None)
+        if existing and existing.isRunning():
+            return
+        self._pipeline_active = True
+        self._pipeline_step = "voiceover"
+        if hasattr(self, "run_all_btn"):
+            self.run_all_btn.setEnabled(False)
+            self.run_all_btn.setText("Processing...")
+        self.pipeline_controller._setup_progress_dialog(includes_separation=False)
+        self.pipeline_controller.progress_dialog.skip_step("ai_process")
+        self.pipeline_controller.progress_dialog.start_step("voiceover")
+        self._voiceover_force_refresh = True
+        self.run_voiceover()
 
     def run_all_pipeline(self):
         mode = self.get_output_mode_key()
@@ -7179,6 +7207,9 @@ class VideoTranslatorGUI(QMainWindow):
                 return True
         return False
 
+    def exit_to_launcher(self):
+        self._return_to_launcher(project_removed_from_recent=False)
+
     def clean_current_project(self):
         project_state = getattr(self, "current_project_state", None)
         if not self._has_cleanable_project_data():
@@ -7284,9 +7315,19 @@ class VideoTranslatorGUI(QMainWindow):
         self._current_video_path = ""
         QApplication.setQuitOnLastWindowClosed(False)
         self.close()
+        try:
+            from remote_api import remote_api_post
+            remote_api_post("/v1/unload", {}, timeout=5)
+        except Exception:
+            pass
         QTimer.singleShot(400, _relaunch_launcher)
 
     def closeEvent(self, event):
+        try:
+            from remote_api import remote_api_post
+            remote_api_post("/v1/unload", {}, timeout=3)
+        except Exception:
+            pass
         try:
             if hasattr(self, "video_view"):
                 self.video_view.clear_blur_region()

@@ -352,11 +352,7 @@ class MpvMediaPlayerBackend(QObject):
         if not os.path.exists(self._audio_path):
             return
         try:
-            if self._applied_audio_path == self._audio_path:
-                 # In mpv, you can't easily 'reload' an audio file like srt, 
-                 # but we can assume it's already there or just re-add if needed.
-                 # Actually, better to just re-add if it's the first time for this source.
-                 return
+            self._remove_external_audio_tracks()
             self._player.command("audio-add", self._audio_path, "select")
             self._applied_audio_path = self._audio_path
             self.log(f"[Backend] External audio applied: {self._audio_path}")

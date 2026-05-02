@@ -262,6 +262,12 @@ def load_whisper_model(model_path):
     return _load_whisper_model(model_name)
 
 
+def unload_whisper_models():
+    with _WHISPER_MODEL_LOCK:
+        _WHISPER_MODEL_CACHE.clear()
+        print("[Whisper] All cached models unloaded")
+
+
 def transcribe_audio_with_model(model, audio_path, *, language="auto", task="transcribe"):
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio not found at {audio_path}")

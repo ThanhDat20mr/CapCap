@@ -77,17 +77,6 @@ def _build_hidden_status_widgets(gui):
     gui.workflow_hint_label.setWordWrap(True)
     gui.workflow_hint_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
     gui.workflow_hint_label.setTextInteractionFlags(Qt.NoTextInteraction)
-    gui.workflow_status_badge = QLabel("Waiting for video")
-    gui.workflow_status_badge.setObjectName("statusPill")
-    gui.next_step_label = QLabel()
-    gui.next_step_label.setObjectName("statusHeadline")
-    gui.next_step_label.setWordWrap(True)
-    gui.next_step_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
-    gui.readiness_label = QLabel()
-    gui.readiness_label.setObjectName("helperLabel")
-    gui.readiness_label.setWordWrap(True)
-    gui.readiness_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
-    gui.readiness_label.setTextInteractionFlags(Qt.NoTextInteraction)
 
 
 def _build_style_preset_card(title: str, line_one: str, line_two: str, radio: QRadioButton):
@@ -199,7 +188,7 @@ def build_start_group(gui, left_layout):
 
     gui.run_all_btn = QPushButton("Generate")
     gui.run_all_btn.setObjectName("mainActionBtn")
-    gui.run_all_btn.clicked.connect(gui.run_all_pipeline)
+    gui.run_all_btn.clicked.connect(gui.smart_generate)
 
     gui.export_btn = QPushButton("Export")
     gui.export_btn.setObjectName("mainActionBtn")
@@ -303,37 +292,6 @@ def build_start_group(gui, left_layout):
     tab_bar_layout.addWidget(gui.show_progress_btn, 3, 0, 1, 2)
     workflow_shell_layout.addWidget(tab_bar)
 
-    status_card, status_card_layout = _build_collapsible_section("Status")
-    guidance_card = QFrame()
-    guidance_card.setObjectName("statusCard")
-    guidance_layout = QVBoxLayout(guidance_card)
-    guidance_layout.setContentsMargins(12, 12, 12, 12)
-    guidance_layout.setSpacing(6)
-    guidance_layout.addWidget(gui.workflow_status_badge, 0, Qt.AlignLeft)
-    guidance_layout.addWidget(gui.next_step_label)
-    status_card_layout.addWidget(guidance_card)
-    gui.progress_audio_label = QLabel("[ ] Audio ready")
-    gui.progress_subtitle_label = QLabel("[ ] Original subtitles ready")
-    gui.progress_translate_label = QLabel("[ ] Vietnamese subtitles ready")
-    gui.progress_voice_label = QLabel("[ ] Voice/audio ready")
-    for label in (
-        gui.progress_audio_label,
-        gui.progress_subtitle_label,
-        gui.progress_translate_label,
-        gui.progress_voice_label,
-    ):
-        label.setObjectName("statusChip")
-    progress_grid = QGridLayout()
-    progress_grid.setContentsMargins(0, 0, 0, 0)
-    progress_grid.setHorizontalSpacing(10)
-    progress_grid.setVerticalSpacing(6)
-    progress_grid.addWidget(gui.progress_audio_label, 0, 0)
-    progress_grid.addWidget(gui.progress_subtitle_label, 0, 1)
-    progress_grid.addWidget(gui.progress_translate_label, 1, 0)
-    progress_grid.addWidget(gui.progress_voice_label, 1, 1)
-    status_card_layout.addLayout(progress_grid)
-    workflow_shell_layout.addWidget(status_card)
-
     upload_card, upload_layout = _build_collapsible_section("Video")
     upload_card.hide()
 
@@ -412,6 +370,10 @@ def build_start_group(gui, left_layout):
     gui.output_scale_mode_combo.addItem("Fill", "fill")
     gui.output_scale_mode_combo.currentIndexChanged.connect(gui.on_output_scale_mode_changed)
     output_scale_row.addWidget(gui.output_scale_mode_combo)
+    gui.reset_framing_btn = QPushButton("Reset Framing")
+    gui.reset_framing_btn.setToolTip("Reset the fill focus to center")
+    gui.reset_framing_btn.hide()
+    output_scale_row.addWidget(gui.reset_framing_btn)
     output_quality_layout.addLayout(output_scale_row)
     output_layout.addWidget(output_quality_card)
     media_layout.addWidget(output_card)
@@ -523,8 +485,6 @@ def build_start_group(gui, left_layout):
     gui.save_preview_voice_btn = QPushButton("Save as Clone Voice")
     gui.save_preview_voice_btn.setToolTip("Save the current preview voice as a new clone voice")
     gui.save_preview_voice_btn.clicked.connect(gui.save_preview_as_clone_voice)
-    if not hasattr(gui, "voiceover_btn"):
-        gui.voiceover_btn = QPushButton("Generate Voice / Mix", gui)
     gui.voice_preview_meta_label = QLabel("Listen to a short sample before generating the full voice track.", gui)
     gui.voice_preview_meta_label.setObjectName("helperLabel")
     gui.voice_preview_meta_label.setWordWrap(True)
@@ -573,7 +533,7 @@ def build_start_group(gui, left_layout):
     detail_voice_layout.addWidget(gui.f5_status_server_label)
     voice_setup_layout.addWidget(gui.detail_voice_panel)
     gui.ai_dubbing_rewrite_cb = QCheckBox("Use AI Rewrite Dubbing for voice timing")
-    gui.ai_dubbing_rewrite_cb.setChecked(True)
+    gui.ai_dubbing_rewrite_cb.setChecked(False)
     gui.ai_dubbing_rewrite_hint_label = QLabel(
         "Keeps subtitle text readable, but lets AI create a shorter spoken version for TTS when timing is tight.",
         gui,
@@ -588,7 +548,6 @@ def build_start_group(gui, left_layout):
     voice_preview_layout.addWidget(voice_preview_title)
     voice_preview_layout.addWidget(gui.preview_voice_btn)
     voice_preview_layout.addWidget(gui.save_preview_voice_btn)
-    voice_preview_layout.addWidget(gui.voiceover_btn)
     voice_layout.addWidget(voice_preview_card)
     voice_page.layout().addWidget(voice_card)
 

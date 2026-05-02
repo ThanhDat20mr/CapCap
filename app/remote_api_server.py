@@ -10,6 +10,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 os.environ.setdefault("CAPCAP_RUNTIME_PROFILE", "local")
 
+_QUIET = os.getenv("CAPCAP_QUIET", "").strip().lower() in ("1", "true", "yes")
+
+
+def _log(msg: str):
+    if not _QUIET:
+        print(msg)
+
 from remote_api import remote_api_token
 from services import F5VoiceService, WorkflowRuntime
 from translation.srt_utils import to_srt
@@ -56,11 +63,11 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             _json_response(self, 500, {"ok": False, "error": str(exc)})
 
     def do_POST(self):
-        print(f"[Remote API] POST {self.path} from {self.address_string()}")
+        _log(f"[Remote API] POST {self.path} from {self.address_string()}")
         try:
             self._check_auth()
             payload = self._read_json_body()
-            print(f"[Remote API] POST {self.path} payload keys: {list(payload.keys())}")
+            _log(f"[Remote API] POST {self.path} payload keys: {list(payload.keys())}")
             if self.path == "/v1/transcribe":
                 _json_response(self, 200, self._handle_transcribe(payload))
                 return
@@ -88,13 +95,16 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             if self.path == "/v1/export":
                 _json_response(self, 200, self._handle_export(payload))
                 return
+            if self.path == "/v1/unload":
+                _json_response(self, 200, self._handle_unload())
+                return
             _json_response(self, 404, {"ok": False, "error": "Not found"})
         except PermissionError as exc:
             _json_response(self, 401, {"ok": False, "error": str(exc)})
         except Exception as exc:
             tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
-            print("[Remote API] Request failed:")
-            print(tb)
+            _log("[Remote API] Request failed:")
+            _log(tb)
             try:
                 log_path = os.path.join(tempfile.gettempdir(), "capcap_remote_api_errors.log")
                 with open(log_path, "a", encoding="utf-8") as f:
@@ -104,7 +114,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             _json_response(self, 500, {"ok": False, "error": str(exc)})
 
     def log_message(self, format, *args):
-        print(f"[Remote API] {self.address_string()} - {format % args}")
+        _log(f"[Remote API] {self.address_string()} - {format % args}")
 
     def _check_auth(self) -> None:
         expected = remote_api_token()
@@ -203,7 +213,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
         os.close(fd)
         try:
             if F5_SERVICE.is_f5_voice_token(voice):
-                print(f"[Remote API] F5 synth voice={voice}")
+                _log(f"[Remote API] F5 synth voice={voice}")
                 F5_SERVICE.synthesize_segment(
                     voice_token=voice,
                     text=text,
@@ -245,10 +255,11 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             translator_style=str(payload.get("translator_style", "") or ""),
             whisper_model_name=str(payload.get("whisper_model_name", "base") or "base"),
         )
+        _unload_whisper()
         return {"ok": True, "project_state_path": runtime.project_state_path(state)}
 
     def _handle_voice(self, payload: dict) -> dict:
-        print(f"[Remote API] _handle_voice called. voice_name={payload.get('voice_name')}, segments_count={len(payload.get('segments', []))}")
+        _log(f"[Remote API] _handle_voice called. voice_name={payload.get('voice_name')}, segments_count={len(payload.get('segments', []))}")
         workspace_root = str(payload.get("workspace_root", "") or "").strip() or WORKSPACE_ROOT
         runtime = WorkflowRuntime(workspace_root)
         result = runtime.run_voice(
@@ -268,6 +279,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             dubbing_style_instruction=str(payload.get("dubbing_style_instruction", "") or ""),
             source_language=str(payload.get("source_language", "auto") or "auto"),
         )
+        _unload_whisper()
         return {"ok": True, "result": result}
 
     def _handle_export(self, payload: dict) -> dict:
@@ -294,6 +306,33 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
         return {"ok": True, "output_path": output}
 
 
+    def _handle_unload(self):
+        _unload_models()
+        _log("[Remote API] All models unloaded.")
+        return {"ok": True, "message": "All models unloaded."}
+
+
+def _unload_whisper():
+    try:
+        from whisper_processor import unload_whisper_models
+        unload_whisper_models()
+    except Exception:
+        pass
+
+
+def _unload_gguf():
+    try:
+        from translation.providers.local_polisher import LocalPolisherProvider
+        LocalPolisherProvider.unload_cached_model()
+    except Exception:
+        pass
+
+
+def _unload_models():
+    _unload_whisper()
+    _unload_gguf()
+
+
 def main() -> None:
     host = str(os.getenv("CAPCAP_REMOTE_API_HOST", "0.0.0.0") or "0.0.0.0").strip()
     port_raw = str(os.getenv("CAPCAP_REMOTE_API_PORT", "8765") or "8765").strip()
@@ -301,8 +340,19 @@ def main() -> None:
         port = int(port_raw)
     except Exception:
         port = 8765
+
+    _log("[Remote API] Pre-loading Whisper model on main thread...")
+    model_name = os.getenv("CAPCAP_WHISPER_MODEL_NAME", "base")
+    try:
+        from whisper_processor import _load_whisper_model
+        _load_whisper_model(model_name)
+        _log(f"[Remote API] Whisper '{model_name}' loaded on main thread.")
+    except Exception as exc:
+        _log(f"[Remote API] Whisper pre-load failed (will load on demand): {exc}")
+        _log("[Remote API] Tip: set CAPCAP_WHISPER_DEVICE=cpu in .env if CUDA hangs in thread.")
+
     server = ThreadingHTTPServer((host, port), CapCapRemoteHandler)
-    print(f"[Remote API] Listening on http://{host}:{port}")
+    _log(f"[Remote API] Listening on http://{host}:{port}")
     server.serve_forever()
 
 

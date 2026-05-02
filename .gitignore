@@ -43,5 +43,5 @@ assets/luts/_archive
 log.txt
 data/*
 run_servers_wezterm.bat
-recent_projects.json
+run_servers_terminal.bat
 *.mp4

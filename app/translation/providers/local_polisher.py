@@ -339,6 +339,15 @@ class LocalPolisherProvider:
             self.__class__._cached_signature = signature
             return model
 
+    @classmethod
+    def unload_cached_model(cls):
+        with cls._model_lock:
+            if cls._cached_model is not None:
+                print(f"[Local GGUF] Unloading cached model ({os.path.basename(cls._cached_model_path)})")
+            cls._cached_model = None
+            cls._cached_model_path = ""
+            cls._cached_signature = ()
+
     def _extract_text(self, result) -> str:
         if isinstance(result, dict):
             choices = result.get("choices") or []
