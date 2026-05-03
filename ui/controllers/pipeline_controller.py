@@ -196,12 +196,13 @@ class PipelineController:
                 return
             # Start voiceover
             self.gui._pipeline_step = "voiceover"
-            if self.progress_dialog: self.progress_dialog.start_step("voiceover")
+            if self.progress_dialog and self.progress_dialog.isVisible():
+                self.progress_dialog.start_step("voiceover")
             self.gui.run_voiceover()
             
         elif completed_step == "voiceover":
             self.gui._pipeline_step = "preview"
-            if self.progress_dialog:
+            if self.progress_dialog and self.progress_dialog.isVisible():
                 self.progress_dialog.start_step("preview")
             try:
                 self.gui.log("[Pipeline] Voiceover complete. Preparing video preview.")

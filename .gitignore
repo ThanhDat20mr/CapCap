@@ -45,3 +45,4 @@ data/*
 run_servers_wezterm.bat
 run_servers_terminal.bat
 *.mp4
+recent_projects.json

@@ -7,10 +7,12 @@ import tempfile
 import traceback
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 
 os.environ.setdefault("CAPCAP_RUNTIME_PROFILE", "local")
 
 _QUIET = os.getenv("CAPCAP_QUIET", "").strip().lower() in ("1", "true", "yes")
+_GPU_LOCK = threading.Lock()
 
 
 def _log(msg: str):
@@ -69,34 +71,39 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             payload = self._read_json_body()
             _log(f"[Remote API] POST {self.path} payload keys: {list(payload.keys())}")
             if self.path == "/v1/transcribe":
-                _json_response(self, 200, self._handle_transcribe(payload))
+                with _GPU_LOCK:
+                    _json_response(self, 200, self._handle_transcribe(payload))
                 return
             if self.path == "/v1/translate-segments":
-                _json_response(self, 200, self._handle_translate_segments(payload))
+                with _GPU_LOCK:
+                    _json_response(self, 200, self._handle_translate_segments(payload))
                 return
             if self.path == "/v1/translate-srt":
-                _json_response(self, 200, self._handle_translate_srt(payload))
+                with _GPU_LOCK:
+                    _json_response(self, 200, self._handle_translate_srt(payload))
                 return
             if self.path == "/v1/rewrite-segments":
-                _json_response(self, 200, self._handle_rewrite_segments(payload))
+                with _GPU_LOCK:
+                    _json_response(self, 200, self._handle_rewrite_segments(payload))
                 return
             if self.path == "/v1/rewrite-srt":
-                _json_response(self, 200, self._handle_rewrite_srt(payload))
+                with _GPU_LOCK:
+                    _json_response(self, 200, self._handle_rewrite_srt(payload))
                 return
             if self.path == "/v1/tts/synthesize":
-                _json_response(self, 200, self._handle_tts_synthesize(payload))
+                with _GPU_LOCK:
+                    _json_response(self, 200, self._handle_tts_synthesize(payload))
                 return
             if self.path == "/v1/prepare":
-                _json_response(self, 200, self._handle_prepare(payload))
+                with _GPU_LOCK:
+                    _json_response(self, 200, self._handle_prepare(payload))
                 return
             if self.path == "/v1/voice":
-                _json_response(self, 200, self._handle_voice(payload))
+                with _GPU_LOCK:
+                    _json_response(self, 200, self._handle_voice(payload))
                 return
             if self.path == "/v1/export":
                 _json_response(self, 200, self._handle_export(payload))
-                return
-            if self.path == "/v1/unload":
-                _json_response(self, 200, self._handle_unload())
                 return
             _json_response(self, 404, {"ok": False, "error": "Not found"})
         except PermissionError as exc:
@@ -304,12 +311,6 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             project_temp_dir=str(payload.get("project_temp_dir", "") or ""),
         )
         return {"ok": True, "output_path": output}
-
-
-    def _handle_unload(self):
-        _unload_models()
-        _log("[Remote API] All models unloaded.")
-        return {"ok": True, "message": "All models unloaded."}
 
 
 def _unload_whisper():

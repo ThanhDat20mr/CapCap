@@ -817,8 +817,7 @@ class VoiceWorkflow:
         on_progress: callable = None,
     ):
         updated_wavs = list(wavs or [])
-        retry_count = 0
-        print(f"[Voice Retry] ai_rewrite_dubbing={bool(ai_rewrite_dubbing)} segments_with_overrun=0")
+        return updated_wavs
         for idx, seg in enumerate(list(segments or [])):
             wav_path = updated_wavs[idx] if idx < len(updated_wavs) else ""
             if not wav_path or not os.path.exists(wav_path):

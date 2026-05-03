@@ -6986,6 +6986,12 @@ class VideoTranslatorGUI(QMainWindow):
         self._voiceover_force_refresh = False
         self._pending_voice_signature = ""
 
+        try:
+            self._pipeline_advance("voiceover")
+        except Exception as exc:
+            self.log(f"[Voiceover] pipeline_advance failed: {exc}")
+            self.refresh_ui_state()
+
         if mixed:
             self.log(f"[Voiceover] Generated Vietnamese voice and mixed audio: Voice={voice_track}, Mixed={mixed}")
         else:
@@ -6994,13 +7000,6 @@ class VideoTranslatorGUI(QMainWindow):
         self.schedule_timeline_visual_refresh(waveform=True, thumbnails=False)
         self.refresh_ui_state()
         self.sync_preview_audio_track_to_output()
-        if self.last_preview_video_path:
-            self.log("[Voiceover] Refreshing preview video with latest subtitle and audio...")
-            try:
-                self.preview_video()
-            except Exception:
-                pass
-        self._pipeline_advance("voiceover")
 
     def preview_video(self):
         self.preview_controller.preview_video()
@@ -7296,7 +7295,7 @@ class VideoTranslatorGUI(QMainWindow):
                 "Clean Project",
                 "No removable intermediate files were found for the current project.",
             )
-        self._return_to_launcher(project_removed_from_recent=bool(removed_paths))
+        self._return_to_launcher(project_removed_from_recent=True)
 
     def _return_to_launcher(self, project_removed_from_recent=True):
         video_path = getattr(self, "_current_video_path", "")
@@ -7315,19 +7314,9 @@ class VideoTranslatorGUI(QMainWindow):
         self._current_video_path = ""
         QApplication.setQuitOnLastWindowClosed(False)
         self.close()
-        try:
-            from remote_api import remote_api_post
-            remote_api_post("/v1/unload", {}, timeout=5)
-        except Exception:
-            pass
         QTimer.singleShot(400, _relaunch_launcher)
 
     def closeEvent(self, event):
-        try:
-            from remote_api import remote_api_post
-            remote_api_post("/v1/unload", {}, timeout=3)
-        except Exception:
-            pass
         try:
             if hasattr(self, "video_view"):
                 self.video_view.clear_blur_region()

@@ -277,10 +277,7 @@ def build_voice_track_from_srt_segments(
 
         if max_len > 0:
             clip_len = len(clip)
-            if clip_len > max_len:
-                clip = clip[:max_len]
-                clip = clip.fade_out(duration=min(10, max_len))
-            elif clip_len < max_len:
+            if clip_len < max_len:
                 gap_ms = max_len - clip_len
                 clip_end_ms = start_ms + clip_len
                 if idx + 1 < len(segments):
@@ -305,7 +302,7 @@ def build_voice_track_from_srt_segments(
         print(f"[BuildTrack] Seg {idx + 1}: slot=[{start_ms}..{end_ms}]ms({max_len}ms) "
               f"clip={clip_len}ms -> {final_clip_len}ms "
               f"pos={start_ms}ms slot_end={start_ms + final_clip_len}ms"
-              + (" (truncated)" if clip_len > max_len else ""))
+              + (" (overflows)" if clip_len > max_len else ""))
 
         base = base.overlay(clip, position=max(0, start_ms))
 
