@@ -1,17 +1,29 @@
 import os
 import time
-import requests
+
+from openai import OpenAI
 
 from ..errors import TranslationConfigError, TranslationProviderError, TranslationValidationError
 from ..srt_utils import parse_numbered_lines, validate_texts
 
+
 class GeminiPolisherProvider:
     def __init__(self):
-        self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
-        self.model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+        self.api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        self.model_name = os.getenv("OPENAI_MODEL", "gemma-4-31b-it").strip()
+        self.base_url = os.getenv(
+            "OPENAI_BASE_URL",
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
+        ).strip()
+        self._client = None
 
     def is_configured(self) -> bool:
         return bool(self.api_key)
+
+    def _get_client(self):
+        if self._client is None:
+            self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        return self._client
 
     def polish_batch(
         self,
@@ -21,16 +33,13 @@ class GeminiPolisherProvider:
         src_lang: str,
         target_lang: str,
         style_instruction: str = "",
-        timeout: int = 60,
+        timeout: int = 120,
         max_retries: int = 2,
     ) -> tuple[list[str], list[str], str]:
-        """
-        Returns (polished_texts, warnings, provider_name)
-        """
         if not self.is_configured():
-            raise TranslationConfigError("GEMINI_API_KEY is not set in .env")
+            raise TranslationConfigError("OPENAI_API_KEY is not set in .env")
 
-        prompt = self._build_prompt(
+        system_msg, user_msg = self._build_messages(
             source_texts=source_texts,
             translated_texts=translated_texts,
             src_lang=src_lang,
@@ -38,75 +47,83 @@ class GeminiPolisherProvider:
             style_instruction=style_instruction,
         )
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.2,
-                "topK": 40,
-                "topP": 0.95,
-                "maxOutputTokens": 4096,
-            }
-        }
-        headers = {"Content-Type": "application/json"}
-
+        client = self._get_client()
         last_error = ""
         for attempt in range(1, max_retries + 1):
             try:
-                response = requests.post(url, headers=headers, json=payload, timeout=timeout)
-                if response.status_code != 200:
-                    last_error = f"Gemini error ({response.status_code}): {response.text}"
-                    if attempt < max_retries:
-                        time.sleep(attempt)
-                        continue
-                    raise Exception(last_error)
-
-                data = response.json()
-                candidates = data.get("candidates") or []
-                if not candidates:
-                    raise Exception(f"No candidates: {data}")
-
-                text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+                response = client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    temperature=0.2,
+                    max_tokens=4096,
+                    timeout=timeout,
+                )
+                text = response.choices[0].message.content.strip()
                 if not text:
                     raise Exception("Empty response text")
 
                 lines = parse_numbered_lines(text)
-                if not validate_texts(lines, len(source_texts)):
-                    raise TranslationValidationError(f"Expected {len(source_texts)} lines, got {len(lines)}")
-                
-                return lines, [], "gemini"
+                expected = len(source_texts)
+                if len(lines) > expected:
+                    lines = lines[:expected]
+                if len(lines) < expected:
+                    lines.extend([""] * (expected - len(lines)))
+                if not validate_texts(lines, expected):
+                    raise TranslationValidationError(
+                        f"Expected {expected} lines, got {len(lines)}"
+                    )
+                return lines, [], "openai"
             except Exception as e:
                 last_error = str(e)
                 if attempt < max_retries:
                     time.sleep(attempt)
                     continue
-        
+
         raise TranslationProviderError(f"Gemini failed: {last_error}")
 
-    def _build_prompt(self, source_texts, translated_texts, src_lang, target_lang, style_instruction) -> str:
+    def _build_messages(
+        self, source_texts, translated_texts, src_lang, target_lang, style_instruction
+    ) -> tuple[str, str]:
         is_direct = not translated_texts
         style_part = f" Style: {style_instruction}" if style_instruction else ""
         dubbing_mode = "[mode=dubbing_rewrite]" in str(style_instruction or "").lower()
-        
+
         if is_direct:
             lines = [f"{i+1}. {s}" for i, s in enumerate(source_texts)]
-            header = f"Translate these {src_lang}->{target_lang} subtitles directly.{style_part}\nFormat: Number. Text"
+            header = f"Translate these {src_lang}->{target_lang} subtitles directly.{style_part}"
         else:
-            lines = [f"{i+1}. {s} ||| {t}" for i, (s, t) in enumerate(zip(source_texts, translated_texts))]
+            lines = [
+                f"{i+1}. {s} ||| {t}"
+                for i, (s, t) in enumerate(zip(source_texts, translated_texts))
+            ]
             if dubbing_mode:
-                header = f"Rewrite these {src_lang}->{target_lang} dubbing drafts for TTS timing rescue.{style_part}\nFormat: Number. Source ||| Draft"
+                header = f"Rewrite these {src_lang}->{target_lang} dubbing drafts for TTS timing rescue.{style_part}"
             else:
-                header = f"Refine these {src_lang}->{target_lang} subtitle translations.{style_part}\nFormat: Number. Source ||| Draft"
-        rules = "Rules: Natural, punchy, concise. One translation per number. No commentary."
+                header = f"Refine these {src_lang}->{target_lang} subtitle translations.{style_part}"
+
+        rules = (
+            "Return ONLY numbered lines. EXACTLY one per input item. "
+            "No greetings, no explanations, no markdown. "
+            "Format: N. translated text\n"
+            "Quality: Natural, spoken Vietnamese. Short sentences. "
+            "Preserve names, numbers, brands, products exactly. "
+            "Adapt idioms naturally to Vietnamese, not literal. "
+            "Keep each line readable as a single subtitle cue."
+        )
         if dubbing_mode:
             rules = (
-                "Rules: Spoken dubbing rescue only. Follow source metadata as hard timing constraints. "
-                "Make the result shorter than the draft when needed. Preserve names, numbers, products, and key claims exactly. "
-                "One short spoken line per number. No commentary."
+                "Return ONLY numbered lines. EXACTLY one per input item. "
+                "No greetings, no explanations, no markdown. "
+                "Format: N. short spoken line\n"
+                "Quality: Natural spoken Vietnamese. Very concise. "
+                "Fit the timing constraints strictly. "
+                "Preserve names, numbers, brands, products exactly. "
+                "Each line must be speakable within the given duration."
             )
 
-        return (
-            f"{header}\n"
-            f"{rules}\n\n"
-            + "\n".join(lines)
-        )
+        system_msg = f"{header}\n{rules}"
+        user_msg = "\n".join(lines)
+        return system_msg, user_msg

@@ -39,8 +39,8 @@ class F5VoiceService:
         os.makedirs(self.saved_audio_root, exist_ok=True)
         try:
             self.ensure_default_clones()
-        except Exception as exc:
-            print(f"[F5Voice] ensure_default_clones failed: {exc}")
+        except Exception:
+            pass
 
     @staticmethod
     def is_f5_voice_token(token: str) -> bool:
@@ -174,7 +174,6 @@ class F5VoiceService:
         return None, payload, -1
 
     def list_saved_voices(self) -> list[dict]:
-        print(f"[F5Voice] data_root={self.data_root} registry={self.saved_registry_path}")
         payload = self._load_registry(self.saved_registry_path)
         voices = []
         for entry in list(payload.get("voices", []) or []):
@@ -183,12 +182,10 @@ class F5VoiceService:
             voice_id = str(entry.get("id", "")).strip()
             ref_audio_path = os.path.abspath(str(entry.get("ref_audio_path", "")).strip())
             if not voice_id or not ref_audio_path or not os.path.exists(ref_audio_path):
-                print(f"[F5Voice] Skip invalid entry: id={voice_id} exists={os.path.exists(ref_audio_path)}")
                 continue
             item = dict(entry)
             item["ref_audio_path"] = ref_audio_path
             voices.append(item)
-        print(f"[F5Voice] saved_voices={len(voices)}")
         voices.sort(key=lambda item: (str(item.get("name", "")).strip().lower(), str(item.get("created_at", ""))))
         return voices
 

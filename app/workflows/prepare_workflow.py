@@ -1,6 +1,8 @@
 import os
+import subprocess
 import time
 
+from runtime_paths import bin_path
 from runtime_profile import is_remote_profile
 from services import ChunkingService, EngineRuntime, ProjectService, SegmentRegroupService, SegmentService
 
@@ -94,7 +96,11 @@ class PrepareWorkflow:
             merged_segments,
         )
         regroup_started = time.perf_counter()
-        regrouped_segments = self.segment_regroup_service.regroup(merged_segments)
+        regrouped_segments = self.segment_regroup_service.regroup(
+            merged_segments,
+            max_gap_seconds=0.25,
+            max_duration_seconds=5.0,
+        )
         regroup_elapsed = time.perf_counter() - regroup_started
         self.project_service.save_json_artifact(
             project_state,
@@ -224,6 +230,25 @@ class PrepareWorkflow:
             working_audio_path = vocal_path
             print(f"[Audio Handling] Using separated vocals for Whisper: {working_audio_path}")
             print(f"[Audio Handling] Background music stem ready: {music_path}")
+            # Post-process vocals: denoise + loudness normalize for better transcription
+            processed_vocal_path = os.path.join(
+                os.path.dirname(vocal_path), "vocals_enhanced.wav"
+            )
+            try:
+                ffmpeg_cmd = [
+                    str(bin_path("ffmpeg", "ffmpeg.exe")),
+                    "-i", vocal_path,
+                    "-af", "afftdn,loudnorm=I=-16:LRA=11:TP=-1.5",
+                    "-ar", "16000",
+                    "-ac", "1",
+                    "-y",
+                    processed_vocal_path,
+                ]
+                subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+                working_audio_path = processed_vocal_path
+                print(f"[Audio Handling] Enhanced vocals (denoise + loudnorm): {processed_vocal_path}")
+            except Exception as e:
+                print(f"[Audio Handling] Enhancement skipped: {e}. Using raw vocals.")
             print(f"[Timing] Demucs separation: {separation_elapsed:.2f}s")
             project_state.set_step_status("separate_audio", "done")
             project_state.set_artifact("vocals", vocal_path)
@@ -280,7 +305,8 @@ class PrepareWorkflow:
                     whisper_model,
                     language=source_language,
                 )
-            elif audio_duration >= self.CHUNKED_ASR_MIN_DURATION_SECONDS:
+            elif audio_duration >= self.CHUNKED_ASR_MIN_DURATION_SECONDS or (audio_mode_key == "clean" and audio_duration >= 30.0):
+                print("[ASR] Using chunked transcription (VAD silence detection).")
                 raw_segments = self._transcribe_long_audio_chunked(
                     audio_path=working_audio_path,
                     project_state=project_state,

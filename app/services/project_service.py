@@ -236,6 +236,7 @@ class ProjectService:
     def build_separation_signature(self, extracted_audio_path: str, *, audio_handling_mode: str = "fast") -> str:
         return self._hash_payload(
             {
+                "version": 2,
                 "audio_handling_mode": str(audio_handling_mode or "fast").strip().lower(),
                 "extracted_audio": self._file_signature(extracted_audio_path),
             }

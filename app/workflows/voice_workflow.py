@@ -1,22 +1,28 @@
 import hashlib
+import importlib.util
 import json
 import os
 import re
+import sys
 import time
 import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from runtime_paths import app_path
 from services import EngineRuntime, F5VoiceService, ProjectService
-from utils.voice_preview_utils import (
-    clamp_requested_speed,
-    load_manifest,
-    manifest_path,
-    provider_native_speed,
-    save_manifest,
-    segment_cache_key,
-    voice_provider,
-)
+
+# Force-load from app/utils/ (ui/utils/ may shadow it)
+_vpu_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "utils", "voice_preview_utils.py")
+_vpu_spec = importlib.util.spec_from_file_location("capcap_voice_preview_utils", _vpu_path)
+_vpu = importlib.util.module_from_spec(_vpu_spec)
+_vpu_spec.loader.exec_module(_vpu)
+clamp_requested_speed = _vpu.clamp_requested_speed
+load_manifest = _vpu.load_manifest
+manifest_path = _vpu.manifest_path
+provider_native_speed = _vpu.provider_native_speed
+save_manifest = _vpu.save_manifest
+segment_cache_key = _vpu.segment_cache_key
+voice_provider = _vpu.voice_provider
 
 
 class VoiceWorkflow:

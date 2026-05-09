@@ -191,7 +191,7 @@ class AsrMergeService:
 
         if pending_items:
             used_parallel = False
-            if self._recommended_worker_count(len(pending_items)) > 1:
+            if False:
                 try:
                     self._transcribe_chunks_parallel(
                         pending_items,

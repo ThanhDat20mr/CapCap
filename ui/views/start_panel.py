@@ -435,7 +435,6 @@ def build_start_group(gui, left_layout):
     gui.voice_section_card = voice_card
     gui.voice_engine_combo = QComboBox()
     gui.voice_engine_combo.addItem("Fast Voice", "fast")
-    gui.voice_engine_combo.addItem("Detail Voice", "detail")
     gui.free_voice_combo = QComboBox()
     gui.voice_gender_combo = QComboBox()
     gui.voice_gender_combo.addItems(["Any", "Male", "Female"])

@@ -509,7 +509,7 @@ class VideoTranslatorGUI(QMainWindow):
         self.project_service = ProjectService(self.workspace_root)
         self.project_bridge = GUIProjectBridge(self.project_service)
         self.voice_catalog_service = VoiceCatalogService(self.workspace_root)
-        self.f5_voice_service = F5VoiceService(self.workspace_root)
+        self._f5_voice_service = None
         self.subtitle_controller = SubtitleController(self)
         self.pipeline_controller = PipelineController(self)
         self.preview_controller = PreviewController(self)
@@ -523,6 +523,7 @@ class VideoTranslatorGUI(QMainWindow):
         self._voiceover_force_refresh = False
         self.voice_catalog_entries_all = []
         self.voice_catalog_entries = []
+
         self.voice_catalog_map = {}
         self.f5_saved_voice_entries = []
         self.f5_saved_voice_map = {}
@@ -595,6 +596,12 @@ class VideoTranslatorGUI(QMainWindow):
         self._timeline_visual_refresh_timer.timeout.connect(self._run_pending_timeline_visual_refresh)
         QTimer.singleShot(0, self._run_deferred_startup_stage1)
         QTimer.singleShot(600, self._run_deferred_startup_stage2)
+
+    @property
+    def f5_voice_service(self):
+        if self._f5_voice_service is None:
+            self._f5_voice_service = F5VoiceService(self.workspace_root)
+        return self._f5_voice_service
 
     def get_selected_subtitle_preset(self) -> str:
         if getattr(self, "subtitle_preset_custom_radio", None) and self.subtitle_preset_custom_radio.isChecked():
@@ -718,7 +725,6 @@ class VideoTranslatorGUI(QMainWindow):
             return
         self._deferred_startup_stage2_done = True
         self.load_voice_preview_catalog()
-        self.refresh_f5_saved_voice_list()
         self._sync_voice_engine_ui()
         self.ensure_local_translator_auto_configured()
 
@@ -6202,20 +6208,24 @@ class VideoTranslatorGUI(QMainWindow):
 
         f5_title = QLabel("Detail Voice")
         f5_title.setObjectName("statusHeadline")
+        f5_title.setVisible(False)
         layout.addWidget(f5_title)
 
         f5_status_label = QLabel("Server: Checking...")
         f5_status_label.setObjectName("helperLabel")
         f5_status_label.setWordWrap(True)
+        f5_status_label.setVisible(False)
         layout.addWidget(f5_status_label)
 
         f5_hint_label = QLabel("Run run_f5_api_server.bat before using Detail Voice.")
         f5_hint_label.setObjectName("helperLabel")
         f5_hint_label.setWordWrap(True)
+        f5_hint_label.setVisible(False)
         layout.addWidget(f5_hint_label)
 
         f5_actions_layout = QHBoxLayout()
         f5_test_btn = QPushButton("Test Detail Voice Server", dialog)
+        f5_test_btn.setVisible(False)
         f5_actions_layout.addWidget(f5_test_btn)
         f5_actions_layout.addStretch()
         layout.addLayout(f5_actions_layout)
@@ -6223,30 +6233,14 @@ class VideoTranslatorGUI(QMainWindow):
         f5_divider = QFrame()
         f5_divider.setFrameShape(QFrame.HLine)
         f5_divider.setStyleSheet("color: #2f4868;")
+        f5_divider.setVisible(False)
         layout.addWidget(f5_divider)
 
         # AI Translation Section
-        ai_title = QLabel("AI Polish Settings")
+        ai_title = QLabel("AI Translation (Google AI Studio)")
         ai_title.setObjectName("statusHeadline")
         ai_title.setVisible(not remote_mode)
         layout.addWidget(ai_title)
-
-        provider_layout = QHBoxLayout()
-        provider_label = QLabel("Provider:")
-        provider_label.setVisible(not remote_mode)
-        provider_layout.addWidget(provider_label)
-        provider_combo = QComboBox(dialog)
-        provider_combo.addItem("Local (GGUF)", "local")
-        provider_combo.addItem("Gemini", "gemini")
-        current_provider = (os.getenv("AI_POLISHER_PROVIDER") or "local").strip().lower()
-        if current_provider not in {"local", "gemini"}:
-            current_provider = "local"
-        current_provider_index = provider_combo.findData(current_provider)
-        if current_provider_index >= 0:
-            provider_combo.setCurrentIndex(current_provider_index)
-        provider_combo.setVisible(not remote_mode)
-        provider_layout.addWidget(provider_combo, 1)
-        layout.addLayout(provider_layout)
 
         key_section_widget = QWidget(dialog)
         key_layout = QVBoxLayout(key_section_widget)
@@ -6254,6 +6248,7 @@ class VideoTranslatorGUI(QMainWindow):
         key_label = QLabel("API Key:")
         key_edit = QLineEdit(dialog)
         key_edit.setEchoMode(QLineEdit.Password)
+        key_edit.setText(os.getenv("OPENAI_API_KEY", ""))
         key_layout.addWidget(key_label)
         key_layout.addWidget(key_edit)
         key_section_widget.setVisible(not remote_mode)
@@ -6262,23 +6257,18 @@ class VideoTranslatorGUI(QMainWindow):
         model_layout = QVBoxLayout()
         model_label = QLabel("AI Model:")
         model_edit = QLineEdit(dialog)
+        model_edit.setText(os.getenv("OPENAI_MODEL", "gemma-4-31b-it"))
         model_layout.addWidget(model_label)
         model_layout.addWidget(model_edit)
         model_label.setVisible(not remote_mode)
         model_edit.setVisible(not remote_mode)
         layout.addLayout(model_layout)
 
-        local_actions_layout = QHBoxLayout()
-        browse_model_btn = QPushButton("Browse Model", dialog)
-        open_models_folder_btn = QPushButton("Open Models Folder", dialog)
-        open_gpu_pack_folder_btn = QPushButton("Open GPU Pack Folder", dialog)
-        local_actions_layout.addWidget(browse_model_btn)
-        local_actions_layout.addWidget(open_models_folder_btn)
-        local_actions_layout.addWidget(open_gpu_pack_folder_btn)
-        browse_model_btn.setVisible(not remote_mode)
-        open_models_folder_btn.setVisible(not remote_mode)
-        open_gpu_pack_folder_btn.setVisible(not remote_mode)
-        layout.addLayout(local_actions_layout)
+        provider_hint = QLabel("Get an API key at https://aistudio.google.com/apikey")
+        provider_hint.setObjectName("helperLabel")
+        provider_hint.setWordWrap(True)
+        provider_hint.setVisible(not remote_mode)
+        layout.addWidget(provider_hint)
 
         local_download_layout = QHBoxLayout()
         manage_resources_btn = QPushButton("Manage Resources", dialog)
@@ -6289,259 +6279,16 @@ class VideoTranslatorGUI(QMainWindow):
         open_voices_folder_btn.setVisible(not remote_mode)
         layout.addLayout(local_download_layout)
 
-        provider_hint = QLabel("")
-        provider_hint.setObjectName("helperLabel")
-        provider_hint.setWordWrap(True)
-        provider_hint.setVisible(not remote_mode)
-        layout.addWidget(provider_hint)
-
-        local_status_label = QLabel("")
-        local_status_label.setObjectName("helperLabel")
-        local_status_label.setWordWrap(True)
-        local_status_label.setVisible(not remote_mode)
-        layout.addWidget(local_status_label)
-
-        local_model_status_label = QLabel("")
-        local_model_status_label.setObjectName("helperLabel")
-        local_model_status_label.setWordWrap(True)
-        local_model_status_label.setVisible(not remote_mode)
-        layout.addWidget(local_model_status_label)
-
-        local_gpu_pack_status_label = QLabel("")
-        local_gpu_pack_status_label.setObjectName("helperLabel")
-        local_gpu_pack_status_label.setWordWrap(True)
-        local_gpu_pack_status_label.setVisible(not remote_mode)
-        layout.addWidget(local_gpu_pack_status_label)
-
-        local_voices_status_label = QLabel("")
-        local_voices_status_label.setObjectName("helperLabel")
-        local_voices_status_label.setWordWrap(True)
-        local_voices_status_label.setVisible(not remote_mode)
-        layout.addWidget(local_voices_status_label)
-
-        local_perf_row_1_widget = QWidget(dialog)
-        local_perf_row_1 = QHBoxLayout(local_perf_row_1_widget)
-        local_perf_row_1.setContentsMargins(0, 0, 0, 0)
-        local_context_label = QLabel("Context:")
-        local_threads_label = QLabel("Threads:")
-        local_n_ctx_edit = QLineEdit(dialog)
-        local_n_ctx_edit.setPlaceholderText("Context")
-        local_threads_edit = QLineEdit(dialog)
-        local_threads_edit.setPlaceholderText("Threads")
-        local_perf_row_1.addWidget(local_context_label)
-        local_perf_row_1.addWidget(local_n_ctx_edit)
-        local_perf_row_1.addWidget(local_threads_label)
-        local_perf_row_1.addWidget(local_threads_edit)
-        local_perf_row_1_widget.setVisible(not remote_mode)
-        layout.addWidget(local_perf_row_1_widget)
-
-        local_perf_row_2_widget = QWidget(dialog)
-        local_perf_row_2 = QHBoxLayout(local_perf_row_2_widget)
-        local_perf_row_2.setContentsMargins(0, 0, 0, 0)
-        local_gpu_layers_label = QLabel("GPU Layers:")
-        local_batch_label = QLabel("Batch:")
-        local_gpu_layers_edit = QLineEdit(dialog)
-        local_gpu_layers_edit.setPlaceholderText("GPU layers")
-        local_batch_edit = QLineEdit(dialog)
-        local_batch_edit.setPlaceholderText("Batch")
-        local_perf_row_2.addWidget(local_gpu_layers_label)
-        local_perf_row_2.addWidget(local_gpu_layers_edit)
-        local_perf_row_2.addWidget(local_batch_label)
-        local_perf_row_2.addWidget(local_batch_edit)
-        local_perf_row_2_widget.setVisible(not remote_mode)
-        layout.addWidget(local_perf_row_2_widget)
-
-        local_perf_row_3_widget = QWidget(dialog)
-        local_perf_row_3 = QHBoxLayout(local_perf_row_3_widget)
-        local_perf_row_3.setContentsMargins(0, 0, 0, 0)
-        local_ubatch_label = QLabel("Ubatch:")
-        local_ubatch_edit = QLineEdit(dialog)
-        local_ubatch_edit.setPlaceholderText("Ubatch")
-        local_flash_attn_cb = QCheckBox("GPU Speed Boost", dialog)
-        local_flash_attn_cb.setToolTip("Use a faster GPU attention mode when supported by the current local AI backend.")
-        local_auto_optimize_btn = QPushButton("Auto Optimize", dialog)
-        local_perf_row_3.addWidget(local_ubatch_label)
-        local_perf_row_3.addWidget(local_ubatch_edit)
-        local_perf_row_3.addWidget(local_flash_attn_cb)
-        local_perf_row_3.addWidget(local_auto_optimize_btn)
-        local_perf_row_3_widget.setVisible(not remote_mode)
-        layout.addWidget(local_perf_row_3_widget)
-
-        def _default_local_model_path() -> str:
-            env_value = os.getenv("LOCAL_TRANSLATOR_MODEL_PATH", "").strip()
-            if env_value:
-                return env_value
-            return os.path.join(self.workspace_root, "models", "ai", "gemma-4-E4B-it-Q4_K_M.gguf")
-
-        def _gpu_pack_dir() -> str:
-            return os.path.join(self.workspace_root, "bin", "cuda12_fw")
-
         def _piper_models_dir() -> str:
             return models_path("piper")
-
-        def _update_local_asset_status():
-            model_path = model_edit.text().strip() or _default_local_model_path()
-            model_ready = os.path.exists(model_path)
-            model_name = os.path.basename(model_path) if model_path else "No model selected"
-            local_model_status_label.setText(
-                f"Local AI model: {'Ready' if model_ready else 'Missing'}"
-                f"{f' ({model_name})' if model_name else ''}"
-            )
-
-            gpu_pack_dir = _gpu_pack_dir()
-            gpu_pack_ready = os.path.isdir(gpu_pack_dir) and os.path.exists(os.path.join(gpu_pack_dir, "cublas64_12.dll"))
-            local_gpu_pack_status_label.setText(
-                "Whisper GPU pack: "
-                + ("Ready (optional accelerator installed)" if gpu_pack_ready else "Missing (optional, only needed for faster Whisper on NVIDIA)")
-            )
-
-            piper_dir = _piper_models_dir()
-            piper_models = []
-            if os.path.isdir(piper_dir):
-                try:
-                    piper_models = [
-                        name for name in os.listdir(piper_dir)
-                        if name.lower().endswith(".onnx")
-                    ]
-                except Exception:
-                    piper_models = []
-            local_voices_status_label.setText(
-                "Local voices: "
-                + (f"Ready ({len(piper_models)} voice model{'s' if len(piper_models) != 1 else ''} found)" if piper_models else "Missing (add Piper voice files to models/piper)")
-            )
-
-        def _apply_local_recommended_settings(force_recommended: bool = False):
-            hardware_info = LocalPolisherProvider.detect_runtime_capabilities()
-            recommended = LocalPolisherProvider.recommended_runtime_config(hardware_info)
-            local_status_label.setText(LocalPolisherProvider.runtime_status_summary(hardware_info))
-            _update_local_asset_status()
-            if force_recommended or not local_n_ctx_edit.text().strip():
-                local_n_ctx_edit.setText(str(recommended["n_ctx"]))
-            if force_recommended or not local_threads_edit.text().strip():
-                local_threads_edit.setText(str(recommended["n_threads"]))
-            if force_recommended or not local_gpu_layers_edit.text().strip():
-                local_gpu_layers_edit.setText(str(recommended["gpu_layers"]))
-            if force_recommended or not local_batch_edit.text().strip():
-                local_batch_edit.setText(str(recommended["n_batch"]))
-            if force_recommended or not local_ubatch_edit.text().strip():
-                local_ubatch_edit.setText(str(recommended["n_ubatch"]))
-            if force_recommended or not getattr(local_flash_attn_cb, "_manual_override", False):
-                local_flash_attn_cb.setChecked(bool(recommended["flash_attn"]))
-
-        def update_provider_fields():
-            p = provider_combo.currentData()
-            if p == "local":
-                key_edit.clear()
-                model_edit.setText(_default_local_model_path())
-                key_label.setText("API Key:")
-                model_label.setText("Local GGUF model path:")
-                key_edit.setEchoMode(QLineEdit.Normal)
-                key_edit.setEnabled(False)
-                key_label.setEnabled(False)
-                key_section_widget.setVisible(False)
-                browse_model_btn.setVisible(True)
-                open_models_folder_btn.setVisible(True)
-                open_gpu_pack_folder_btn.setVisible(True)
-                open_voices_folder_btn.setVisible(True)
-                manage_resources_btn.setVisible(True)
-                provider_hint.setText("Use the local GGUF translator by default. Gemini is optional if you want faster cloud performance.")
-                local_status_label.setVisible(True)
-                local_model_status_label.setVisible(True)
-                local_gpu_pack_status_label.setVisible(True)
-                local_voices_status_label.setVisible(True)
-                local_perf_row_1_widget.setVisible(True)
-                local_perf_row_2_widget.setVisible(True)
-                local_perf_row_3_widget.setVisible(True)
-                local_n_ctx_edit.setText(os.getenv("LOCAL_TRANSLATOR_N_CTX", ""))
-                local_threads_edit.setText(os.getenv("LOCAL_TRANSLATOR_N_THREADS", ""))
-                local_gpu_layers_edit.setText(os.getenv("LOCAL_TRANSLATOR_GPU_LAYERS", ""))
-                local_batch_edit.setText(os.getenv("LOCAL_TRANSLATOR_N_BATCH", ""))
-                local_ubatch_edit.setText(os.getenv("LOCAL_TRANSLATOR_N_UBATCH", ""))
-                local_flash_attn_cb._manual_override = bool(os.getenv("LOCAL_TRANSLATOR_FLASH_ATTN", "").strip())
-                local_flash_attn_cb.setChecked(str(os.getenv("LOCAL_TRANSLATOR_FLASH_ATTN", "false")).strip().lower() in {"1", "true", "yes", "on"})
-                _apply_local_recommended_settings(force_recommended=False)
-            elif p == "gemini":
-                key_edit.setText(os.getenv("GEMINI_API_KEY", ""))
-                model_edit.setText(os.getenv("GEMINI_MODEL", "gemini-1.5-flash"))
-                key_label.setText("API Key:")
-                model_label.setText("AI Model:")
-                key_edit.setEchoMode(QLineEdit.Password)
-                key_edit.setEnabled(True)
-                key_label.setEnabled(True)
-                key_section_widget.setVisible(True)
-                browse_model_btn.setVisible(False)
-                open_models_folder_btn.setVisible(False)
-                open_gpu_pack_folder_btn.setVisible(False)
-                open_voices_folder_btn.setVisible(False)
-                manage_resources_btn.setVisible(False)
-                provider_hint.setText("Use Gemini for AI translation and rewrite.")
-                local_status_label.setVisible(False)
-                local_model_status_label.setVisible(False)
-                local_gpu_pack_status_label.setVisible(False)
-                local_voices_status_label.setVisible(False)
-                local_perf_row_1_widget.setVisible(False)
-                local_perf_row_2_widget.setVisible(False)
-                local_perf_row_3_widget.setVisible(False)
-            else:
-                key_edit.setText(os.getenv("GEMINI_API_KEY", ""))
-                model_edit.setText(os.getenv("GEMINI_MODEL", "gemini-1.5-flash"))
-                key_label.setText("API Key:")
-                model_label.setText("AI Model:")
-                key_edit.setEchoMode(QLineEdit.Password)
-                key_edit.setEnabled(True)
-                key_label.setEnabled(True)
-                key_section_widget.setVisible(True)
-                browse_model_btn.setVisible(False)
-                open_models_folder_btn.setVisible(False)
-                open_gpu_pack_folder_btn.setVisible(False)
-                open_voices_folder_btn.setVisible(False)
-                manage_resources_btn.setVisible(False)
-                provider_hint.setText("Use Gemini as the optional cloud provider when you want higher speed than local GGUF.")
-                local_status_label.setVisible(False)
-                local_model_status_label.setVisible(False)
-                local_gpu_pack_status_label.setVisible(False)
-                local_voices_status_label.setVisible(False)
-                local_perf_row_1_widget.setVisible(False)
-                local_perf_row_2_widget.setVisible(False)
-                local_perf_row_3_widget.setVisible(False)
-
-        def browse_local_model():
-            current_path = model_edit.text().strip()
-            start_dir = current_path if os.path.isdir(current_path) else os.path.dirname(current_path) if current_path else os.path.join(self.workspace_root, "models", "ai")
-            file_path, _ = QFileDialog.getOpenFileName(
-                dialog,
-                "Choose GGUF model",
-                start_dir,
-                "GGUF Models (*.gguf);;All Files (*.*)",
-            )
-            if file_path:
-                model_edit.setText(file_path)
-                _update_local_asset_status()
-
-        def open_models_folder():
-            models_dir = os.path.join(self.workspace_root, "models", "ai")
-            os.makedirs(models_dir, exist_ok=True)
-            open_folder_impl(self, models_dir)
-
-        def open_gpu_pack_folder():
-            gpu_pack_dir = _gpu_pack_dir()
-            os.makedirs(gpu_pack_dir, exist_ok=True)
-            open_folder_impl(self, gpu_pack_dir)
 
         def open_voices_folder():
             voices_dir = _piper_models_dir()
             os.makedirs(voices_dir, exist_ok=True)
             open_folder_impl(self, voices_dir)
 
-        provider_combo.currentIndexChanged.connect(update_provider_fields)
-        browse_model_btn.clicked.connect(browse_local_model)
-        open_models_folder_btn.clicked.connect(open_models_folder)
-        open_gpu_pack_folder_btn.clicked.connect(open_gpu_pack_folder)
         open_voices_folder_btn.clicked.connect(open_voices_folder)
         manage_resources_btn.clicked.connect(self.open_resource_manager_dialog)
-        local_auto_optimize_btn.clicked.connect(lambda: _apply_local_recommended_settings(force_recommended=True))
-        local_flash_attn_cb.toggled.connect(lambda _checked: setattr(local_flash_attn_cb, "_manual_override", True))
-        model_edit.textChanged.connect(lambda _text: _update_local_asset_status())
         def _test_remote_connection():
             try:
                 payload = self._test_remote_api_connection(
@@ -6578,10 +6325,6 @@ class VideoTranslatorGUI(QMainWindow):
             else:
                 QMessageBox.warning(dialog, "Detail Voice", "Detail Voice server is not running.\n\nOpen run_f5_api_server.bat first.")
         test_remote_btn.clicked.connect(_test_remote_connection)
-        f5_test_btn.clicked.connect(_test_f5_server)
-        _refresh_f5_settings_status()
-        if not remote_mode:
-            update_provider_fields()
 
         # Buttons
         button_row = QHBoxLayout()
@@ -6600,7 +6343,6 @@ class VideoTranslatorGUI(QMainWindow):
 
         # Save Logic
         new_whisper = str(whisper_combo.currentData() or "base").strip().lower()
-        new_provider = str(provider_combo.currentData()).strip()
         new_key = key_edit.text().strip()
         new_model = model_edit.text().strip()
 
@@ -6612,26 +6354,17 @@ class VideoTranslatorGUI(QMainWindow):
             with open(".env", "r", encoding="utf-8") as f:
                 env_lines = f.readlines()
         
-        updates = {
-            "AI_POLISHER_PROVIDER": new_provider
-        }
         if remote_mode:
             updates = {
                 "CAPCAP_REMOTE_API_URL": remote_url_edit.text().strip() or "http://127.0.0.1:8765",
                 "CAPCAP_REMOTE_API_TOKEN": remote_token_edit.text().strip(),
             }
-        elif new_provider == "gemini":
-            updates["GEMINI_API_KEY"] = new_key
-            updates["GEMINI_MODEL"] = new_model
         else:
-            updates["LOCAL_TRANSLATOR_MODEL_PATH"] = new_model
-            updates["LOCAL_TRANSLATOR_N_CTX"] = local_n_ctx_edit.text().strip() or "2048"
-            updates["LOCAL_TRANSLATOR_N_THREADS"] = local_threads_edit.text().strip() or "8"
-            updates["LOCAL_TRANSLATOR_N_THREADS_BATCH"] = local_threads_edit.text().strip() or "8"
-            updates["LOCAL_TRANSLATOR_GPU_LAYERS"] = local_gpu_layers_edit.text().strip() or "0"
-            updates["LOCAL_TRANSLATOR_N_BATCH"] = local_batch_edit.text().strip() or "768"
-            updates["LOCAL_TRANSLATOR_N_UBATCH"] = local_ubatch_edit.text().strip() or "384"
-            updates["LOCAL_TRANSLATOR_FLASH_ATTN"] = "true" if local_flash_attn_cb.isChecked() else "false"
+            updates = {
+                "AI_POLISHER_PROVIDER": "gemini",
+                "OPENAI_API_KEY": new_key,
+                "OPENAI_MODEL": new_model,
+            }
         
         new_env_lines = []
         handled_keys = set()

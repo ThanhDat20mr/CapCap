@@ -46,6 +46,15 @@ class TranslationOrchestrator:
             if polisher.is_configured():
                 try:
                     mode_label = self._describe_ai_provider(provider_type)
+                    merged_style = str(style_instruction or "")
+                    if optimize_subtitles and provider_type != "local":
+                        merged_style = (
+                            "Subtitle-optimized translation. "
+                            "Make it natural, concise, timing-friendly Vietnamese. "
+                            "Prefer one line per segment, use <br> only when needed. "
+                            "Keep names/numbers/products exactly. "
+                            + merged_style
+                        )
                     print(
                         f"[AI Translation] Starting translation (provider: {mode_label}, batch_size={polish_batch_size})..."
                     )
@@ -56,7 +65,7 @@ class TranslationOrchestrator:
                         translated_texts=None,
                         src_lang=normalized_src,
                         target_lang=target_lang,
-                        style_instruction=style_instruction,
+                        style_instruction=merged_style,
                         polish_batch_size=polish_batch_size,
                     )
                     warnings.extend(batch_warnings)
@@ -66,7 +75,7 @@ class TranslationOrchestrator:
 
                     print(f"[AI Translation] Success: completed via {', '.join(providers_used) or 'AI'}")
                     final_segments = clone_with_texts(segments, translated_texts, provider=provider_type, polished=True)
-                    if optimize_subtitles:
+                    if optimize_subtitles and provider_type == "local":
                         final_segments = self._maybe_optimize_subtitle_segments(
                             polisher=polisher,
                             provider_type=provider_type,
@@ -236,16 +245,16 @@ class TranslationOrchestrator:
         return mapping.get(key, src_lang)
 
     def _resolve_ai_provider(self):
-        provider_type = (os.getenv("AI_POLISHER_PROVIDER") or "local").strip().lower()
+        provider_type = (os.getenv("AI_POLISHER_PROVIDER") or "gemini").strip().lower()
         if provider_type == "gemini":
             return provider_type, self.gemini_polisher
         if provider_type == "local":
             return provider_type, self.local_polisher
-        return "local", self.local_polisher
+        return "gemini", self.gemini_polisher
 
     def _describe_ai_provider(self, provider_type: str) -> str:
         if provider_type == "gemini":
-            return f"Gemini ({self.gemini_polisher.model_name})"
+            return f"OpenAI ({self.gemini_polisher.model_name})"
         if provider_type == "local":
             return f"Local GGUF ({os.path.basename(self.local_polisher.model_path)})"
         return f"Local GGUF ({os.path.basename(self.local_polisher.model_path)})"
@@ -284,7 +293,7 @@ class TranslationOrchestrator:
                     providers_used.add(provider_name)
             return merged, sorted(providers_used), warnings
 
-        source_batches = list(split_text_batches(source_texts, polish_batch_size))
+        source_batches = list(split_text_batches(source_texts, max(polish_batch_size, 60)))
         translated_batches = list(split_text_batches(translated_texts, polish_batch_size)) if translated_texts else [None] * len(source_batches)
         translated_texts_map = {}
 

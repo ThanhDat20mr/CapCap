@@ -1,213 +1,233 @@
 import os
-import subprocess
-import shutil
-import sys
+import warnings
+
+import numpy as np
+import soundfile as sf
+import librosa
+import onnxruntime as ort
+from scipy.signal.windows import hann as periodic_hann
 
 from runtime_paths import bin_path
 
+warnings.filterwarnings("ignore", message="NOLA condition failed")
 
-def _subprocess_run_kwargs() -> dict:
-    kwargs = {}
-    if os.name == "nt":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        kwargs["startupinfo"] = startupinfo
-    return kwargs
+_MODEL_PATH = None
+_ONNX_SESSION = None
 
-def _detect_demucs_device() -> str:
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return "cuda"
-    except Exception:
-        pass
-    return "cpu"
-
-def _write_wav_soundfile(path, audio, samplerate):
-    """
-    Write audio using soundfile to avoid torchaudio/torchcodec DLL issues on Windows.
-    audio: torch.Tensor shaped (channels, samples) or numpy array equivalent.
-    """
-    try:
-        import soundfile as sf
-    except Exception as e:
-        raise ImportError(
-            "Missing dependency 'soundfile' needed for fallback audio writing.\n"
-            f"Python: {sys.executable}\n"
-            "Please run:\n"
-            "python -m pip install soundfile\n"
-            f"Original error: {e}"
-        ) from e
-
-    # Lazy import numpy/torch only when needed
-    try:
-        import numpy as np
-    except Exception as e:
-        raise ImportError(
-            "Missing dependency 'numpy' needed for fallback audio writing.\n"
-            f"Python: {sys.executable}\n"
-            "Please run:\n"
-            "python -m pip install numpy\n"
-            f"Original error: {e}"
-        ) from e
-
-    arr = audio
-    # torch.Tensor -> numpy
-    try:
-        import torch  # noqa: F401
-        if hasattr(arr, "detach"):
-            arr = arr.detach().cpu().float().numpy()
-    except Exception:
-        pass
-
-    arr = np.asarray(arr)
-    # (C, T) -> (T, C)
-    if arr.ndim == 2:
-        arr = arr.T
-    sf.write(path, arr, samplerate)
+DIM_F = 3072
+DIM_T = 256
+N_FFT = DIM_F * 2
+HOP = 1024
+SR = 44100
+L = 11
+HALF_DIM_C = 2
 
 
-def _separate_vocals_via_api(audio_path, output_dir):
-    """
-    Demucs separation via Python API + soundfile writing.
-    Returns (vocal_path, music_path) or raises.
-    """
-    from demucs.separate import load_track
-    from demucs.apply import apply_model
-    from demucs.pretrained import get_model
+def _model_path():
+    global _MODEL_PATH
+    if _MODEL_PATH is None:
+        _MODEL_PATH = os.path.join(bin_path(), "UVR-MDX-NET-Inst_HQ_3.onnx")
+    return _MODEL_PATH
 
-    model = get_model("htdemucs")
-    device = _detect_demucs_device()
-    print(f"[Demucs] Using device: {device}")
-    model.to(device)
 
-    wav = load_track(audio_path, model.audio_channels, model.samplerate)
-    # wav shape: (channels, samples)
-    sources = apply_model(
-        model,
-        wav[None],
-        device=device,
-        shifts=0,
-        split=True,
-        overlap=0.25,
-        progress=False,
-    )[0]
+def _get_session():
+    global _ONNX_SESSION
+    if _ONNX_SESSION is None:
+        path = _model_path()
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"ONNX model not found: {path}")
+        _ONNX_SESSION = ort.InferenceSession(
+            path,
+            providers=["CPUExecutionProvider"],
+        )
+    return _ONNX_SESSION
 
-    # sources shape: (num_sources, channels, samples)
-    # Find vocals stem and build accompaniment as sum of others
-    src_names = list(getattr(model, "sources", []))
-    if "vocals" not in src_names:
-        raise RuntimeError(f"Demucs model sources missing 'vocals': {src_names}")
-    v_idx = src_names.index("vocals")
-    vocals = sources[v_idx]
-    other = sources.sum(0) - vocals
+
+class _STFT:
+    def __init__(self):
+        self.dim_c = 4
+        self.dim_f = DIM_F
+        self.dim_t = DIM_T
+        self.n_fft = N_FFT
+        self.hop = HOP
+        self.n_bins = N_FFT // 2 + 1
+        self.chunk_size = HOP * (DIM_T - 1)
+        window = periodic_hann(N_FFT, sym=False).astype(np.float32)
+        self.window_stft = window
+        self.freq_pad = np.zeros([1, self.dim_c, self.n_bins - self.dim_f, self.dim_t], dtype=np.float32)
+
+    def stft(self, x):
+        x = x.reshape(-1, self.chunk_size)
+        results = []
+        for i in range(x.shape[0]):
+            Z = librosa.stft(
+                x[i].numpy() if hasattr(x[i], 'numpy') else x[i],
+                n_fft=self.n_fft,
+                hop_length=self.hop,
+                window=self.window_stft,
+                center=True,
+            )
+            Z_real = np.real(Z)
+            Z_imag = np.imag(Z)
+            results.append(np.stack([Z_real, Z_imag], axis=-1))
+        X = np.stack(results)  # (batch, n_bins, dim_t, 2)
+        X = X.transpose(0, 3, 1, 2)  # (batch, 2, n_bins, dim_t)
+        X = X.reshape(-1, 2, self.n_bins, self.dim_t)
+        X = X.reshape(-1, self.dim_c, self.n_bins, self.dim_t)
+        return X[:, :, :self.dim_f, :]
+
+    def istft(self, x, freq_pad=None):
+        if freq_pad is None:
+            freq_pad = np.repeat(self.freq_pad, x.shape[0], axis=0)
+        x = np.concatenate([x, freq_pad], axis=-2)
+        x = x.reshape(-1, HALF_DIM_C, 2, self.n_bins, self.dim_t)
+        x = x.reshape(-1, 2, self.n_bins, self.dim_t)
+        x = x.transpose(0, 2, 3, 1)  # (batch, n_bins, dim_t, 2)
+        results = []
+        for i in range(x.shape[0]):
+            Z = x[i, :, :, 0] + 1j * x[i, :, :, 1]
+            wav = librosa.istft(
+                Z,
+                hop_length=self.hop,
+                window=self.window_stft,
+                center=True,
+                length=self.chunk_size,
+            )
+            results.append(wav)
+        result = np.stack(results)
+        result = result.reshape(-1, HALF_DIM_C, self.chunk_size)
+        return result
+
+
+def separate_vocals(audio_path, output_dir):
+    if not os.path.exists(audio_path):
+        return None, None
+
+    os.makedirs(output_dir, exist_ok=True)
+    session = _get_session()
+    model = _STFT()
+
+    audio, sr = sf.read(audio_path, dtype="float32")
+    if audio.ndim == 1:
+        audio = np.stack([audio, audio], axis=0)
+    else:
+        audio = audio.T
+        if audio.shape[0] == 1:
+            audio = np.repeat(audio, 2, axis=0)
+        elif audio.shape[0] > 2:
+            audio = audio[:2]
+
+    if sr != SR:
+        from scipy.signal import resample_poly
+        gcd_val = np.gcd(sr, SR)
+        up = SR // gcd_val
+        down = sr // gcd_val
+        audio = resample_poly(audio.astype(np.float64), up, down, axis=1).astype(np.float32)
+
+    samples = audio.shape[-1]
+    margin = SR
+    chunk_size = 15 * SR
+
+    if samples < chunk_size:
+        chunk_size = samples
+    if margin > chunk_size:
+        margin = chunk_size
+
+    segments = {}
+    counter = -1
+    for skip in range(0, samples, chunk_size):
+        counter += 1
+        s_margin = 0 if counter == 0 else margin
+        end = min(skip + chunk_size + margin, samples)
+        start = skip - s_margin
+        segments[skip] = audio[:, start:end].copy()
+        if end == samples:
+            break
+
+    chunked_sources = []
+    for mix_start in segments:
+        cmix = segments[mix_start]
+        sources = []
+        n_sample = cmix.shape[1]
+        trim = model.n_fft // 2
+        gen_size = model.chunk_size - 2 * trim
+        pad = gen_size - n_sample % gen_size
+        if pad == gen_size:
+            pad = 0
+
+        mix_p = np.concatenate([
+            np.zeros((2, trim), dtype=np.float32),
+            cmix,
+            np.zeros((2, pad), dtype=np.float32),
+            np.zeros((2, trim), dtype=np.float32),
+        ], axis=1)
+
+        mix_waves = []
+        i = 0
+        while i < n_sample + pad:
+            waves = mix_p[:, i:i + model.chunk_size]
+            mix_waves.append(waves)
+            i += gen_size
+
+        if not mix_waves:
+            continue
+
+        mix_waves = np.array(mix_waves, dtype=np.float32)
+
+        spek = model.stft(mix_waves)
+
+        spec_pred = session.run(None, {"input": spek})[0]
+
+        tar_waves = model.istft(spec_pred)
+
+        tar_signal = tar_waves[:, :, trim:-trim]
+        tar_signal = tar_signal.transpose(1, 0, 2).reshape(2, -1)
+
+        tar_signal = tar_signal[:, :n_sample + pad]
+
+        start = 0 if mix_start == 0 else margin
+        end = None if mix_start == list(segments.keys())[-1] else -margin
+        if margin == 0:
+            end = None
+
+        sources.append(tar_signal[:, start:end])
+        chunked_sources.append(sources)
+
+    if not chunked_sources:
+        return None, None
+
+    vocals_441 = np.concatenate([s[0] for s in chunked_sources], axis=-1)[:, :samples]
+
+    if sr != SR:
+        from scipy.signal import resample_poly
+        gcd_val = np.gcd(SR, sr)
+        up = sr // gcd_val
+        down = SR // gcd_val
+        vocals_441 = resample_poly(vocals_441.astype(np.float64), up, down, axis=1).astype(np.float32)
+
+    audio_orig, orig_sr = sf.read(audio_path, dtype="float32")
+    if audio_orig.ndim == 1:
+        audio_orig = audio_orig
+    else:
+        audio_orig = audio_orig[:, 0]
+
+    vocals_mono = vocals_441[0]
+    if len(vocals_mono) < len(audio_orig):
+        vocals_mono = np.pad(vocals_mono, (0, len(audio_orig) - len(vocals_mono)))
+    else:
+        vocals_mono = vocals_mono[:len(audio_orig)]
+
+    # Model outputs instrumental; vocals = original - instrumental
+    instrumental = vocals_mono
+    vocals_final = audio_orig - instrumental
 
     base_name = os.path.splitext(os.path.basename(audio_path))[0]
-    result_dir = os.path.join(output_dir, "htdemucs", base_name)
+    result_dir = os.path.join(output_dir, "onnx_separated", base_name)
     os.makedirs(result_dir, exist_ok=True)
 
     vocal_out = os.path.join(result_dir, "vocals.wav")
     music_out = os.path.join(result_dir, "no_vocals.wav")
-    _write_wav_soundfile(vocal_out, vocals, model.samplerate)
-    _write_wav_soundfile(music_out, other, model.samplerate)
+    sf.write(vocal_out, vocals_final, orig_sr)
+    sf.write(music_out, instrumental, orig_sr)
+
     return vocal_out, music_out
-
-
-def separate_vocals(audio_path, output_dir):
-    """
-    Separates vocals from background music using Demucs.
-    Requires: pip install demucs
-    Returns: (vocal_path, music_path) or (None, None)
-    """
-    if not os.path.exists(audio_path):
-        return None, None
-
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-
-    # We use demucs (local)
-    # n htdemucs is a good default model
-    # --two-stems=vocals will give us vocals and 'no_vocals' (music)
-    
-    # Add our local ffmpeg to PATH so demucs can find it
-    ffmpeg_dir = os.path.dirname(bin_path("ffmpeg", "ffmpeg.exe"))
-    if os.path.exists(ffmpeg_dir):
-        os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
-
-    try:
-        import demucs.separate  # noqa: F401
-    except ImportError as e:
-        # Fallback: if demucs isn't importable, verify it's runnable
-        if shutil.which("demucs") is None:
-            try:
-                subprocess.run([sys.executable, "-m", "demucs", "--help"], capture_output=True, check=True, text=True, **_subprocess_run_kwargs())
-            except Exception as e:
-                raise ImportError("Demucs is not installed. Please run 'pip install demucs'") from e
-        # If the CLI exists but import failed, propagate the real import error.
-        raise ImportError(
-            "Demucs import failed (it may be installed but missing a dependency).\n"
-            f"Python: {sys.executable}\n"
-            f"Original error: {e}"
-        ) from e
-
-    demucs_device = _detect_demucs_device()
-    print(f"[Demucs] Using device: {demucs_device}")
-    cmd = [
-        str(sys.executable), "-m", "demucs",
-        "--device", demucs_device,
-        "--two-stems", "vocals",
-        "-o", str(output_dir),
-        str(audio_path)
-    ]
-    
-    print(f"Running Vocal Separation: {' '.join(cmd)}")
-    try:
-        proc = subprocess.run(cmd, check=True, capture_output=True, text=True, **_subprocess_run_kwargs())
-        
-        # Demucs output structure varies by version:
-        # - output_dir/htdemucs/<track>/vocals.wav
-        # - output_dir/separated/htdemucs/<track>/vocals.wav
-        # and model name may differ.
-        base_name = os.path.splitext(os.path.basename(audio_path))[0]
-
-        candidates = [
-            os.path.join(output_dir, "htdemucs", base_name),
-            os.path.join(output_dir, "separated", "htdemucs", base_name),
-        ]
-
-        for result_dir in candidates:
-            vocal_out = os.path.join(result_dir, "vocals.wav")
-            music_out = os.path.join(result_dir, "no_vocals.wav")
-            if os.path.exists(vocal_out) and os.path.exists(music_out):
-                return vocal_out, music_out
-
-        # Robust scan if model name / folder differs
-        vocal_found = None
-        music_found = None
-        for root, _, files in os.walk(output_dir):
-            if base_name not in os.path.basename(root):
-                continue
-            if "vocals.wav" in files:
-                vocal_found = os.path.join(root, "vocals.wav")
-            if "no_vocals.wav" in files:
-                music_found = os.path.join(root, "no_vocals.wav")
-            if vocal_found and music_found:
-                return vocal_found, music_found
-
-        return None, None
-    except subprocess.CalledProcessError as e:
-        details = (e.stderr or e.stdout or "").strip()
-        msg = f"Demucs failed (exit {e.returncode})."
-        if details:
-            msg += f"\n{details}"
-        # Common Windows failure: torchaudio -> torchcodec DLL missing.
-        if "could not load libtorchcodec" in details.lower():
-            try:
-                return _separate_vocals_via_api(audio_path, output_dir)
-            except Exception as api_e:
-                raise RuntimeError(msg + f"\n\nFallback API mode also failed:\n{api_e}") from e
-        raise RuntimeError(msg) from e
-    except Exception as e:
-        print(f"Vocal separation error: {e}")
-        raise RuntimeError(f"Vocal separation error: {e}") from e
