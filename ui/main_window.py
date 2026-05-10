@@ -2826,6 +2826,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.translated_text.setText(self.format_to_srt(self.current_translated_segments))
         if self.current_translated_segments or self.current_segments:
             self.apply_segments_to_timeline()
+            self.set_selected_segment_index(0, sync_ui=True)
 
     def resolve_background_audio_path(self) -> str:
         manual_candidate = self.bg_music_edit.text().strip() if hasattr(self, "bg_music_edit") else ""
@@ -6237,10 +6238,28 @@ class VideoTranslatorGUI(QMainWindow):
         layout.addWidget(f5_divider)
 
         # AI Translation Section
-        ai_title = QLabel("AI Translation (Google AI Studio)")
+        ai_title = QLabel("AI Translation")
         ai_title.setObjectName("statusHeadline")
         ai_title.setVisible(not remote_mode)
         layout.addWidget(ai_title)
+
+        provider_layout = QHBoxLayout()
+        provider_label = QLabel("Provider:")
+        provider_label.setVisible(not remote_mode)
+        provider_layout.addWidget(provider_label)
+        provider_combo = QComboBox(dialog)
+        provider_combo.addItem("OpenAI (Google AI Studio)", "openai")
+        provider_combo.addItem("Ollama (Local)", "ollama")
+        provider_combo.addItem("Local (GGUF)", "local")
+        current_provider = (os.getenv("OPENAI_PROVIDER") or "openai").strip().lower()
+        if current_provider not in {"openai", "ollama", "local"}:
+            current_provider = "openai"
+        idx = provider_combo.findData(current_provider)
+        if idx >= 0:
+            provider_combo.setCurrentIndex(idx)
+        provider_combo.setVisible(not remote_mode)
+        provider_layout.addWidget(provider_combo, 1)
+        layout.addLayout(provider_layout)
 
         key_section_widget = QWidget(dialog)
         key_layout = QVBoxLayout(key_section_widget)
@@ -6264,11 +6283,72 @@ class VideoTranslatorGUI(QMainWindow):
         model_edit.setVisible(not remote_mode)
         layout.addLayout(model_layout)
 
+        base_url_layout = QVBoxLayout()
+        base_url_label = QLabel("API URL:")
+        base_url_edit = QLineEdit(dialog)
+        base_url_edit.setText(os.getenv("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"))
+        base_url_layout.addWidget(base_url_label)
+        base_url_layout.addWidget(base_url_edit)
+        base_url_label.setVisible(not remote_mode)
+        base_url_edit.setVisible(not remote_mode)
+        layout.addLayout(base_url_layout)
+
         provider_hint = QLabel("Get an API key at https://aistudio.google.com/apikey")
         provider_hint.setObjectName("helperLabel")
         provider_hint.setWordWrap(True)
         provider_hint.setVisible(not remote_mode)
         layout.addWidget(provider_hint)
+
+        def update_provider_fields():
+            p = provider_combo.currentData()
+            is_openai = p == "openai"
+            key_section_widget.setVisible(is_openai)
+            base_url_label.setVisible(not remote_mode and p != "local")
+            base_url_edit.setVisible(not remote_mode and p != "local")
+            if is_openai:
+                base_url_edit.setText("https://generativelanguage.googleapis.com/v1beta/openai/")
+                provider_hint.setText("Get an API key at https://aistudio.google.com/apikey")
+            elif p == "ollama":
+                base_url_edit.setText("http://localhost:11434/v1")
+                key_edit.clear()
+                model_edit.setText("qwen2.5:7b")
+                provider_hint.setText("Requires Ollama installed. Run: ollama pull qwen2.5:7b")
+            else:
+                base_url_edit.setText("")
+                base_url_edit.setVisible(False)
+                base_url_label.setVisible(False)
+                key_section_widget.setVisible(False)
+                model_edit.setText(os.getenv("LOCAL_TRANSLATOR_MODEL_PATH", "models/ai/gemma-4-E4B-it-Q4_K_M.gguf"))
+                provider_hint.setText("Select a GGUF model file. Download from Hugging Face.")
+
+        test_btn = QPushButton("Test Connection", dialog)
+        test_btn.setVisible(not remote_mode)
+        test_status = QLabel("")
+        test_status.setObjectName("helperLabel")
+        test_status.setVisible(not remote_mode)
+        test_row = QHBoxLayout()
+        test_row.addWidget(test_btn)
+        test_row.addWidget(test_status, 1)
+        layout.addLayout(test_row)
+
+        def test_ai_connection():
+            url = base_url_edit.text().strip()
+            key = key_edit.text().strip() or "ollama"
+            model = model_edit.text().strip()
+            test_status.setText("Testing...")
+            test_status.repaint()
+            try:
+                from openai import OpenAI
+                client = OpenAI(api_key=key, base_url=url)
+                client.models.list()
+                test_status.setText(f"Connected. Model: {model}")
+            except Exception as e:
+                test_status.setText(f"Failed: {e}")
+
+        test_btn.clicked.connect(test_ai_connection)
+
+        provider_combo.currentIndexChanged.connect(update_provider_fields)
+        update_provider_fields()
 
         local_download_layout = QHBoxLayout()
         manage_resources_btn = QPushButton("Manage Resources", dialog)
@@ -6345,6 +6425,8 @@ class VideoTranslatorGUI(QMainWindow):
         new_whisper = str(whisper_combo.currentData() or "base").strip().lower()
         new_key = key_edit.text().strip()
         new_model = model_edit.text().strip()
+        new_provider = str(provider_combo.currentData()).strip()
+        new_base_url = base_url_edit.text().strip()
 
         self.selected_whisper_model_name = new_whisper
         
@@ -6360,11 +6442,28 @@ class VideoTranslatorGUI(QMainWindow):
                 "CAPCAP_REMOTE_API_TOKEN": remote_token_edit.text().strip(),
             }
         else:
-            updates = {
-                "AI_POLISHER_PROVIDER": "gemini",
-                "OPENAI_API_KEY": new_key,
-                "OPENAI_MODEL": new_model,
-            }
+            if new_provider == "ollama":
+                updates = {
+                    "AI_POLISHER_PROVIDER": "gemini",
+                    "OPENAI_PROVIDER": "ollama",
+                    "OPENAI_API_KEY": "ollama",
+                    "OPENAI_MODEL": new_model,
+                    "OPENAI_BASE_URL": new_base_url or "http://localhost:11434/v1",
+                }
+            elif new_provider == "local":
+                updates = {
+                    "AI_POLISHER_PROVIDER": "local",
+                    "OPENAI_PROVIDER": "local",
+                    "LOCAL_TRANSLATOR_MODEL_PATH": new_model,
+                }
+            else:
+                updates = {
+                    "AI_POLISHER_PROVIDER": "gemini",
+                    "OPENAI_PROVIDER": "openai",
+                    "OPENAI_API_KEY": new_key,
+                    "OPENAI_MODEL": new_model,
+                    "OPENAI_BASE_URL": new_base_url or "https://generativelanguage.googleapis.com/v1beta/openai/",
+                }
         
         new_env_lines = []
         handled_keys = set()
@@ -7045,9 +7144,9 @@ class VideoTranslatorGUI(QMainWindow):
             except Exception as e:
                 self.log(f"[Clean] Failed: {e}")
         self._current_video_path = ""
+        self.hide()
         QApplication.setQuitOnLastWindowClosed(False)
-        self.close()
-        QTimer.singleShot(400, _relaunch_launcher)
+        QTimer.singleShot(100, _relaunch_launcher)
 
     def closeEvent(self, event):
         try:
@@ -7176,10 +7275,10 @@ class VideoTranslatorGUI(QMainWindow):
 def _relaunch_launcher():
     from views.launcher import show_launcher, LauncherWindow
     video_path = show_launcher(None)
+    QApplication.setQuitOnLastWindowClosed(True)
     if not video_path:
         QApplication.quit()
         return
-    QApplication.setQuitOnLastWindowClosed(True)
     LauncherWindow.add_recent(None, video_path)
     new_window = VideoTranslatorGUI()
     new_window.show()

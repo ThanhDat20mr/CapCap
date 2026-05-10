@@ -82,8 +82,20 @@ def validate_texts(texts: list[str], expected_len: int) -> bool:
 
 
 def parse_numbered_lines(raw: str) -> list[str]:
+    # Strip Gemma chain-of-thought tags
+    cleaned = re.sub(r"<thought>.*?</thought>", "", raw, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"</?think>", "", cleaned, flags=re.IGNORECASE)
+    # Strip everything before first numbered line (thinking prefix)
+    first_num = re.search(r"^\s*\d+\.", cleaned, re.MULTILINE)
+    if first_num:
+        cleaned = cleaned[first_num.start():]
     items = []
-    for line in raw.splitlines():
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("Assistant:", "Translation:", "Trợ lý:", "Dịch:", "Note:", "Here", "Sure", "OK", "Let", "I'll", "The")):
+            continue
         match = re.match(r"^\s*\d+\.\s*(.+?)\s*$", line)
         if match:
             items.append(match.group(1).strip())

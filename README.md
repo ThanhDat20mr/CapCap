@@ -13,7 +13,10 @@
 - **GPU-accelerated** — plug in NVIDIA GPU, install driver only, get 3-5x faster
 - Three output modes: `subtitle only`, `voice only`, `subtitle + voice`
 - Speech-to-text with `faster-whisper` (CPU or GPU)
-- AI translation via OpenAI-compatible API (Gemini / Gemma)
+- AI translation — 3 providers:
+  - **OpenAI** (Google AI Studio, cloud, free tier)
+  - **Ollama** (local, no internet, `ollama pull qwen2.5:7b`)
+  - **Local GGUF** (local, no internet, download `.gguf` model)
 - Free Google translate fallback — no API key needed
 - Vietnamese voice with `Piper` (fully offline) or `edge-tts` (online)
 - Vocal/instrumental separation via ONNX Runtime (CPU, ~9s for 10s audio)
@@ -24,9 +27,12 @@
 
 ## Quick Start
 
-1. Get API key from [Google AI Studio](https://aistudio.google.com/apikey) (free)
-2. Paste key in Settings → Save
-3. Load video → click **Generate**
+1. Open Settings (More → Settings)
+2. Choose translation provider:
+   - **OpenAI** — get [free API key](https://aistudio.google.com/apikey), paste it
+   - **Ollama** — install [Ollama](https://ollama.com), run `ollama pull qwen2.5:7b`
+   - **Local GGUF** — download a `.gguf` model, set path
+3. Save → Load video → click **Generate**
 
 No key? Google translate fallback works for free (slower, lower quality).
 
@@ -88,7 +94,7 @@ No key? Google translate fallback works for free (slower, lower quality).
 | Speech-to-text | faster-whisper (CT2, CUDA/CPU) |
 | Vocal separation | ONNX Runtime + UVR MDX-NET model |
 | Audio post-process | FFmpeg (afftdn denoise, loudnorm) |
-| Translation | OpenAI API (Gemini/Gemma via Google AI Studio) |
+| Translation | OpenAI API / Ollama / llama-cpp-python (GGUF) |
 | Fallback translate | Google web translate (free, no key) |
 | TTS | Piper (local), edge-tts (online) |
 | Audio processing | FFmpeg, pydub, soundfile |
@@ -97,21 +103,26 @@ No key? Google translate fallback works for free (slower, lower quality).
 ## Dependencies
 
 ```
+requirements-base.txt:
+  PySide6, requests, python-dotenv, pydub, python-mpv
+
 requirements-local.txt:
-  pyside6, requests, python-dotenv, pydub, python-mpv
   faster-whisper, onnxruntime, scipy, librosa, numpy, soundfile
   edge-tts, piper-tts, vietnormalizer
-  openai, huggingface_hub
+  openai, llama-cpp-python, huggingface_hub
 ```
 
 ## Key Environment Variables (`.env`)
 
 | Variable | Default | Description |
 |---|---|---|
-| `AI_POLISHER_PROVIDER` | `gemini` | AI provider: `gemini` (OpenAI API) |
-| `OPENAI_API_KEY` | (none) | Google AI Studio API key |
+| `AI_POLISHER_PROVIDER` | `gemini` | AI provider: `gemini` (OpenAI API), `local` (GGUF) |
+| `OPENAI_PROVIDER` | `openai` | `openai`, `ollama`, or `local` |
+| `OPENAI_API_KEY` | (none) | API key (not needed for Ollama/Local) |
 | `OPENAI_MODEL` | `gemma-4-31b-it` | Model name |
-| `OPENAI_BASE_URL` | `generativelanguage.googleapis.com/v1beta/openai/` | API endpoint |
+| `OPENAI_BASE_URL` | `generativelanguage...` | API endpoint URL |
+| `LOCAL_TRANSLATOR_MODEL_PATH` | `models/ai/...` | GGUF model path (local provider only) |
+| `CAPCAP_WHISPER_DEVICE` | (auto-detect) | Force `cpu` to avoid CUDA conflicts |
 | `CAPCAP_WHISPER_DEVICE` | (auto-detect) | Force `cpu` to avoid CUDA conflicts |
 | `CAPCAP_QUIET` | `false` | Set `true` to suppress server logs |
 | `CAPCAP_RUNTIME_PROFILE` | `local` | `local` or `remote` |

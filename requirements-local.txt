@@ -11,3 +11,4 @@ onnxruntime
 scipy
 openai
 librosa
+llama-cpp-python

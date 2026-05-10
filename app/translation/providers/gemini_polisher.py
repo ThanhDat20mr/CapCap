@@ -105,8 +105,9 @@ class GeminiPolisherProvider:
                 header = f"Refine these {src_lang}->{target_lang} subtitle translations.{style_part}"
 
         rules = (
-            "Return ONLY numbered lines. EXACTLY one per input item. "
-            "No greetings, no explanations, no markdown. "
+            "IMPORTANT: Output ONLY the translation. Do NOT think, explain, or comment. "
+            "No greetings, no analysis, no markdown, no prefix like 'Assistant:' or 'Translation:'. "
+            "Return EXACTLY numbered lines, one per input item. Nothing else.\n"
             "Format: N. translated text\n"
             "Quality: Natural, spoken Vietnamese. Short sentences. "
             "Preserve names, numbers, brands, products exactly. "
@@ -115,8 +116,9 @@ class GeminiPolisherProvider:
         )
         if dubbing_mode:
             rules = (
-                "Return ONLY numbered lines. EXACTLY one per input item. "
-                "No greetings, no explanations, no markdown. "
+                "IMPORTANT: Output ONLY the rewritten line. Do NOT think, explain, or comment. "
+                "No greetings, no analysis, no markdown, no prefix. "
+                "Return EXACTLY numbered lines, one per input item. Nothing else.\n"
                 "Format: N. short spoken line\n"
                 "Quality: Natural spoken Vietnamese. Very concise. "
                 "Fit the timing constraints strictly. "
