@@ -182,7 +182,7 @@ class ResourceDownloadService:
         return "partial"
 
     def _ai_model_filename(self) -> str:
-        return "gemma-4-E4B-it-Q4_K_M.gguf"
+        return "Hy-MT2-1.8B-Q4_K_M.gguf"
 
     def _ai_model_local_path(self) -> str:
         return models_path("ai", self._ai_model_filename())

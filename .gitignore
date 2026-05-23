@@ -34,15 +34,11 @@ Thumbs.db
 bin/
 dist/
 build/
-dist_debug/
-build_debug/
-
 voice_temp/
 *.gguf
 assets/luts/_archive
 log.txt
 data/*
-run_servers_wezterm.bat
-run_servers_terminal.bat
 *.mp4
 recent_projects.json
+*.spec

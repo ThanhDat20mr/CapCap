@@ -25,7 +25,7 @@ APP_PATH = os.path.join(os.path.dirname(__file__), '..', 'app')
 if APP_PATH not in sys.path:
     sys.path.append(APP_PATH)
 
-from services import F5VoiceService, GUIProjectBridge, ProjectService, ResourceDownloadService, VoiceCatalogService
+from services import GUIProjectBridge, ProjectService, ResourceDownloadService, VoiceCatalogService
 from controllers import PipelineController, PreviewController, SubtitleController
 from helpers import (
     build_guidance_state,
@@ -509,7 +509,6 @@ class VideoTranslatorGUI(QMainWindow):
         self.project_service = ProjectService(self.workspace_root)
         self.project_bridge = GUIProjectBridge(self.project_service)
         self.voice_catalog_service = VoiceCatalogService(self.workspace_root)
-        self._f5_voice_service = None
         self.subtitle_controller = SubtitleController(self)
         self.pipeline_controller = PipelineController(self)
         self.preview_controller = PreviewController(self)
@@ -525,8 +524,6 @@ class VideoTranslatorGUI(QMainWindow):
         self.voice_catalog_entries = []
 
         self.voice_catalog_map = {}
-        self.f5_saved_voice_entries = []
-        self.f5_saved_voice_map = {}
         self._voice_signals_bound = False
         self._media_backend_ready = False
         self._blur_region_signal_bound = False
@@ -596,12 +593,6 @@ class VideoTranslatorGUI(QMainWindow):
         self._timeline_visual_refresh_timer.timeout.connect(self._run_pending_timeline_visual_refresh)
         QTimer.singleShot(0, self._run_deferred_startup_stage1)
         QTimer.singleShot(600, self._run_deferred_startup_stage2)
-
-    @property
-    def f5_voice_service(self):
-        if self._f5_voice_service is None:
-            self._f5_voice_service = F5VoiceService(self.workspace_root)
-        return self._f5_voice_service
 
     def get_selected_subtitle_preset(self) -> str:
         if getattr(self, "subtitle_preset_custom_radio", None) and self.subtitle_preset_custom_radio.isChecked():
@@ -725,7 +716,6 @@ class VideoTranslatorGUI(QMainWindow):
             return
         self._deferred_startup_stage2_done = True
         self.load_voice_preview_catalog()
-        self._sync_voice_engine_ui()
         self.ensure_local_translator_auto_configured()
 
     def ensure_media_backend_ready(self):
@@ -840,31 +830,10 @@ class VideoTranslatorGUI(QMainWindow):
     def _update_voice_preview_meta(self):
         if not hasattr(self, "voice_preview_meta_label"):
             return
-        if self._is_detail_voice_selected():
-            total_entries = len(self.f5_saved_voice_entries or [])
-            if hasattr(self, "preview_voice_btn"):
-                self.preview_voice_btn.setVisible(True)
-                ready = bool(self.f5_saved_voice_combo.currentData()) if self._current_f5_clone_mode() == "saved" and hasattr(self, "f5_saved_voice_combo") else bool(self._current_f5_ref_audio_path())
-                self.preview_voice_btn.setEnabled(ready)
-            if hasattr(self, "save_preview_voice_btn"):
-                self.save_preview_voice_btn.setVisible(True)
-                self.save_preview_voice_btn.setEnabled(self._current_f5_clone_mode() == "new" and bool(self._current_f5_ref_audio_path()))
-            if self._current_f5_clone_mode() == "saved":
-                if total_entries <= 0:
-                    self.voice_preview_meta_label.setText("No saved F5 clone voices yet.")
-                else:
-                    self.voice_preview_meta_label.setText(f"Saved F5 clone voices: {total_entries}.")
-            else:
-                self.voice_preview_meta_label.setText(
-                    "Preview will use current F5 reference audio. Whisper auto-fills reference text if it is empty."
-                )
-            return
         total_entries = len(self.voice_catalog_entries or [])
         if hasattr(self, "preview_voice_btn"):
             self.preview_voice_btn.setVisible(True)
             self.preview_voice_btn.setEnabled(total_entries > 0)
-        if hasattr(self, "save_preview_voice_btn"):
-            self.save_preview_voice_btn.setVisible(False)
         if total_entries <= 0:
             self.voice_preview_meta_label.setText("No voices are available in the catalog yet.")
             return
@@ -872,175 +841,31 @@ class VideoTranslatorGUI(QMainWindow):
             f"Local voices: {total_entries}. Click “Preview voice” to generate a short test clip."
         )
 
-    def refresh_f5_saved_voice_list(self, selected_id: str = ""):
-        self.f5_saved_voice_entries = self.f5_voice_service.list_saved_voices()
-        self.f5_saved_voice_map = {
-            str(entry.get("id", "")).strip(): entry
-            for entry in self.f5_saved_voice_entries
-            if str(entry.get("id", "")).strip()
-        }
-        combo = getattr(self, "f5_saved_voice_combo", None)
-        if combo is None:
-            return
-        previous_value = selected_id or str(combo.currentData() or "").strip()
-        combo.blockSignals(True)
-        combo.clear()
-        for entry in self.f5_saved_voice_entries:
-            combo.addItem(str(entry.get("name", entry.get("id", "Saved voice"))), str(entry.get("id", "")).strip())
-        combo.blockSignals(False)
-        if previous_value:
-            index = combo.findData(previous_value)
-            if index >= 0:
-                combo.setCurrentIndex(index)
-        if combo.count() <= 0:
-            combo.addItem("No saved clone voices", "")
-            combo.setCurrentIndex(0)
-            combo.setEnabled(False)
-        else:
-            combo.setEnabled(True)
-        self._sync_voice_engine_ui()
-
-    def refresh_f5_runtime_status(self):
-        if not hasattr(self, "f5_status_server_label"):
-            return
-        status = self.f5_voice_service.get_api_status(force=True)
-        if bool(status.get("ok", False)):
-            loaded = "Connected" if bool(status.get("loaded", False)) else "Connected"
-            url = str(status.get("url", "") or "").strip()
-            self.f5_status_server_label.setText(f"Detail Voice server: {loaded}")
-            self.f5_status_server_label.setToolTip(url)
-            self.log(f"[F5 Status] Connected: {url}")
-            return
-
-        url = str(status.get("url", "") or "").strip()
-        error = str(status.get("error", "") or "").strip()
-        self.f5_status_server_label.setText("Detail Voice server: Offline")
-        self.f5_status_server_label.setToolTip(error or url)
-        self.log(f"[F5 Status] Offline: {url} | {error}")
-
     def _current_voice_engine_key(self) -> str:
         combo = getattr(self, "voice_engine_combo", None)
         if combo is None:
             return "fast"
         return str(combo.currentData() or "fast").strip().lower() or "fast"
 
-    def _is_detail_voice_selected(self) -> bool:
-        return self._current_voice_engine_key() == "detail"
-
-    def _current_f5_clone_mode(self) -> str:
-        combo = getattr(self, "f5_clone_mode_combo", None)
-        if combo is None:
-            return "new"
-        return str(combo.currentData() or "new").strip().lower() or "new"
-
-    def _current_f5_ref_audio_path(self) -> str:
-        edit = getattr(self, "f5_ref_audio_edit", None)
-        raw = edit.text().strip() if edit is not None else ""
-        normalized = self._normalize_local_file_path(raw)
-        return normalized if normalized and os.path.exists(normalized) else ""
-
-    def _current_f5_ref_text(self) -> str:
-        editor = getattr(self, "f5_ref_text_edit", None)
-        if editor is None:
-            return ""
-        return editor.toPlainText().strip()
-
-    def _current_f5_clone_name(self) -> str:
-        field = getattr(self, "f5_clone_name_edit", None)
-        return field.text().strip() if field is not None else ""
-
-    def _build_unsaved_f5_voice_token(self) -> str:
-        ref_audio_path = self._current_f5_ref_audio_path()
-        if not ref_audio_path:
-            return ""
-        ref_text = self._current_f5_ref_text()
-        if not ref_text:
-            QMessageBox.warning(
-                self,
-                "Missing Reference Text",
-                "Reference text is required for Detail Voice.\n\n"
-                "Please enter what the speaker says in the reference audio clip.",
-            )
-            return ""
-        payload = self.f5_voice_service.create_temporary_clone(
-            ref_audio_path=ref_audio_path,
-            ref_text=ref_text,
-            display_name=self._current_f5_clone_name(),
-        )
-        return str(payload.get("token", "")).strip()
-
     def _resolve_active_voice_name(self, *, persist_new_clone: bool = False) -> str:
-        if not self._is_detail_voice_selected():
-            free_value = str(self.free_voice_combo.currentData() or "").strip() if hasattr(self, "free_voice_combo") else ""
-            if free_value and free_value.startswith("edge:"):
-                return free_value
-            if free_value and free_value in getattr(self, "voice_catalog_map", {}):
-                return free_value
-            if "vi_VN-vais1000-medium" in getattr(self, "voice_catalog_map", {}):
-                return "vi_VN-vais1000-medium"
-            if hasattr(self, "free_voice_combo") and self.free_voice_combo.count() > 0:
-                fallback_value = str(self.free_voice_combo.itemData(0) or "").strip()
-                if fallback_value:
-                    return fallback_value
-                fallback_entry_id = str(self.free_voice_combo.itemData(0, self.VOICE_ENTRY_ID_ROLE) or "").strip()
-                if fallback_entry_id:
-                    return fallback_entry_id
+        free_value = str(self.free_voice_combo.currentData() or "").strip() if hasattr(self, "free_voice_combo") else ""
+        if free_value and free_value.startswith("edge:"):
+            return free_value
+        if free_value and free_value in getattr(self, "voice_catalog_map", {}):
+            return free_value
+        if "vi_VN-vais1000-medium" in getattr(self, "voice_catalog_map", {}):
             return "vi_VN-vais1000-medium"
-
-        if self._current_f5_clone_mode() == "saved":
-            clone_id = str(getattr(self, "f5_saved_voice_combo", None).currentData() or "").strip() if hasattr(self, "f5_saved_voice_combo") else ""
-            return f"f5:clone:{clone_id}" if clone_id else ""
-
-        ref_audio_path = self._current_f5_ref_audio_path()
-        if not ref_audio_path:
-            return ""
-        return self._build_unsaved_f5_voice_token()
-
-    def _sync_voice_engine_ui(self):
-        detail_selected = self._is_detail_voice_selected()
-        if hasattr(self, "fast_voice_panel"):
-            self.fast_voice_panel.setVisible(not detail_selected)
-        if hasattr(self, "detail_voice_panel"):
-            self.detail_voice_panel.setVisible(detail_selected)
-        using_saved = self._current_f5_clone_mode() == "saved"
-        if hasattr(self, "f5_saved_voice_label"):
-            self.f5_saved_voice_label.setVisible(detail_selected)
-        if hasattr(self, "f5_saved_voice_combo"):
-            self.f5_saved_voice_combo.setVisible(detail_selected)
-            self.f5_saved_voice_combo.setEnabled(detail_selected and using_saved and bool(self.f5_saved_voice_entries))
-        if hasattr(self, "f5_new_voice_panel"):
-            self.f5_new_voice_panel.setVisible(detail_selected and not using_saved)
-        if hasattr(self, "f5_detail_hint_label"):
-            self.f5_detail_hint_label.setVisible(detail_selected)
-        if hasattr(self, "f5_status_server_label"):
-            self.f5_status_server_label.setVisible(detail_selected)
-        if detail_selected:
-            self.refresh_f5_runtime_status()
-        self._update_voice_preview_meta()
-        self.refresh_ui_state()
+        if hasattr(self, "free_voice_combo") and self.free_voice_combo.count() > 0:
+            fallback_value = str(self.free_voice_combo.itemData(0) or "").strip()
+            if fallback_value:
+                return fallback_value
+            fallback_entry_id = str(self.free_voice_combo.itemData(0, self.VOICE_ENTRY_ID_ROLE) or "").strip()
+            if fallback_entry_id:
+                return fallback_entry_id
+        return "vi_VN-vais1000-medium"
 
     def on_voice_engine_changed(self):
-        self._sync_voice_engine_ui()
         self._voiceover_force_refresh = True
-
-    def on_f5_clone_mode_changed(self):
-        self._sync_voice_engine_ui()
-        self._voiceover_force_refresh = True
-
-    def browse_f5_ref_audio(self):
-        file_path, _filter = QFileDialog.getOpenFileName(
-            self,
-            "Choose Reference Audio",
-            self.audio_folder_edit.text().strip() if hasattr(self, "audio_folder_edit") else self.workspace_root,
-            "Audio Files (*.wav *.mp3 *.m4a *.flac *.aac *.ogg);;All Files (*.*)",
-        )
-        if not file_path:
-            return
-        if hasattr(self, "f5_ref_audio_edit"):
-            self.f5_ref_audio_edit.setText(file_path)
-        if hasattr(self, "f5_clone_name_edit") and not self.f5_clone_name_edit.text().strip():
-            self.f5_clone_name_edit.setText(os.path.splitext(os.path.basename(file_path))[0])
-        self._sync_voice_engine_ui()
 
     def load_voice_preview_catalog(self):
         self._auto_sync_piper_voices_to_catalog()
@@ -1342,7 +1167,7 @@ class VideoTranslatorGUI(QMainWindow):
         voice_name = self.get_active_voice_name()
         if not voice_name:
             return
-        if self._is_detail_voice_selected() or str(voice_name).startswith("f5:"):
+        if str(voice_name).startswith("f5:"):
             return
         entry_id = str(self.free_voice_combo.currentData(self.VOICE_ENTRY_ID_ROLE) or '').strip() if hasattr(self, 'free_voice_combo') else ''
         entry = self.voice_catalog_map.get(entry_id) if hasattr(self, 'voice_catalog_map') else None
@@ -5090,7 +4915,7 @@ class VideoTranslatorGUI(QMainWindow):
         return dialog
 
     def preview_selected_voice_sample(self):
-        if not self._is_detail_voice_selected() and not (self.voice_catalog_entries or []):
+        if not (self.voice_catalog_entries or []):
             QMessageBox.information(self, "Preview voice", "No local voices are available yet. Please add Piper models to models/piper first.")
             return
 
@@ -5103,10 +4928,7 @@ class VideoTranslatorGUI(QMainWindow):
 
         voice_name = self.get_active_voice_name()
         if not voice_name:
-            if self._is_detail_voice_selected():
-                QMessageBox.warning(self, "Preview voice", "Choose a saved F5 clone or select a reference audio first.")
-            else:
-                QMessageBox.warning(self, "Preview voice", "Choose a voice first.")
+            QMessageBox.warning(self, "Preview voice", "Choose a voice first.")
             return
         voice_speed = self._parse_voice_speed_value()
         text = "Chào bạn, đây là bản xem trước giọng nói của mẫu được chọn."  # "Hello, this is a preview of the selected voice sample." in Vietnamese
@@ -5145,88 +4967,6 @@ class VideoTranslatorGUI(QMainWindow):
             self.log(f"[Voice Preview] playing generated sample: {audio_path}")
         except Exception as exc:
             self.show_error("Voice Preview Failed", "Could not play the generated preview audio.", str(exc))
-
-    def save_preview_as_clone_voice(self):
-        if not self._is_detail_voice_selected():
-            QMessageBox.warning(self, "Save Clone Voice", "Detail Voice mode must be selected to save clone voices.")
-            return
-
-        ref_audio_path = self._current_f5_ref_audio_path()
-        if not ref_audio_path or not os.path.exists(ref_audio_path):
-            QMessageBox.warning(self, "Save Clone Voice", "Please select a reference audio file first.")
-            return
-
-        ref_text = self._current_f5_ref_text()
-        if not ref_text:
-            QMessageBox.warning(
-                self,
-                "Missing Reference Text",
-                "Reference text is required to save a clone voice.\n\n"
-                "Please enter what the speaker says in the reference audio clip.",
-            )
-            return
-
-        default_name = os.path.splitext(os.path.basename(ref_audio_path))[0]
-
-        input_dialog = QDialog(self)
-        input_dialog.setWindowTitle("Save Clone Voice")
-        input_dialog.setMinimumWidth(400)
-        input_dialog.setStyleSheet(
-            """
-            QDialog { background-color: #0f1724; }
-            QLabel { color: #d7e3f4; background-color: transparent; }
-            QLineEdit {
-                background-color: #1a2a3d; color: #f8fbff; border: 1px solid #34506f;
-                border-radius: 8px; padding: 8px; selection-background-color: #34506f;
-            }
-            QPushButton {
-                background-color: #22344d; color: #f8fbff; border: 1px solid #34506f;
-                border-radius: 10px; padding: 8px 16px; font-weight: 600;
-            }
-            QPushButton:hover { background-color: #29405d; }
-            """
-        )
-        layout = QVBoxLayout(input_dialog)
-
-        label = QLabel("Enter a name for this clone voice:", input_dialog)
-        layout.addWidget(label)
-
-        name_edit = QLineEdit(default_name, input_dialog)
-        layout.addWidget(name_edit)
-
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-
-        cancel_btn = QPushButton("Cancel", input_dialog)
-        cancel_btn.clicked.connect(input_dialog.reject)
-        button_layout.addWidget(cancel_btn)
-
-        save_btn = QPushButton("Save", input_dialog)
-        save_btn.setDefault(True)
-        save_btn.clicked.connect(input_dialog.accept)
-        button_layout.addWidget(save_btn)
-
-        layout.addLayout(button_layout)
-
-        if not input_dialog.exec():
-            return
-
-        name = name_edit.text()
-        if not str(name or "").strip():
-            return
-
-        try:
-            entry = self.f5_voice_service.save_clone(
-                name=str(name).strip(),
-                ref_audio_path=ref_audio_path,
-                ref_text=str(getattr(self, "f5_ref_text_edit", None).toPlainText() or "").strip(),
-            )
-            QMessageBox.information(self, "Save Clone Voice", f"Clone voice saved successfully!\n\nName: {entry.get('name', '-')}\nID: {entry.get('id', '-')}")
-            self.f5_saved_voice_entries = self.f5_voice_service.list_saved_voices()
-            self.refresh_f5_saved_voice_list()
-            self.log(f"[F5] Clone voice saved: {entry.get('name', '-')} ({entry.get('id', '-')})")
-        except Exception as exc:
-            QMessageBox.critical(self, "Save Clone Voice", f"Failed to save clone voice:\n\n{str(exc)}")
 
     def preview_segment_audio(self, index: int):
         if index < 0 or index >= len(self.current_translated_segments or self.current_segments):
@@ -5774,20 +5514,9 @@ class VideoTranslatorGUI(QMainWindow):
             self.free_voice_combo.setEnabled(
                 generated_mode
                 and mode in ("voice", "both")
-                and not self._is_detail_voice_selected()
             )
         if hasattr(self, "voice_engine_combo"):
             self.voice_engine_combo.setEnabled(generated_mode and mode in ("voice", "both"))
-        if hasattr(self, "f5_clone_mode_combo"):
-            self.f5_clone_mode_combo.setEnabled(generated_mode and mode in ("voice", "both") and self._is_detail_voice_selected())
-        if hasattr(self, "f5_ref_audio_edit"):
-            self.f5_ref_audio_edit.setEnabled(generated_mode and mode in ("voice", "both") and self._is_detail_voice_selected() and self._current_f5_clone_mode() == "new")
-        if hasattr(self, "f5_browse_ref_audio_btn"):
-            self.f5_browse_ref_audio_btn.setEnabled(generated_mode and mode in ("voice", "both") and self._is_detail_voice_selected() and self._current_f5_clone_mode() == "new")
-        if hasattr(self, "f5_clone_name_edit"):
-            self.f5_clone_name_edit.setEnabled(generated_mode and mode in ("voice", "both") and self._is_detail_voice_selected() and self._current_f5_clone_mode() == "new")
-        if hasattr(self, "f5_ref_text_edit"):
-            self.f5_ref_text_edit.setEnabled(generated_mode and mode in ("voice", "both") and self._is_detail_voice_selected() and self._current_f5_clone_mode() == "new")
         if hasattr(self, "premium_voice_combo"):
             self.premium_voice_combo.setEnabled(False)
         if hasattr(self, "bg_music_edit"):
@@ -5798,13 +5527,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.mixed_audio_edit.setEnabled(mode in ("voice", "both") and bool(hasattr(self, "use_existing_audio_radio") and self.use_existing_audio_radio.isChecked()))
         if hasattr(self, "preview_voice_btn"):
             self.preview_voice_btn.setVisible(mode in ("voice", "both"))
-            if self._is_detail_voice_selected():
-                if self._current_f5_clone_mode() == "saved":
-                    self.preview_voice_btn.setEnabled(bool(getattr(self, "f5_saved_voice_combo", None).currentData()) if hasattr(self, "f5_saved_voice_combo") else False)
-                else:
-                    self.preview_voice_btn.setEnabled(bool(self._current_f5_ref_audio_path()))
-            else:
-                self.preview_voice_btn.setEnabled(bool(self.voice_catalog_entries_all))
+            self.preview_voice_btn.setEnabled(bool(self.voice_catalog_entries_all))
         has_timeline_segments = bool(self.get_active_segments())
         if hasattr(self, "timeline_split_btn"):
             self.timeline_split_btn.setEnabled(has_timeline_segments)
@@ -6207,36 +5930,6 @@ class VideoTranslatorGUI(QMainWindow):
         remote_divider.setVisible(remote_mode)
         layout.addWidget(remote_divider)
 
-        f5_title = QLabel("Detail Voice")
-        f5_title.setObjectName("statusHeadline")
-        f5_title.setVisible(False)
-        layout.addWidget(f5_title)
-
-        f5_status_label = QLabel("Server: Checking...")
-        f5_status_label.setObjectName("helperLabel")
-        f5_status_label.setWordWrap(True)
-        f5_status_label.setVisible(False)
-        layout.addWidget(f5_status_label)
-
-        f5_hint_label = QLabel("Run run_f5_api_server.bat before using Detail Voice.")
-        f5_hint_label.setObjectName("helperLabel")
-        f5_hint_label.setWordWrap(True)
-        f5_hint_label.setVisible(False)
-        layout.addWidget(f5_hint_label)
-
-        f5_actions_layout = QHBoxLayout()
-        f5_test_btn = QPushButton("Test Detail Voice Server", dialog)
-        f5_test_btn.setVisible(False)
-        f5_actions_layout.addWidget(f5_test_btn)
-        f5_actions_layout.addStretch()
-        layout.addLayout(f5_actions_layout)
-
-        f5_divider = QFrame()
-        f5_divider.setFrameShape(QFrame.HLine)
-        f5_divider.setStyleSheet("color: #2f4868;")
-        f5_divider.setVisible(False)
-        layout.addWidget(f5_divider)
-
         # AI Translation Section
         ai_title = QLabel("AI Translation")
         ai_title.setObjectName("statusHeadline")
@@ -6318,7 +6011,7 @@ class VideoTranslatorGUI(QMainWindow):
                 base_url_edit.setVisible(False)
                 base_url_label.setVisible(False)
                 key_section_widget.setVisible(False)
-                model_edit.setText(os.getenv("LOCAL_TRANSLATOR_MODEL_PATH", "models/ai/gemma-4-E4B-it-Q4_K_M.gguf"))
+                model_edit.setText(os.getenv("LOCAL_TRANSLATOR_MODEL_PATH", "models/ai/Hy-MT2-1.8B-Q4_K_M.gguf"))
                 provider_hint.setText("Select a GGUF model file. Download from Hugging Face.")
 
         test_btn = QPushButton("Test Connection", dialog)
@@ -6389,21 +6082,6 @@ class VideoTranslatorGUI(QMainWindow):
                     f"Could not connect to the PC server.\n\n{exc}",
                 )
 
-        def _refresh_f5_settings_status():
-            status = self.f5_voice_service.get_api_status(force=True)
-            if bool(status.get("ok", False)):
-                f5_status_label.setText("Server: Connected")
-                f5_status_label.setToolTip(str(status.get("url", "") or "").strip())
-            else:
-                f5_status_label.setText("Server: Offline")
-                f5_status_label.setToolTip(str(status.get("error", "") or "").strip() or str(status.get("url", "") or "").strip())
-
-        def _test_f5_server():
-            _refresh_f5_settings_status()
-            if f5_status_label.text().endswith("Connected"):
-                QMessageBox.information(dialog, "Detail Voice", "Detail Voice server is connected.")
-            else:
-                QMessageBox.warning(dialog, "Detail Voice", "Detail Voice server is not running.\n\nOpen run_f5_api_server.bat first.")
         test_remote_btn.clicked.connect(_test_remote_connection)
 
         # Buttons
@@ -6606,10 +6284,7 @@ class VideoTranslatorGUI(QMainWindow):
         audio_handling_mode = self.get_audio_handling_mode()
         voice_name = self._resolve_active_voice_name(persist_new_clone=True)
         if not voice_name:
-            if self._is_detail_voice_selected():
-                QMessageBox.warning(self, "Missing Voice", "Choose a saved F5 clone or select a reference audio for Detail Voice first.")
-            else:
-                QMessageBox.warning(self, "Missing Voice", "Choose a voice first.")
+            QMessageBox.warning(self, "Missing Voice", "Choose a voice first.")
             return
         voice_speed = self._parse_voice_speed_value()
         timing_sync_mode = str(self.voice_timing_sync_combo.currentText()).strip()
@@ -6973,12 +6648,6 @@ class VideoTranslatorGUI(QMainWindow):
             self.mixed_audio_edit.clear()
         if hasattr(self, "video_path_edit"):
             self.video_path_edit.clear()
-        if hasattr(self, "f5_ref_audio_edit"):
-            self.f5_ref_audio_edit.clear()
-        if hasattr(self, "f5_ref_text_edit"):
-            self.f5_ref_text_edit.clear()
-        if hasattr(self, "f5_clone_name_edit"):
-            self.f5_clone_name_edit.clear()
         if hasattr(self, "timeline"):
             self.timeline.set_segments([])
             self.timeline.set_duration(0)

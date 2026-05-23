@@ -9,7 +9,7 @@ import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from runtime_paths import app_path
-from services import EngineRuntime, F5VoiceService, ProjectService
+from services import EngineRuntime, ProjectService
 
 # Force-load from app/utils/ (ui/utils/ may shadow it)
 _vpu_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "utils", "voice_preview_utils.py")
@@ -32,8 +32,6 @@ class VoiceWorkflow:
     SMART_RETRY_RATIO = 1.15
     HARD_RETRY_RATIO = 1.30
     HARD_OUTLIER_RATIO = 1.20
-    F5_RETRY_RATIO = 1.20
-    F5_MAX_RETRY_ATTEMPTS = 1
     RETRY_MIN_ACCEPT_RATIO = 0.88
     RESCUE_MIN_ACCEPT_RATIO = 0.88
     MAX_SAFE_SEGMENT_SPEED = 1.12
@@ -45,8 +43,6 @@ class VoiceWorkflow:
         self.workspace_root = workspace_root
         self.project_service = ProjectService(workspace_root)
         self.engine_runtime = EngineRuntime()
-        self.f5_voice_service = F5VoiceService(workspace_root)
-
     def _load_state(self, project_state_path: str = ""):
         return self.project_service.load_project(project_state_path) if project_state_path else None
 
@@ -849,9 +845,6 @@ class VoiceWorkflow:
             applied_action = str(metrics.get("action_taken") or "accept")
             attempt_count = 1
 
-            if voice_provider == "f5":
-                continue
-
             if self._should_use_speedup_before_rewrite(
                 duration_sec=target_duration,
                 speech_cost=speech_cost,
@@ -1022,7 +1015,7 @@ class VoiceWorkflow:
                     )
                 attempt += 1
 
-            if voice_provider != "f5" and best_ratio > self.HARD_OUTLIER_RATIO:
+            if best_ratio > self.HARD_OUTLIER_RATIO:
                 emergency_text = self._hard_outlier_candidate_text(
                     current_text=best_text,
                     source_text=source_text,
@@ -1396,7 +1389,7 @@ class VoiceWorkflow:
                     cache_hits += 1
                 except Exception:
                     pass
-            elif voice_provider in {"edge", "f5"}:
+            elif voice_provider == "edge":
                 worker_count = 1
             else:
                 worker_count = max(1, min(self.MAX_TTS_WORKERS, len(pending_jobs)))
@@ -1407,36 +1400,6 @@ class VoiceWorkflow:
             if on_progress:
                 on_progress(f"Synthesizing {len(pending_jobs)} subtitle segments (using {worker_count} workers)...")
             if not pending_jobs:
-                manifest["segments"] = manifest_segments
-                manifest["by_cache_key"] = manifest_by_cache_key
-                self._save_manifest(tmp_dir, manifest)
-                return wavs
-            if voice_provider == "f5":
-                outputs = self.f5_voice_service.synthesize_batch(
-                    voice_token=voice_name,
-                    jobs=[
-                        {
-                            "text": job["text"],
-                            "wav_path": job["wav_path"],
-                            "speed": provider_speed,
-                        }
-                        for job in pending_jobs
-                    ],
-                    temp_dir=tmp_dir,
-                    on_progress=on_progress,
-                )
-                for output_path, job in zip(outputs, pending_jobs):
-                    idx = int(job["idx"])
-                    txt = str(job["text"])
-                    manifest_segments[str(idx)] = {
-                        "cache_key": str(job["cache_key"]),
-                        "wav_path": output_path,
-                        "text": txt,
-                        "voice_name": voice_name,
-                        "provider_speed": provider_speed,
-                    }
-                    manifest_by_cache_key[str(job["cache_key"])] = dict(manifest_segments[str(idx)])
-                    wavs[idx] = output_path
                 manifest["segments"] = manifest_segments
                 manifest["by_cache_key"] = manifest_by_cache_key
                 self._save_manifest(tmp_dir, manifest)

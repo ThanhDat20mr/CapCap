@@ -20,7 +20,7 @@ def _log(msg: str):
         print(msg)
 
 from remote_api import remote_api_token
-from services import F5VoiceService, WorkflowRuntime
+from services import WorkflowRuntime
 from translation.srt_utils import to_srt
 from translator import (
     rewrite_translated_segments,
@@ -32,7 +32,6 @@ from whisper_processor import transcribe_audio
 
 
 WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-F5_SERVICE = F5VoiceService(WORKSPACE_ROOT)
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status_code: int, payload: dict) -> None:
@@ -219,23 +218,13 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
         fd, temp_wav_path = tempfile.mkstemp(prefix="tts_", suffix=".wav", dir=tmp_dir)
         os.close(fd)
         try:
-            if F5_SERVICE.is_f5_voice_token(voice):
-                _log(f"[Remote API] F5 synth voice={voice}")
-                F5_SERVICE.synthesize_segment(
-                    voice_token=voice,
-                    text=text,
-                    wav_path=temp_wav_path,
-                    speed=speed,
-                    temp_dir=tmp_dir,
-                )
-            else:
-                synthesize_text_to_wav_16k_mono(
-                    text=text,
-                    wav_path=temp_wav_path,
-                    voice=voice,
-                    speed=speed,
-                    tmp_dir=tmp_dir,
-                )
+            synthesize_text_to_wav_16k_mono(
+                text=text,
+                wav_path=temp_wav_path,
+                voice=voice,
+                speed=speed,
+                tmp_dir=tmp_dir,
+            )
             with open(temp_wav_path, "rb") as handle:
                 audio_b64 = base64.b64encode(handle.read()).decode("ascii")
             return {"ok": True, "audio_b64": audio_b64}
