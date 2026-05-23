@@ -51,8 +51,8 @@ class ResourceDownloadService:
         provider_voice = str(voice_entry.get("provider_voice", "")).strip().replace("\\", "/")
         model_name = os.path.basename(provider_voice)
         return (
-            f"voices/{model_name}",
-            f"voices/{model_name}.json",
+            f"piper/{model_name}",
+            f"piper/{model_name}.json",
         )
 
     def _finalize_voice_download(self, downloaded_path: str, voice_entry: dict, *, is_config: bool) -> str:
@@ -86,12 +86,16 @@ class ResourceDownloadService:
         end_percent: int = 100,
         label: str = "Downloading file...",
     ) -> str:
+        print(f"[DEBUG] _download_hf_file: {repo_id}/{filename} -> {local_dir}")
         expected_path = os.path.join(local_dir, filename.replace("/", os.sep))
         try:
             file_url = hf_hub_url(repo_id=repo_id, filename=filename, revision=revision)
+            print(f"[DEBUG] file_url: {file_url}")
             metadata = get_hf_file_metadata(url=file_url)
             expected_size = int(getattr(metadata, "size", 0) or 0)
-        except Exception:
+            print(f"[DEBUG] expected_size: {expected_size}")
+        except Exception as e:
+            print(f"[DEBUG] metadata fetch failed: {e}")
             expected_size = 0
 
         stop_event = threading.Event()
@@ -215,15 +219,7 @@ class ResourceDownloadService:
                 "kind": "ai",
                 "status": "installed" if self.is_resource_installed("ai:local-gguf") else "missing",
                 "target_dir": os.path.dirname(self._ai_model_local_path()),
-                "description": "Gemma GGUF model for local AI polish and rewrite.",
-            },
-            {
-                "id": "whisper:base",
-                "name": "Whisper Base",
-                "kind": "whisper",
-                "status": "installed" if self.is_resource_installed("whisper:base") else "missing",
-                "target_dir": self._whisper_cache_root(),
-                "description": "Fastest recommended speech-to-text model. Downloaded via faster-whisper.",
+                "description": "Model for local AI polish and rewrite.",
             },
             {
                 "id": "whisper:medium",
@@ -290,6 +286,9 @@ class ResourceDownloadService:
         return None
 
     def download_resource(self, resource_id: str, progress_cb=None) -> None:
+        print(f"[DEBUG] download_resource called: {resource_id}")
+        import sys
+        print(f"[DEBUG] frozen={getattr(sys, 'frozen', False)} meipass={getattr(sys, '_MEIPASS', 'N/A')}")
         if resource_id.startswith("whisper:"):
             model_name = resource_id.split(":", 1)[1].strip().lower()
             if progress_cb:
@@ -301,32 +300,43 @@ class ResourceDownloadService:
                 progress_cb(100, f"Whisper {model_name} is ready.")
             return
 
+        print("[DEBUG] importing huggingface_hub...")
         try:
             from huggingface_hub import hf_hub_download, hf_hub_url, snapshot_download
             from huggingface_hub.errors import RemoteEntryNotFoundError
             from huggingface_hub.file_download import get_hf_file_metadata
+            print("[DEBUG] huggingface_hub imported OK")
         except Exception as exc:
+            print(f"[DEBUG] huggingface_hub import FAILED: {exc}")
             raise ImportError(
                 "huggingface_hub is not installed. Run `pip install huggingface_hub` first."
             ) from exc
 
         if resource_id == "ai:local-gguf":
+            print(f"[DEBUG] ai:local-gguf download start. repo={self.repo_id} file={self._ai_model_filename()}")
+            print(f"[DEBUG] local_dir={join_root('models')} target={self._ai_model_local_path()}")
             if progress_cb:
                 progress_cb(-1, "Downloading local AI GGUF model from Hugging Face...")
-            downloaded = self._download_hf_file(
-                repo_id=self.repo_id,
-                revision=self.revision,
-                filename=self._ai_model_filename(),
-                local_dir=join_root("models"),
-                hf_hub_download=hf_hub_download,
-                hf_hub_url=hf_hub_url,
-                get_hf_file_metadata=get_hf_file_metadata,
-                progress_cb=progress_cb,
-                start_percent=0,
-                end_percent=100,
-                label="Downloading local AI GGUF model",
-            )
+            try:
+                downloaded = self._download_hf_file(
+                    repo_id=self.repo_id,
+                    revision=self.revision,
+                    filename=self._ai_model_filename(),
+                    local_dir=join_root("models"),
+                    hf_hub_download=hf_hub_download,
+                    hf_hub_url=hf_hub_url,
+                    get_hf_file_metadata=get_hf_file_metadata,
+                    progress_cb=progress_cb,
+                    start_percent=0,
+                    end_percent=100,
+                    label="Downloading local AI GGUF model",
+                )
+                print(f"[DEBUG] download returned: {downloaded}")
+            except Exception as exc:
+                print(f"[DEBUG] _download_hf_file FAILED: {exc}")
+                raise
             target_path = self._ai_model_local_path()
+            print(f"[DEBUG] moving to target: {target_path}")
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
             normalized_source = os.path.normcase(os.path.abspath(downloaded))
             normalized_target = os.path.normcase(os.path.abspath(target_path))

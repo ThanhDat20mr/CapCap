@@ -14,9 +14,9 @@
 - Three output modes: `subtitle only`, `voice only`, `subtitle + voice`
 - Speech-to-text with `faster-whisper` (CPU or GPU)
 - AI translation — 3 providers:
+  - **Local GGUF** (default, offline, CPU/GPU, `.gguf` model)
   - **OpenAI** (Google AI Studio, cloud, free tier)
   - **Ollama** (local, no internet, `ollama pull qwen2.5:7b`)
-  - **Local GGUF** (local, no internet, download `.gguf` model)
 - Free Google translate fallback — no API key needed
 - Vietnamese voice with `Piper` (fully offline) or `edge-tts` (online)
 - Vocal/instrumental separation via ONNX Runtime (CPU, ~9s for 10s audio)
@@ -28,11 +28,11 @@
 ## Quick Start
 
 1. Open Settings (More → Settings)
-2. Choose translation provider:
+2. Default provider is **Local (GGUF)** — works offline with a `.gguf` model
+3. Optionally switch to:
    - **OpenAI** — get [free API key](https://aistudio.google.com/apikey), paste it
    - **Ollama** — install [Ollama](https://ollama.com), run `ollama pull qwen2.5:7b`
-   - **Local GGUF** — download a `.gguf` model, set path
-3. Save → Load video → click **Generate**
+4. Save → Load video → click **Generate**
 
 No key? Google translate fallback works for free (slower, lower quality).
 
@@ -115,14 +115,13 @@ requirements-local.txt:
 ## Key Environment Variables (`.env`)
 
 | Variable | Default | Description |
-|---|---|---|
-| `AI_POLISHER_PROVIDER` | `gemini` | AI provider: `gemini` (OpenAI API), `local` (GGUF) |
-| `OPENAI_PROVIDER` | `openai` | `openai`, `ollama`, or `local` |
-| `OPENAI_API_KEY` | (none) | API key (not needed for Ollama/Local) |
-| `OPENAI_MODEL` | `gemma-4-31b-it` | Model name |
-| `OPENAI_BASE_URL` | `generativelanguage...` | API endpoint URL |
-| `LOCAL_TRANSLATOR_MODEL_PATH` | `models/ai/...` | GGUF model path (local provider only) |
-| `CAPCAP_WHISPER_DEVICE` | (auto-detect) | Force `cpu` to avoid CUDA conflicts |
+|---|---|---|---|
+| `AI_POLISHER_PROVIDER` | `local` | AI provider: `local` (GGUF), `gemini` (OpenAI API) |
+| `OPENAI_PROVIDER` | `local` | `local`, `openai`, or `ollama` |
+| `OPENAI_API_KEY` | (none) | API key (only needed for OpenAI provider) |
+| `OPENAI_MODEL` | (GGUF path) | Model name (OpenAI/Ollama only) |
+| `OPENAI_BASE_URL` | (empty for local) | API endpoint URL (OpenAI/Ollama only) |
+| `LOCAL_TRANSLATOR_MODEL_PATH` | `models/ai/Hy-MT2...` | GGUF model path (local provider) |
 | `CAPCAP_WHISPER_DEVICE` | (auto-detect) | Force `cpu` to avoid CUDA conflicts |
 | `CAPCAP_QUIET` | `false` | Set `true` to suppress server logs |
 | `CAPCAP_RUNTIME_PROFILE` | `local` | `local` or `remote` |

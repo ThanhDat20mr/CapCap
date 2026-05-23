@@ -515,7 +515,7 @@ class VideoTranslatorGUI(QMainWindow):
         self.current_project_state = None
         self.current_segment_models = []
         self.current_translated_segment_models = []
-        self.selected_whisper_model_name = "base"
+        self.selected_whisper_model_name = "medium"
         self._last_audio_preview_path = ""
         self._segment_preview_threads = {}
         self._voice_sample_preview_thread = None
@@ -5789,15 +5789,10 @@ class VideoTranslatorGUI(QMainWindow):
         dlg.show()
 
     def get_whisper_model_name(self) -> str:
-        value = str(getattr(self, "selected_whisper_model_name", "base") or "base").strip().lower()
-        return value if value in {"base", "medium"} else "base"
+        return "medium"
 
     def get_whisper_model_path(self) -> str:
-        mapping = {
-            "base": os.path.join(self.workspace_root, "models", "ggml-base.bin"),
-            "medium": os.path.join(self.workspace_root, "models", "ggml-medium.bin"),
-        }
-        return mapping.get(self.get_whisper_model_name(), mapping["base"])
+        return os.path.join(self.workspace_root, "models", "ggml-medium.bin")
 
     def open_model_settings_dialog(self):
         dialog = QDialog(self)
@@ -5870,11 +5865,8 @@ class VideoTranslatorGUI(QMainWindow):
         layout.addWidget(whisper_title)
         
         whisper_combo = QComboBox(dialog)
-        whisper_combo.addItem("Base (Faster)", "base")
         whisper_combo.addItem("Medium (Accurate)", "medium")
-        current_index = whisper_combo.findData(self.get_whisper_model_name())
-        if current_index >= 0:
-            whisper_combo.setCurrentIndex(current_index)
+        whisper_combo.setCurrentIndex(0)
         layout.addWidget(whisper_combo)
 
         divider = QFrame()
@@ -5944,9 +5936,9 @@ class VideoTranslatorGUI(QMainWindow):
         provider_combo.addItem("OpenAI (Google AI Studio)", "openai")
         provider_combo.addItem("Ollama (Local)", "ollama")
         provider_combo.addItem("Local (GGUF)", "local")
-        current_provider = (os.getenv("OPENAI_PROVIDER") or "openai").strip().lower()
+        current_provider = (os.getenv("OPENAI_PROVIDER") or "local").strip().lower()
         if current_provider not in {"openai", "ollama", "local"}:
-            current_provider = "openai"
+            current_provider = "local"
         idx = provider_combo.findData(current_provider)
         if idx >= 0:
             provider_combo.setCurrentIndex(idx)
@@ -5969,7 +5961,7 @@ class VideoTranslatorGUI(QMainWindow):
         model_layout = QVBoxLayout()
         model_label = QLabel("AI Model:")
         model_edit = QLineEdit(dialog)
-        model_edit.setText(os.getenv("OPENAI_MODEL", "gemma-4-31b-it"))
+        model_edit.setText(os.getenv("OPENAI_MODEL", os.getenv("LOCAL_TRANSLATOR_MODEL_PATH", "models/ai/Hy-MT2-1.8B-Q4_K_M.gguf")))
         model_layout.addWidget(model_label)
         model_layout.addWidget(model_edit)
         model_label.setVisible(not remote_mode)
@@ -5995,18 +5987,24 @@ class VideoTranslatorGUI(QMainWindow):
         def update_provider_fields():
             p = provider_combo.currentData()
             is_openai = p == "openai"
+            is_local = p == "local"
             key_section_widget.setVisible(is_openai)
-            base_url_label.setVisible(not remote_mode and p != "local")
-            base_url_edit.setVisible(not remote_mode and p != "local")
+            base_url_label.setVisible(not remote_mode and not is_local)
+            base_url_edit.setVisible(not remote_mode and not is_local)
+            test_btn.setVisible(not remote_mode and not is_local)
+            test_status.setVisible(not remote_mode and not is_local)
             if is_openai:
+                model_label.setText("AI Model:")
                 base_url_edit.setText("https://generativelanguage.googleapis.com/v1beta/openai/")
                 provider_hint.setText("Get an API key at https://aistudio.google.com/apikey")
             elif p == "ollama":
+                model_label.setText("AI Model:")
                 base_url_edit.setText("http://localhost:11434/v1")
                 key_edit.clear()
                 model_edit.setText("qwen2.5:7b")
                 provider_hint.setText("Requires Ollama installed. Run: ollama pull qwen2.5:7b")
             else:
+                model_label.setText("Model Path:")
                 base_url_edit.setText("")
                 base_url_edit.setVisible(False)
                 base_url_label.setVisible(False)
@@ -6100,7 +6098,7 @@ class VideoTranslatorGUI(QMainWindow):
             return
 
         # Save Logic
-        new_whisper = str(whisper_combo.currentData() or "base").strip().lower()
+        new_whisper = str(whisper_combo.currentData() or "medium").strip().lower()
         new_key = key_edit.text().strip()
         new_model = model_edit.text().strip()
         new_provider = str(provider_combo.currentData()).strip()

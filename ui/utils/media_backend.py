@@ -28,6 +28,7 @@ class QtMediaPlayerBackend(QObject):
         self._player.durationChanged.connect(self.durationChanged.emit)
 
     def setSource(self, source):
+        self._source_path = source.toLocalFile() if isinstance(source, QUrl) else str(source)
         self._player.setSource(source)
 
     def play(self):

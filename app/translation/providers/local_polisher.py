@@ -171,7 +171,7 @@ class LocalPolisherProvider:
         self.n_ubatch = self._safe_int(os.getenv("LOCAL_TRANSLATOR_N_UBATCH", str(recommended["n_ubatch"])), recommended["n_ubatch"])
         self.gpu_layers = self._safe_int(os.getenv("LOCAL_TRANSLATOR_GPU_LAYERS", str(recommended["gpu_layers"])), recommended["gpu_layers"])
         self.flash_attn = self._safe_bool(os.getenv("LOCAL_TRANSLATOR_FLASH_ATTN", str(recommended["flash_attn"]).lower()), recommended["flash_attn"])
-        self.temperature = self._safe_float(os.getenv("LOCAL_TRANSLATOR_TEMPERATURE", "0.15"), 0.15)
+        self.temperature = self._safe_float(os.getenv("LOCAL_TRANSLATOR_TEMPERATURE", "0.7"), 0.7)
         self.max_tokens = self._safe_int(os.getenv("LOCAL_TRANSLATOR_MAX_TOKENS", "1400"), 1400)
 
     def is_configured(self) -> bool:
@@ -206,17 +206,14 @@ class LocalPolisherProvider:
             style_instruction=style_instruction,
         )
 
+        system_note = (
+            "System note: Translate or rewrite subtitles for short videos. "
+            "Return only numbered lines like '1. text'. Keep the exact line count.\n\n"
+        )
         try:
             result = model.create_chat_completion(
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Translate or rewrite subtitles for short videos. "
-                            "Return only numbered lines like '1. text'. Keep the exact line count."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
+                    {"role": "user", "content": system_note + prompt},
                 ],
                 temperature=self.temperature,
                 max_tokens=self._estimate_max_tokens(source_texts, translated_texts),
@@ -390,13 +387,6 @@ class LocalPolisherProvider:
         try:
             result = model.create_chat_completion(
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You only split subtitle text into reading chunks. "
-                            "Preserve the original wording exactly. Return one plain line using ' || ' separators only."
-                        ),
-                    },
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.0,
@@ -444,14 +434,6 @@ class LocalPolisherProvider:
         try:
             result = model.create_chat_completion(
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You select subtitle highlight phrases only. "
-                            "Return numbered lines only. Keep exact wording from the input line. "
-                            "Never explain your choices."
-                        ),
-                    },
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.0,

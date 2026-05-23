@@ -129,7 +129,7 @@ def load_user_settings(gui):
         gui.set_video_filter_state(filter_preset, filter_intensity, filter_overrides, filter_modified)
     source_lang = s.value("source_lang", gui.lang_whisper_combo.currentText())
     gui.selected_whisper_model_name = str(
-        s.value("whisper_model_name", getattr(gui, "selected_whisper_model_name", "base")) or "base"
+        s.value("whisper_model_name", getattr(gui, "selected_whisper_model_name", "medium")) or "medium"
     ).strip().lower()
     source_index = gui.lang_whisper_combo.findText(source_lang)
     if source_index < 0:

@@ -52,7 +52,7 @@ class PipelineController:
         try:
             if self.whisper_download_dialog is not None:
                 return
-            model_name = getattr(self.gui, "get_whisper_model_name", lambda: "base")()
+            model_name = getattr(self.gui, "get_whisper_model_name", lambda: "medium")()
             dlg = BackgroundableProgressDialog(f"Downloading Whisper model: {model_name} ...", "Hide", 0, 0, self.gui)
             dlg.setWindowTitle("Downloading models")
             dlg.setWindowModality(Qt.NonModal)

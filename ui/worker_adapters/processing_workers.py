@@ -143,7 +143,7 @@ class RuntimeAssetsWorker(QThread):
     finished = Signal(str, str)
     progress = Signal(int, str)  # percent (0-100) or -1 for indeterminate, message
 
-    def __init__(self, workspace_root, whisper_model_name="base", demucs_model_name="htdemucs"):
+    def __init__(self, workspace_root, whisper_model_name="medium", demucs_model_name="htdemucs"):
         super().__init__()
         self.workspace_root = workspace_root
         self.whisper_model_name = whisper_model_name
