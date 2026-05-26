@@ -12,7 +12,7 @@
 - **CPU-first** — works on any Windows PC without GPU
 - **GPU-accelerated** — plug in NVIDIA GPU, install driver only, get 3-5x faster
 - Three output modes: `subtitle only`, `voice only`, `subtitle + voice`
-- Speech-to-text with `faster-whisper` (CPU or GPU)
+- Speech-to-text: `faster-whisper` (CPU or GPU) or `RapidOCR` (video subtitle)
 - AI translation — 3 providers:
   - **Local GGUF** (default, offline, CPU/GPU, `.gguf` model)
   - **OpenAI** (Google AI Studio, cloud, free tier)

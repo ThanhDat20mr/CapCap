@@ -239,6 +239,8 @@ class PrepareWorkflowWorker(QThread):
         optimize_subtitles,
         translator_style,
         whisper_model_name,
+        transcription_engine="whisper",
+        skip_translation=False,
     ):
         super().__init__()
         self.workspace_root = workspace_root
@@ -250,6 +252,8 @@ class PrepareWorkflowWorker(QThread):
         self.optimize_subtitles = optimize_subtitles
         self.translator_style = translator_style
         self.whisper_model_name = whisper_model_name
+        self.transcription_engine = transcription_engine
+        self.skip_translation = skip_translation
 
     def run(self):
         try:
@@ -269,6 +273,8 @@ class PrepareWorkflowWorker(QThread):
                         "optimize_subtitles": self.optimize_subtitles,
                         "translator_style": self.translator_style,
                         "whisper_model_name": self.whisper_model_name,
+                        "transcription_engine": self.transcription_engine,
+                        "skip_translation": self.skip_translation,
                     },
                     timeout=3600,
                 )
@@ -286,6 +292,8 @@ class PrepareWorkflowWorker(QThread):
                     optimize_subtitles=self.optimize_subtitles,
                     translator_style=self.translator_style,
                     whisper_model_name=self.whisper_model_name,
+                    transcription_engine=self.transcription_engine,
+                    skip_translation=self.skip_translation,
                     step_callback=self.step_started.emit,
                 )
                 state_path = os.path.join(project_state.project_root, "project.json")

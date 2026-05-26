@@ -544,6 +544,7 @@ class VideoTranslatorGUI(QMainWindow):
         self._timeline_waveform_cache_key = None
         self._timeline_waveform_samples = []
         self._timeline_waveform_duration_s = 0.0
+        self._waveform_extracting = False
         self._timeline_video_thumb_cache_key = None
         self._timeline_video_thumbnails = []
         self._pending_timeline_waveform_refresh = False
@@ -1818,6 +1819,13 @@ class VideoTranslatorGUI(QMainWindow):
         self._preview_audio_track_mode = mode if mode in ("original", "dubbed") else "original"
         self._apply_preview_audio_track_selection()
 
+    def _waveform_temp_path(self) -> str:
+        video_path = self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else ""
+        if not video_path:
+            return ""
+        video_hash = hashlib.md5(video_path.encode("utf-8")).hexdigest()[:12]
+        return os.path.join(self.get_workspace_temp_root(create=True), f"waveform_{video_hash}.wav")
+
     def refresh_timeline_waveform(self):
         if not hasattr(self, "timeline"):
             print("[Timeline] no timeline widget")
@@ -1825,11 +1833,31 @@ class VideoTranslatorGUI(QMainWindow):
         audio_path = self.resolve_timeline_audio_visualization_path()
         print(f"[Timeline] refresh_waveform audio_path={audio_path} exists={os.path.exists(audio_path) if audio_path else False}")
         if not audio_path or not os.path.exists(audio_path):
-            self._timeline_waveform_cache_key = None
-            self._timeline_waveform_samples = []
-            self._timeline_waveform_duration_s = 0.0
-            self.timeline.set_waveform_data([], 0.0)
-            return
+            video_path = self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else ""
+            if video_path and os.path.exists(video_path):
+                temp_audio = self._waveform_temp_path()
+                print(f"[Timeline] temp_audio={temp_audio} exists={os.path.exists(temp_audio) if temp_audio else False}")
+                if temp_audio and not os.path.exists(temp_audio):
+                    from runtime_paths import bin_path
+                    import subprocess
+                    ffmpeg = os.path.join(bin_path("ffmpeg"), "ffmpeg.exe")
+                    try:
+                        subprocess.run(
+                            [ffmpeg, "-y", "-loglevel", "error", "-i", video_path,
+                             "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", temp_audio],
+                            check=True, timeout=60,
+                        )
+                        print(f"[Timeline] extracted fallback audio: {temp_audio}")
+                    except Exception as exc:
+                        print(f"[Timeline] waveform extract failed: {exc}")
+                if temp_audio and os.path.exists(temp_audio):
+                    audio_path = temp_audio
+            if not audio_path or not os.path.exists(audio_path):
+                self._timeline_waveform_cache_key = None
+                self._timeline_waveform_samples = []
+                self._timeline_waveform_duration_s = 0.0
+                self.timeline.set_waveform_data([], 0.0)
+                return
 
         try:
             stat = os.stat(audio_path)
@@ -2829,6 +2857,22 @@ class VideoTranslatorGUI(QMainWindow):
         badge.move(int(x), int(y))
         badge.raise_()
 
+    def _update_ocr_overlay(self):
+        overlay = getattr(self, "ocr_region_overlay", None)
+        if overlay is None:
+            return
+        is_ocr = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr"
+        btn = getattr(self, "ocr_region_btn", None)
+        if btn:
+            btn.setVisible(is_ocr)
+        if not is_ocr:
+            overlay.hide()
+            overlay.set_editable(False)
+            if btn:
+                btn.setChecked(False)
+        else:
+            overlay.sync_to_view()
+
     def cleanup_file_if_exists(self, path: str):
         cleanup_file_if_exists_impl(path)
 
@@ -3223,6 +3267,10 @@ class VideoTranslatorGUI(QMainWindow):
 
     def is_ai_polish_enabled(self):
         return getattr(self, "translator_ai_cb", None) and self.translator_ai_cb.isChecked()
+
+    def is_skip_translation(self):
+        cb = getattr(self, "skip_translation_cb", None)
+        return cb is not None and cb.isChecked()
 
     def is_ai_subtitle_optimization_enabled(self):
         return bool(self.is_ai_polish_enabled())
@@ -4727,11 +4775,44 @@ class VideoTranslatorGUI(QMainWindow):
             self.blur_area_btn.blockSignals(False)
             QMessageBox.warning(self, "Blur Area", "Please load a video before adding a blur area.")
             return
+        if checked:
+            ocr_btn = getattr(self, "ocr_region_btn", None)
+            if ocr_btn and ocr_btn.isChecked():
+                ocr_btn.blockSignals(True)
+                ocr_btn.setChecked(False)
+                ocr_btn.blockSignals(False)
+                ocr_overlay = getattr(self, "ocr_region_overlay", None)
+                if ocr_overlay:
+                    ocr_overlay.set_editable(False)
+                    ocr_overlay.hide()
         self.video_view.set_blur_edit_enabled(checked)
         self.apply_preview_blur_region()
         self._refresh_preview_audio_controls()
         if checked:
             self.log("[Blur Area] drag inside the video preview to move or resize the region.")
+
+    def toggle_ocr_region_editing(self, checked: bool):
+        overlay = getattr(self, "ocr_region_overlay", None)
+        if overlay is None:
+            return
+        engine = os.getenv("TRANSCRIPTION_ENGINE", "whisper")
+        if not checked or engine != "ocr":
+            overlay.hide()
+            overlay.set_editable(False)
+            self.ocr_region_btn.setStyleSheet("QPushButton { color: #6ee7d6; font-weight: bold; font-size: 10px; padding: 0; }")
+            return
+        blur_btn = getattr(self, "blur_area_btn", None)
+        if blur_btn and blur_btn.isChecked():
+            blur_btn.blockSignals(True)
+            blur_btn.setChecked(False)
+            blur_btn.blockSignals(False)
+            self.video_view.set_blur_edit_enabled(False)
+            if hasattr(self, "media_player") and hasattr(self.media_player, "clear_blur_region"):
+                self.media_player.clear_blur_region()
+            self.apply_preview_blur_region()
+        overlay.set_editable(False)
+        overlay.sync_to_view()
+        self.ocr_region_btn.setStyleSheet("QPushButton { color: #6ee7d6; font-weight: bold; font-size: 10px; padding: 0; }")
 
     def apply_preview_blur_region(self):
         if not hasattr(self, "media_player") or not hasattr(self, "video_view"):
@@ -5510,6 +5591,9 @@ class VideoTranslatorGUI(QMainWindow):
             self.stop_btn.setEnabled(v_ok and not voice_running)
         if hasattr(self, "blur_area_btn"):
             self.blur_area_btn.setEnabled(v_ok)
+        if hasattr(self, "ocr_region_btn"):
+            self.ocr_region_btn.setEnabled(v_ok and os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr")
+            self.ocr_region_btn.setVisible(os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr")
         if hasattr(self, "free_voice_combo"):
             self.free_voice_combo.setEnabled(
                 generated_mode
@@ -5699,7 +5783,8 @@ class VideoTranslatorGUI(QMainWindow):
         self.refresh_ui_state()
 
     def run_transcription(self):
-        if not self.ensure_required_resources("Transcription", include_whisper=True):
+        is_ocr = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr"
+        if not is_ocr and not self.ensure_required_resources("Transcription", include_whisper=True):
             return
         self.subtitle_controller.run_transcription()
 
@@ -5859,14 +5944,45 @@ class VideoTranslatorGUI(QMainWindow):
 
         remote_mode = is_remote_profile()
         LocalPolisherProvider = self._local_polisher_provider_cls() if not remote_mode else None
+        # Transcription Engine Section
+        engine_title = QLabel("Subtitle source")
+        engine_title.setObjectName("statusHeadline")
+        layout.addWidget(engine_title)
+
+        engine_combo = QComboBox(dialog)
+        engine_combo.addItem("Audio (Whisper)", "whisper")
+        engine_combo.addItem("Video (OCR)", "ocr")
+        current_engine = (os.getenv("TRANSCRIPTION_ENGINE") or "whisper").strip().lower()
+        idx = engine_combo.findData(current_engine)
+        if idx >= 0:
+            engine_combo.setCurrentIndex(idx)
+        layout.addWidget(engine_combo)
+
+        # OCR Region combo (only visible when OCR selected)
+        region_label = QLabel("Subtitle position:")
+        region_label.setVisible(current_engine == "ocr")
+        region_combo = QComboBox(dialog)
+        region_combo.addItem("Bottom (default)", "bottom")
+        region_combo.addItem("Top", "top")
+        region_combo.addItem("Full frame", "full")
+        current_region = (os.getenv("OCR_SUBTITLE_REGION") or "bottom").strip().lower()
+        idx = region_combo.findData(current_region)
+        if idx >= 0:
+            region_combo.setCurrentIndex(idx)
+        region_combo.setVisible(current_engine == "ocr")
+        layout.addWidget(region_label)
+        layout.addWidget(region_combo)
+
         # Whisper Section
         whisper_title = QLabel("Whisper model")
         whisper_title.setObjectName("statusHeadline")
+        whisper_title.setVisible(current_engine != "ocr")
         layout.addWidget(whisper_title)
         
         whisper_combo = QComboBox(dialog)
         whisper_combo.addItem("Medium (Accurate)", "medium")
         whisper_combo.setCurrentIndex(0)
+        whisper_combo.setVisible(current_engine != "ocr")
         layout.addWidget(whisper_combo)
 
         divider = QFrame()
@@ -6041,6 +6157,15 @@ class VideoTranslatorGUI(QMainWindow):
         provider_combo.currentIndexChanged.connect(update_provider_fields)
         update_provider_fields()
 
+        def update_engine_fields():
+            is_ocr = engine_combo.currentData() == "ocr"
+            whisper_title.setVisible(not is_ocr)
+            whisper_combo.setVisible(not is_ocr)
+            region_label.setVisible(is_ocr)
+            region_combo.setVisible(is_ocr)
+
+        engine_combo.currentIndexChanged.connect(update_engine_fields)
+
         local_download_layout = QHBoxLayout()
         manage_resources_btn = QPushButton("Manage Resources", dialog)
         open_voices_folder_btn = QPushButton("Open Voices Folder", dialog)
@@ -6099,12 +6224,20 @@ class VideoTranslatorGUI(QMainWindow):
 
         # Save Logic
         new_whisper = str(whisper_combo.currentData() or "medium").strip().lower()
+        new_engine = str(engine_combo.currentData() or "whisper").strip().lower()
+        new_ocr_region = str(region_combo.currentData() or "bottom").strip().lower()
         new_key = key_edit.text().strip()
         new_model = model_edit.text().strip()
         new_provider = str(provider_combo.currentData()).strip()
         new_base_url = base_url_edit.text().strip()
 
         self.selected_whisper_model_name = new_whisper
+        
+        # Transcription engine settings (apply to all modes)
+        _engine_updates = {
+            "TRANSCRIPTION_ENGINE": new_engine,
+            "OCR_SUBTITLE_REGION": new_ocr_region,
+        }
         
         # Write back to .env
         env_lines = []
@@ -6141,6 +6274,8 @@ class VideoTranslatorGUI(QMainWindow):
                     "OPENAI_BASE_URL": new_base_url or "https://generativelanguage.googleapis.com/v1beta/openai/",
                 }
         
+        updates.update(_engine_updates)
+
         new_env_lines = []
         handled_keys = set()
         for line in env_lines:
@@ -6165,6 +6300,7 @@ class VideoTranslatorGUI(QMainWindow):
             os.environ[k] = v
 
         self.save_user_settings()
+        self._update_ocr_overlay()
         QMessageBox.information(self, "Success", "Settings saved and updated!")
 
     def apply_edited_translation(self, show_message=True, force_apply=True):
@@ -6545,7 +6681,8 @@ class VideoTranslatorGUI(QMainWindow):
     def run_all_pipeline(self):
         mode = self.get_output_mode_key()
         include_voice = mode in ("voice", "both")
-        if not self.ensure_required_resources("Generate", include_whisper=True, include_voice=include_voice):
+        is_ocr = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr"
+        if not self.ensure_required_resources("Generate", include_whisper=not is_ocr, include_voice=include_voice):
             return
         self.pipeline_controller.run_all_pipeline()
 
@@ -6630,6 +6767,7 @@ class VideoTranslatorGUI(QMainWindow):
         self._timeline_waveform_cache_key = None
         self._timeline_waveform_samples = []
         self._timeline_waveform_duration_s = 0.0
+        self._waveform_extracting = False
         self._timeline_video_thumb_cache_key = None
         self._timeline_video_thumbnails = []
         self._pending_timeline_waveform_refresh = False
@@ -6950,6 +7088,7 @@ def _relaunch_launcher():
     new_window = VideoTranslatorGUI()
     new_window.show()
     def _init():
+        new_window._current_video_path = os.path.abspath(video_path)
         new_window.ensure_media_backend_ready()
         new_window.video_path_edit.setText(video_path)
         new_window.media_player.setSource(QUrl.fromLocalFile(video_path))
@@ -6957,6 +7096,7 @@ def _relaunch_launcher():
             new_window.refresh_video_dimensions(video_path)
         new_window.current_project_state = new_window.ensure_current_project()
         new_window.load_project_context(new_window.current_project_state)
+        new_window.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
     QTimer.singleShot(100, _init)
 
 if __name__ == "__main__":

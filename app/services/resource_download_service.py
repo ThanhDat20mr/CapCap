@@ -211,6 +211,31 @@ class ResourceDownloadService:
                 matches.append(str(child))
         return matches
 
+    _OCR_REQUIRED_MODELS = [
+        "ch_PP-OCRv4_det_mobile.onnx",
+        "ch_PP-OCRv4_rec_mobile.onnx",
+        "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+        "ppocr_keys_v1.txt",
+    ]
+
+    def _ocr_model_dir(self) -> str:
+        try:
+            import rapidocr
+            return os.path.dirname(rapidocr.__file__)
+        except Exception:
+            return ""
+
+    def _ocr_model_status(self) -> str:
+        models_dir = self._ocr_model_dir()
+        if not models_dir:
+            return "missing"
+        models_path = os.path.join(models_dir, "models")
+        missing = [
+            m for m in self._OCR_REQUIRED_MODELS
+            if not os.path.isfile(os.path.join(models_path, m))
+        ]
+        return "missing" if missing else "installed"
+
     def list_resources(self) -> list[dict]:
         resources: list[dict] = [
             {
@@ -231,11 +256,11 @@ class ResourceDownloadService:
             },
             {
                 "id": "cuda:whisper",
-                "name": "Whisper GPU Runtime (CUDA 12)",
+                "name": "GPU Acceleration Pack (CUDA 12, ~1.6 GB)",
                 "kind": "cuda",
                 "status": "installed" if self.is_resource_installed("cuda:whisper") else "missing",
                 "target_dir": join_root("bin", "cuda12_fw"),
-                "description": "Required only if you want Whisper GPU acceleration on CUDA 12.",
+                "description": "CUDA 12 runtime + ONNX GPU provider. Required for GPU acceleration on Whisper, OCR, and local AI.",
             },
         ]
 
@@ -257,7 +282,14 @@ class ResourceDownloadService:
         if resource_id == "ai:local-gguf":
             return os.path.exists(self._ai_model_local_path())
         if resource_id == "cuda:whisper":
-            return os.path.exists(join_root("bin", "cuda12_fw", "cublas64_12.dll"))
+            fw_dir = join_root("bin", "cuda12_fw")
+            cuda_ok = os.path.exists(os.path.join(fw_dir, "cublas64_12.dll"))
+            try:
+                import onnxruntime
+                ort_ok = os.path.isfile(os.path.join(os.path.dirname(onnxruntime.__file__), "capi", "onnxruntime_providers_cuda.dll"))
+            except Exception:
+                ort_ok = False
+            return cuda_ok and ort_ok
         if resource_id.startswith("whisper:"):
             model_name = resource_id.split(":", 1)[1].strip().lower()
             for model_dir in self._whisper_cache_dirs(model_name):
@@ -276,6 +308,8 @@ class ResourceDownloadService:
                 return False
             model_path, config_path = self._voice_local_paths(voice_entry)
             return os.path.exists(model_path) and os.path.exists(config_path)
+        if resource_id == "cuda:ort":
+            return self._cuda_ort_dll_status() == "installed"
         return False
 
     def _find_voice_entry(self, voice_id: str) -> dict | None:
@@ -351,15 +385,53 @@ class ResourceDownloadService:
 
         if resource_id == "cuda:whisper":
             if progress_cb:
-                progress_cb(-1, "Downloading CUDA runtime files from Hugging Face...")
+                progress_cb(-1, "Downloading CUDA runtime and ONNX GPU provider from Hugging Face...")
             snapshot_download(
                 repo_id=self.repo_id,
                 revision=self.revision,
                 local_dir=join_root("bin"),
                 allow_patterns=["cuda12_fw/*"],
             )
+            try:
+                from huggingface_hub import hf_hub_download, hf_hub_url
+                from huggingface_hub.file_download import get_hf_file_metadata
+            except Exception:
+                pass
+            ort_dir = ""
+            try:
+                import onnxruntime
+                ort_dir = os.path.join(os.path.dirname(onnxruntime.__file__), "capi")
+            except Exception:
+                pass
+            if ort_dir and os.path.isdir(ort_dir):
+                target_ort = os.path.join(ort_dir, "onnxruntime_providers_cuda.dll")
+                if not os.path.isfile(target_ort):
+                    try:
+                        downloaded = self._download_hf_file(
+                            repo_id=self.repo_id,
+                            revision=self.revision,
+                            filename="onnxruntime/capi/onnxruntime_providers_cuda.dll",
+                            local_dir=os.path.dirname(os.path.dirname(ort_dir)),
+                            hf_hub_download=hf_hub_download,
+                            hf_hub_url=hf_hub_url,
+                            get_hf_file_metadata=get_hf_file_metadata,
+                            progress_cb=progress_cb,
+                            start_percent=0,
+                            end_percent=100,
+                            label="Downloading onnxruntime_providers_cuda.dll",
+                        )
+                        if downloaded and os.path.isfile(downloaded):
+                            norm_src = os.path.normcase(os.path.abspath(downloaded))
+                            norm_dst = os.path.normcase(os.path.abspath(target_ort))
+                            if norm_src != norm_dst:
+                                if os.path.exists(target_ort):
+                                    os.remove(target_ort)
+                                os.makedirs(ort_dir, exist_ok=True)
+                                shutil.move(downloaded, target_ort)
+                    except Exception as e:
+                        print(f"[CUDA] Failed to download ONNX GPU provider: {e}")
             if progress_cb:
-                progress_cb(100, "CUDA runtime is ready.")
+                progress_cb(100, "GPU runtime is ready.")
             return
 
         if resource_id.startswith("voice:"):

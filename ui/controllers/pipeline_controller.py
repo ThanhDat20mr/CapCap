@@ -123,6 +123,8 @@ class PipelineController:
         self.gui.log(f"[Pipeline] Starting prepare workflow for: {video_path}")
         output_mode = self.gui.get_output_mode_key()
         optimize_subtitles = self.gui.is_ai_polish_enabled() and output_mode == "subtitle"
+        transcription_engine = os.getenv("TRANSCRIPTION_ENGINE", "whisper")
+        skip_translation = self.gui.is_skip_translation()
         self.gui.prepare_workflow_thread = PrepareWorkflowWorker(
             self.gui.workspace_root,
             video_path,
@@ -133,6 +135,8 @@ class PipelineController:
             optimize_subtitles,
             self.gui.get_ai_style_instruction(),
             self.gui.get_whisper_model_path(),
+            transcription_engine=transcription_engine,
+            skip_translation=skip_translation,
         )
         
         # Connect signals

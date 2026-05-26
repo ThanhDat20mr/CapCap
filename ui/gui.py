@@ -63,6 +63,7 @@ if __name__ == "__main__":
             window.refresh_video_dimensions(video_path)
         window.current_project_state = window.ensure_current_project()
         window.load_project_context(window.current_project_state)
+        window.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
 
     QTimer.singleShot(100, _init_video)
     sys.exit(app.exec())

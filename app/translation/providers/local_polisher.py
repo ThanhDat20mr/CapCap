@@ -114,11 +114,11 @@ class LocalPolisherProvider:
         has_gpu_path = bool(info.get("nvidia_gpu_detected") and info.get("llama_gpu_supported"))
         gpu_vram_mb = int(info.get("gpu_vram_mb") or 0)
 
-        n_ctx = 2048
+        n_ctx = 4096
         if has_gpu_path and gpu_vram_mb >= 10000:
-            n_ctx = 3072
+            n_ctx = 8192
         elif not has_gpu_path and cpu_count >= 16:
-            n_ctx = 3072
+            n_ctx = 8192
 
         n_batch = 1024 if has_gpu_path else 768
         n_ubatch = 512 if has_gpu_path else 384
@@ -172,7 +172,10 @@ class LocalPolisherProvider:
         self.gpu_layers = self._safe_int(os.getenv("LOCAL_TRANSLATOR_GPU_LAYERS", str(recommended["gpu_layers"])), recommended["gpu_layers"])
         self.flash_attn = self._safe_bool(os.getenv("LOCAL_TRANSLATOR_FLASH_ATTN", str(recommended["flash_attn"]).lower()), recommended["flash_attn"])
         self.temperature = self._safe_float(os.getenv("LOCAL_TRANSLATOR_TEMPERATURE", "0.7"), 0.7)
-        self.max_tokens = self._safe_int(os.getenv("LOCAL_TRANSLATOR_MAX_TOKENS", "1400"), 1400)
+        self.top_p = self._safe_float(os.getenv("LOCAL_TRANSLATOR_TOP_P", "0.6"), 0.6)
+        self.top_k = self._safe_int(os.getenv("LOCAL_TRANSLATOR_TOP_K", "20"), 20)
+        self.repeat_penalty = self._safe_float(os.getenv("LOCAL_TRANSLATOR_REPEAT_PENALTY", "1.05"), 1.05)
+        self.max_tokens = self._safe_int(os.getenv("LOCAL_TRANSLATOR_MAX_TOKENS", "4096"), 4096)
 
     def is_configured(self) -> bool:
         return bool(self.model_path and os.path.exists(self.model_path))
@@ -216,6 +219,9 @@ class LocalPolisherProvider:
                     {"role": "user", "content": system_note + prompt},
                 ],
                 temperature=self.temperature,
+                top_p=self.top_p,
+                top_k=self.top_k,
+                repeat_penalty=self.repeat_penalty,
                 max_tokens=self._estimate_max_tokens(source_texts, translated_texts),
             )
         except Exception as exc:
@@ -224,54 +230,37 @@ class LocalPolisherProvider:
         text = self._extract_text(result)
         lines = parse_numbered_lines(text)
         if not validate_texts(lines, len(source_texts)):
-            raise TranslationValidationError(
-                f"Local translator returned {len(lines)} lines but expected {len(source_texts)}."
-            )
+            expected = len(source_texts)
+            actual = len(lines)
+            if actual > expected and actual - expected <= 2:
+                lines = lines[:expected]
+            elif actual < expected and expected - actual <= 2:
+                lines.extend([""] * (expected - actual))
+            if not validate_texts(lines, expected):
+                raise TranslationValidationError(
+                    f"Local translator returned {actual} lines but expected {expected}."
+                )
         return lines, [], f"local-gguf ({os.path.basename(self.model_path)})"
 
     def _build_prompt(self, source_texts, translated_texts, src_lang, target_lang, style_instruction) -> str:
         is_direct = not translated_texts
-        style_part = f" Style: {style_instruction}" if style_instruction else ""
-        dubbing_mode = "[mode=dubbing_rewrite]" in str(style_instruction or "").lower()
         if is_direct:
-            lines = [f"{i + 1}. {s}" for i, s in enumerate(source_texts)]
-            header = (
-                f"Translate these subtitle lines from {src_lang} to {target_lang}.{style_part}\n"
-                "Target: natural Vietnamese for short-form video voiceover/subtitles.\n"
-                "Format: Number. Text"
+            joined = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(source_texts))
+            prompt = (
+                f"Translate these {len(source_texts)} subtitle lines from {src_lang} to {target_lang}. "
+                f"Note that you should only output the translated result without any additional explanation. "
+                f"Keep the exact line count ({len(source_texts)} lines) and the numbering format (1. text):\n\n{joined}"
             )
         else:
-            lines = [f"{i + 1}. {s} ||| {t}" for i, (s, t) in enumerate(zip(source_texts, translated_texts))]
-            if dubbing_mode:
-                header = (
-                    f"Rewrite these dubbing drafts from {src_lang} to {target_lang}.{style_part}\n"
-                    "Target: short spoken Vietnamese for TTS timing rescue.\n"
-                    "Format: Number. Source ||| Draft"
-                )
-            else:
-                header = (
-                    f"Rewrite these subtitle translations from {src_lang} to {target_lang}.{style_part}\n"
-                    "Target: natural Vietnamese for short-form video voiceover/subtitles.\n"
-                    "Format: Number. Source ||| Draft"
-                )
-        rules = (
-            "Rules: Keep meaning accurate, concise, natural, and easy to read quickly. "
-            "Return only numbered lines. No commentary, no code fences, no extra headings."
-        )
-        if dubbing_mode:
-            rules = (
-                "Rules: Rewrite for spoken dubbing timing, not subtitle readability. "
-                "Use the metadata in the source line as hard constraints, especially max_words_vi and measured_ratio. "
-                "The output must be shorter than the draft when the draft is overlong. "
-                "Preserve names, numbers, product names, and key claims exactly. "
-                "Remove filler first. Keep one concise spoken line per number. "
-                "Return only numbered lines. No commentary, no code fences, no extra headings."
+            joined = "\n".join(f"{i + 1}. {s} ||| {t}" for i, (s, t) in enumerate(zip(source_texts, translated_texts)))
+            prompt = (
+                f"Rewrite these {len(source_texts)} subtitle translations from {src_lang} to {target_lang}. "
+                f"Note that you should only output the rewritten result without any additional explanation. "
+                f"Keep the exact line count ({len(source_texts)} lines) and the numbering format:\n\n{joined}"
             )
-        return (
-            f"{header}\n"
-            f"{rules}\n\n"
-            + "\n".join(lines)
-        )
+        if style_instruction:
+            prompt = f"Style: {style_instruction}\n\n{prompt}"
+        return prompt
 
     def _get_model(self):
         signature = (
@@ -390,6 +379,9 @@ class LocalPolisherProvider:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.0,
+                top_p=self.top_p,
+                top_k=self.top_k,
+                repeat_penalty=self.repeat_penalty,
                 max_tokens=min(256, self.max_tokens),
             )
         except Exception as exc:
@@ -437,6 +429,9 @@ class LocalPolisherProvider:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.0,
+                top_p=self.top_p,
+                top_k=self.top_k,
+                repeat_penalty=self.repeat_penalty,
                 max_tokens=min(512, self.max_tokens),
             )
         except Exception as exc:

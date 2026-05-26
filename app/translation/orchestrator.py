@@ -280,17 +280,59 @@ class TranslationOrchestrator:
             translated_batches = list(split_text_batches(translated_texts, local_batch_size)) if translated_texts else [None] * len(source_batches)
             merged: list[str] = []
             for idx, source_batch in enumerate(source_batches):
-                batch_result, batch_warnings, provider_name = polisher.polish_batch(
-                    source_texts=source_batch,
-                    translated_texts=translated_batches[idx],
-                    src_lang=src_lang,
-                    target_lang=target_lang,
-                    style_instruction=style_instruction,
-                )
-                merged.extend(batch_result)
-                warnings.extend(batch_warnings)
-                if provider_name:
-                    providers_used.add(provider_name)
+                batch_trans = translated_batches[idx]
+                try:
+                    batch_result, batch_warnings, provider_name = polisher.polish_batch(
+                        source_texts=source_batch,
+                        translated_texts=batch_trans,
+                        src_lang=src_lang,
+                        target_lang=target_lang,
+                        style_instruction=style_instruction,
+                    )
+                    merged.extend(batch_result)
+                    warnings.extend(batch_warnings)
+                    if provider_name:
+                        providers_used.add(provider_name)
+                except Exception as batch_exc:
+                    single_size = max(1, len(source_batch) // 2)
+                    if single_size < len(source_batch):
+                        print(f"[AI Translation] Batch {idx + 1} failed ({batch_exc}), retrying with smaller batches ({single_size} lines)...")
+                        sub_sources = list(split_text_batches(source_batch, single_size))
+                        sub_trans = list(split_text_batches(batch_trans, single_size)) if batch_trans else [None] * len(sub_sources)
+                        for sub_idx, sub_src in enumerate(sub_sources):
+                            sub_t = sub_trans[sub_idx] if sub_trans else None
+                            try:
+                                sub_result, sub_warnings, sub_provider = polisher.polish_batch(
+                                    source_texts=sub_src,
+                                    translated_texts=sub_t,
+                                    src_lang=src_lang,
+                                    target_lang=target_lang,
+                                    style_instruction=style_instruction,
+                                )
+                                merged.extend(sub_result)
+                                warnings.extend(sub_warnings)
+                                if sub_provider:
+                                    providers_used.add(sub_provider)
+                            except Exception:
+                                print(f"[AI Translation] Sub-batch {sub_idx + 1} re-failed, using Google fallback for {len(sub_src)} lines...")
+                                for src_line in sub_src:
+                                    try:
+                                        gb = self.google_web.translate_batch([src_line], src_lang=src_lang, target_lang=target_lang)
+                                        merged.extend(gb)
+                                    except Exception:
+                                        merged.append(src_line)
+                                        warnings.append(f"Google fallback also failed for line: {src_line[:50]}")
+                                providers_used.add("google-web-retry")
+                    else:
+                        print(f"[AI Translation] Batch {idx + 1} failed ({batch_exc}), using Google fallback for {len(source_batch)} lines...")
+                        for src_line in source_batch:
+                            try:
+                                gb = self.google_web.translate_batch([src_line], src_lang=src_lang, target_lang=target_lang)
+                                merged.extend(gb)
+                            except Exception:
+                                merged.append(src_line)
+                                warnings.append(f"Google fallback also failed for line: {src_line[:50]}")
+                        providers_used.add("google-web-retry")
             return merged, sorted(providers_used), warnings
 
         source_batches = list(split_text_batches(source_texts, max(polish_batch_size, 60)))

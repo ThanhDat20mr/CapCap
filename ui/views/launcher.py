@@ -1,3 +1,4 @@
+import hashlib
 import os
 import json
 import time
@@ -106,6 +107,28 @@ class ProjectCard(QFrame):
         self.window().accept()
 
 
+def _extract_waveform_audio(video_path: str, temp_root: str) -> str:
+    video_hash = hashlib.md5(video_path.encode("utf-8")).hexdigest()[:12]
+    audio_path = os.path.join(temp_root, f"waveform_{video_hash}.wav")
+    if os.path.exists(audio_path):
+        return audio_path
+    if not os.path.exists(video_path):
+        return ""
+    os.makedirs(os.path.dirname(audio_path) or ".", exist_ok=True)
+    import subprocess
+    try:
+        subprocess.run(
+            [_ffmpeg_path(), "-y", "-loglevel", "error", "-i", video_path,
+             "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", audio_path],
+            check=True, timeout=60,
+        )
+        print(f"[Launcher] Waveform audio extracted: {audio_path}")
+    except Exception as exc:
+        print(f"[Launcher] Waveform extract failed: {exc}")
+        return ""
+    return audio_path if os.path.exists(audio_path) else ""
+
+
 class LauncherWindow(QDialog):
     def __init__(self):
         super().__init__()
@@ -189,6 +212,41 @@ class LauncherWindow(QDialog):
         self.empty_label.hide()
         root.addWidget(self.empty_label)
 
+        self.loading_label = QLabel("Preparing video...")
+        self.loading_label.setAlignment(Qt.AlignCenter)
+        self.loading_label.setStyleSheet("color: #4ecdc4; font-size: 16px; font-weight: 700; padding: 20px;")
+        self.loading_label.hide()
+        root.addWidget(self.loading_label)
+
+    def accept(self):
+        if not self.selected_video or not os.path.exists(self.selected_video):
+            super().accept()
+            return
+        self.loading_label.show()
+        self.new_btn.setEnabled(False)
+        self._extraction_done = False
+        import threading
+        def _preprocess():
+            from runtime_paths import workspace_root
+            temp_root = os.path.join(workspace_root(), "temp")
+            _extract_waveform_audio(self.selected_video, temp_root)
+            self._extraction_done = True
+        threading.Thread(target=_preprocess, daemon=True).start()
+        self._loader_timer = QTimer()
+        self._loader_timer.timeout.connect(self._on_loader_tick)
+        self._loader_timer.start(200)
+
+    def _on_loader_tick(self):
+        if not getattr(self, "_extraction_done", False):
+            return
+        self._loader_timer.stop()
+        self._finish_accept()
+
+    def _finish_accept(self):
+        self.loading_label.hide()
+        self.new_btn.setEnabled(True)
+        super().accept()
+
     def _load_recent(self):
         projects = _load_recent_projects()
         os.makedirs(self._thumbnail_dir, exist_ok=True)
@@ -200,7 +258,7 @@ class LauncherWindow(QDialog):
 
         existing = [p for p in projects if os.path.exists(p.get("video_path", ""))]
         if existing != projects:
-            _save_recent_projects(self.settings, existing)
+            _save_recent_projects(None, existing)
 
         if not existing:
             self.empty_label.show()

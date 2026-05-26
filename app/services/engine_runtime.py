@@ -8,6 +8,7 @@ class EngineRuntime:
     _ADAPTERS = {
         "ffmpeg": ("engines.ffmpeg_adapter", "FFmpegAdapter"),
         "whisper": ("engines.whisper_adapter", "WhisperAdapter"),
+        "ocr": ("engines.ocr_adapter", "OcrAdapter"),
         "translator": ("engines.translator_adapter", "TranslatorAdapter"),
         "demucs": ("engines.demucs_adapter", "DemucsAdapter"),
         "preview": ("engines.preview_adapter", "PreviewAdapter"),
@@ -68,6 +69,10 @@ class EngineRuntime:
     def subtitle(self):
         return self._adapter("subtitle")
 
+    @property
+    def ocr(self):
+        return self._adapter("ocr")
+
     def extract_audio(self, video_path: str, audio_output_path: str) -> bool:
         return self.ffmpeg.extract_audio(video_path, audio_output_path)
 
@@ -76,6 +81,9 @@ class EngineRuntime:
 
     def transcribe_audio(self, audio_path: str, model_path: str, *, language: str):
         return self.whisper.transcribe(audio_path, model_path, language=language)
+
+    def transcribe_video_ocr(self, video_path: str, *, region: str = "bottom", **kwargs):
+        return self.ocr.transcribe(video_path, region=region)
 
     def translate_srt(
         self,

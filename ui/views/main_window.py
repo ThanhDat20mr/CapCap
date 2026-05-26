@@ -1,4 +1,4 @@
-﻿import os
+import os
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor, QImage, QPixmap
@@ -183,6 +183,7 @@ def _connect_ui_signals(gui):
         gui.subtitle_single_line_cb.toggled.connect(gui.on_single_line_toggled)
     gui.use_existing_audio_radio.toggled.connect(gui.on_audio_source_mode_changed)
     gui.blur_area_btn.toggled.connect(gui.toggle_blur_area_editing)
+    gui.ocr_region_btn.toggled.connect(gui.toggle_ocr_region_editing)
     if hasattr(gui, "video_view") and hasattr(gui.video_view, "framingChanged"):
         gui.video_view.framingChanged.connect(gui.on_preview_framing_changed)
     gui.transcript_text.textChanged.connect(gui.refresh_ui_state)

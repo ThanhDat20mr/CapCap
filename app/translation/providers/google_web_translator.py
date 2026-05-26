@@ -1,5 +1,6 @@
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
 
 import requests
@@ -9,6 +10,7 @@ from ..errors import TranslationProviderError
 
 class GoogleWebTranslatorProvider:
     BASE_URL = "https://translate.googleapis.com/translate_a/single"
+    MAX_WORKERS = 6
 
     def is_configured(self) -> bool:
         return True
@@ -22,9 +24,8 @@ class GoogleWebTranslatorProvider:
         timeout: int = 20,
         max_retries: int = 2,
     ) -> list[str]:
-        translated = []
-        for text in texts:
-            translated.append(
+        if len(texts) <= 3:
+            return [
                 self._translate_text(
                     text=text,
                     src_lang=src_lang,
@@ -32,8 +33,25 @@ class GoogleWebTranslatorProvider:
                     timeout=timeout,
                     max_retries=max_retries,
                 )
-            )
-        return translated
+                for text in texts
+            ]
+        results = [None] * len(texts)
+        with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
+            future_to_idx = {}
+            for idx, text in enumerate(texts):
+                future = executor.submit(
+                    self._translate_text,
+                    text=text,
+                    src_lang=src_lang,
+                    target_lang=target_lang,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                )
+                future_to_idx[future] = idx
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                results[idx] = future.result()
+        return results
 
     def _translate_text(
         self,

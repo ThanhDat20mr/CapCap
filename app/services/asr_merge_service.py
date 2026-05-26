@@ -191,8 +191,19 @@ class AsrMergeService:
 
         if pending_items:
             used_parallel = False
-            if False:
-                try:
+            try:
+                from whisper_processor import _detect_faster_whisper_runtime
+                runtime = _detect_faster_whisper_runtime()
+                if runtime.get("device") == "cuda" and len(pending_items) > 1:
+                    self._transcribe_chunks_sequential(
+                        pending_items,
+                        whisper_adapter=whisper_adapter,
+                        model_path=model_path,
+                        language=language,
+                        cache_dir=cache_dir,
+                    )
+                    used_parallel = True
+                elif len(pending_items) > 1:
                     self._transcribe_chunks_parallel(
                         pending_items,
                         cache_dir=cache_dir,
@@ -200,8 +211,8 @@ class AsrMergeService:
                         language=language,
                     )
                     used_parallel = True
-                except Exception as exc:
-                    print(f"[ASR] Parallel worker pool failed, falling back to sequential mode: {exc}")
+            except Exception as exc:
+                print(f"[ASR] Parallel mode failed, falling back to sequential: {exc}")
             if not used_parallel:
                 self._transcribe_chunks_sequential(
                     pending_items,

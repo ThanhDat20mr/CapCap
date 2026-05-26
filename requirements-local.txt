@@ -7,8 +7,10 @@ huggingface_hub
 faster-whisper
 vietnormalizer
 piper-tts
-onnxruntime
+onnxruntime-gpu
 scipy
 openai
 librosa
 llama-cpp-python
+rapidocr
+opencv-python-headless

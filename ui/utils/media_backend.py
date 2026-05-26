@@ -113,6 +113,7 @@ class MpvMediaPlayerBackend(QObject):
         self._source_path = ""
         self._subtitle_ass_path = ""
         self._applied_subtitle_path = ""
+        self._sub_track_id = -1
         self._blur_region = None
 
         prepare_mpv_bundle()
@@ -462,14 +463,17 @@ class MpvMediaPlayerBackend(QObject):
             self._applied_subtitle_path = ""
             return
         try:
-            # We use 'sub-add' with 'replace' or just add a new one and select it.
-            # To avoid accumulating too many tracks, we could try to clear first,
-            # but mpv's sub-add with same path might already handle it.
-            # Better: use 'sub-reload' if it's already the applied path.
+            # Remove old subtitle track first to avoid accumulation
+            if self._applied_subtitle_path and self._applied_subtitle_path != self._subtitle_ass_path:
+                try:
+                    self._player.command("sub-remove", self._sub_track_id)
+                except Exception:
+                    pass
             if self._applied_subtitle_path == self._subtitle_ass_path:
                 self._player.command("sub-reload")
             else:
-                self._player.command("sub-add", self._subtitle_ass_path, "select")
+                track_id = self._player.command("sub-add", self._subtitle_ass_path, "select")
+                self._sub_track_id = track_id
             self._player.sub_visibility = True
             self._applied_subtitle_path = self._subtitle_ass_path
         except Exception:

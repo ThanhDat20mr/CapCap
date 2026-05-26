@@ -400,6 +400,10 @@ def build_start_group(gui, left_layout):
     target_row.addWidget(gui.lang_target_combo)
     language_pair_layout.addLayout(source_row)
     language_pair_layout.addLayout(target_row)
+
+    gui.skip_translation_cb = QCheckBox("Keep original text (skip translation)")
+    gui.skip_translation_cb.setChecked(False)
+    language_pair_layout.addWidget(gui.skip_translation_cb)
     language_layout.addWidget(language_pair_card)
 
     language_ai_card, language_ai_layout = _section_card()
@@ -428,7 +432,18 @@ def build_start_group(gui, left_layout):
  
     gui.translator_ai_cb.toggled.connect(toggle_style_field)
     toggle_style_field(gui.translator_ai_cb.isChecked())
- 
+
+    def toggle_translation_fields(checked):
+        gui.lang_target_combo.setEnabled(not checked)
+        gui.translator_ai_cb.setEnabled(not checked)
+        if checked:
+            gui.translator_style_label.setVisible(False)
+            gui.translator_style_edit.setVisible(False)
+        else:
+            toggle_style_field(gui.translator_ai_cb.isChecked())
+
+    gui.skip_translation_cb.toggled.connect(toggle_translation_fields)
+
     language_page.layout().addWidget(language_card)
 
     voice_card, voice_layout = _build_collapsible_section("Voice")
