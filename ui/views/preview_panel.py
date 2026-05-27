@@ -117,7 +117,10 @@ class OcrRegionOverlay(QWidget):
         if not self._target_view or not self._target_view.isVisible():
             self.hide()
             return
-        engine = os.getenv("TRANSCRIPTION_ENGINE", "whisper")
+        if self._main_window is not None and bool(getattr(self._main_window, "_suspend_ocr_overlay", False)):
+            self.hide()
+            return
+        engine = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower()
         if engine != "ocr":
             self.hide()
             return
@@ -125,6 +128,7 @@ class OcrRegionOverlay(QWidget):
         top_left = self._target_view.mapToGlobal(QtCore.QPoint(0, 0))
         self.setGeometry(QtCore.QRect(top_left, self._target_view.size()))
         self.show()
+        self.raise_()
         self.update()
 
     def _content_rect(self):
@@ -523,13 +527,11 @@ def build_preview_panel(gui):
     gui.ocr_region_btn.setToolTip("Edit OCR subtitle region")
     gui.ocr_region_btn.setFixedSize(38, 38)
     gui.ocr_region_btn.setStyleSheet("QPushButton { color: #6ee7d6; font-weight: bold; font-size: 10px; padding: 0; }")
-    _is_ocr = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr"
-    gui.ocr_region_btn.setVisible(_is_ocr)
+    gui.ocr_region_btn.hide()
     controls_layout.addWidget(gui.play_btn)
     controls_layout.addWidget(gui.stop_btn)
     controls_layout.addWidget(gui.preview_btn)
     controls_layout.addWidget(gui.blur_area_btn)
-    controls_layout.addWidget(gui.ocr_region_btn)
 
     preview_audio_layout = QHBoxLayout()
     preview_audio_layout.setSpacing(10)

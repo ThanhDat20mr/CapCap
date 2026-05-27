@@ -1461,7 +1461,7 @@ class VoiceWorkflow:
         output_dir: str,
         background_path: str = "",
         audio_handling_mode: str = "fast",
-        voice_name: str = "vi_VN-vais1000-medium",
+        voice_name: str = "ngochuyen",
         voice_speed: float = 1.0,
         timing_sync_mode: str = "off",
         voice_gain_db: float = 0.0,

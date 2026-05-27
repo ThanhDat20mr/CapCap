@@ -207,7 +207,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
         text = str(payload.get("text", "") or "").strip()
         if not text:
             raise ValueError("text is required.")
-        voice = str(payload.get("voice", "vi_VN-vais1000-medium") or "vi_VN-vais1000-medium").strip()
+        voice = str(payload.get("voice", "ngochuyen") or "ngochuyen").strip()
         try:
             speed = float(payload.get("speed", 1.0) or 1.0)
         except Exception:
@@ -263,7 +263,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             output_dir=str(payload.get("output_dir", "") or ""),
             background_path=str(payload.get("background_path", "") or ""),
             audio_handling_mode=str(payload.get("audio_handling_mode", "fast") or "fast"),
-            voice_name=str(payload.get("voice_name", "vi_VN-vais1000-medium") or "vi_VN-vais1000-medium"),
+            voice_name=str(payload.get("voice_name", "ngochuyen") or "ngochuyen"),
             voice_speed=float(payload.get("voice_speed", 1.0) or 1.0),
             timing_sync_mode=str(payload.get("timing_sync_mode", "off") or "off"),
             voice_gain_db=float(payload.get("voice_gain_db", 0.0) or 0.0),

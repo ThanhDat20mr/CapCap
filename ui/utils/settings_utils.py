@@ -169,7 +169,7 @@ def load_user_settings(gui):
         gui.subtitle_preset_youtube_radio.setChecked(True)
     elif preset_key == "minimal":
         gui.subtitle_preset_minimal_radio.setChecked(True)
-    elif preset_key == "custom":
+    elif preset_key == "custom" and getattr(gui, "subtitle_preset_custom_radio", None):
         gui.subtitle_preset_custom_radio.setChecked(True)
     else:
         gui.subtitle_preset_tiktok_radio.setChecked(True)
@@ -227,6 +227,8 @@ def load_user_settings(gui):
         gui.on_advanced_toggled(advanced_open)
     gui.on_audio_source_mode_changed()
     gui.on_subtitle_preset_changed()
+    if hasattr(gui, "_capture_subtitle_custom_style_state"):
+        gui._capture_subtitle_custom_style_state()
     gui.update_subtitle_preview_style()
     gui.on_output_mode_changed(gui.output_mode_combo.currentText())
 

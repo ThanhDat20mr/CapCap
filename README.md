@@ -15,6 +15,8 @@
 - Speech-to-text: `faster-whisper` (CPU or GPU) or `RapidOCR` (video subtitle)
 - AI translation — 3 providers:
   - **Local GGUF** (default, offline, CPU/GPU, `.gguf` model)
+    - **Normal Quality AI Model** — `Hy-MT2-1.8B-Q4_K_M.gguf`
+    - **High Quality AI Model** — `gemma-4-E4B-it-Q4_K_M.gguf`
   - **OpenAI** (Google AI Studio, cloud, free tier)
   - **Ollama** (local, no internet, `ollama pull qwen2.5:7b`)
 - Free Google translate fallback — no API key needed
@@ -29,10 +31,13 @@
 
 1. Open Settings (More → Settings)
 2. Default provider is **Local (GGUF)** — works offline with a `.gguf` model
-3. Optionally switch to:
+3. For Local provider, choose:
+   - **Normal Quality AI Model** — lighter, faster, lower hardware requirement
+   - **High Quality AI Model** — better output quality, needs a better GPU or runs slower on CPU
+4. Optionally switch to:
    - **OpenAI** — get [free API key](https://aistudio.google.com/apikey), paste it
    - **Ollama** — install [Ollama](https://ollama.com), run `ollama pull qwen2.5:7b`
-4. Save → Load video → click **Generate**
+5. Save → Load video → click **Generate**
 
 No key? Google translate fallback works for free (slower, lower quality).
 
@@ -121,11 +126,23 @@ requirements-local.txt:
 | `OPENAI_API_KEY` | (none) | API key (only needed for OpenAI provider) |
 | `OPENAI_MODEL` | (GGUF path) | Model name (OpenAI/Ollama only) |
 | `OPENAI_BASE_URL` | (empty for local) | API endpoint URL (OpenAI/Ollama only) |
+| `LOCAL_TRANSLATOR_MODEL_TIER` | `normal` | Local GGUF quality tier: `normal` (Hy-MT2) or `high` (Gemma 4) |
 | `LOCAL_TRANSLATOR_MODEL_PATH` | `models/ai/Hy-MT2...` | GGUF model path (local provider) |
 | `CAPCAP_WHISPER_DEVICE` | (auto-detect) | Force `cpu` to avoid CUDA conflicts |
 | `CAPCAP_QUIET` | `false` | Set `true` to suppress server logs |
 | `CAPCAP_RUNTIME_PROFILE` | `local` | `local` or `remote` |
 | `CAPCAP_REMOTE_API_URL` | `http://127.0.0.1:8765` | Remote API address (remote mode) |
+
+### Local AI Models
+
+- **Normal Quality AI Model**
+  - File: `models/ai/Hy-MT2-1.8B-Q4_K_M.gguf`
+  - Default option
+  - Faster and lighter
+- **High Quality AI Model**
+  - File: `models/ai/gemma-4-E4B-it-Q4_K_M.gguf`
+  - Download: [Gemma 4 GGUF](https://huggingface.co/Hacht/CapCapResource/blob/main/gemma-4-E4B-it-Q4_K_M.gguf)
+  - Better quality, but needs a better GPU or runs slower on CPU
 
 ## Run From Source
 

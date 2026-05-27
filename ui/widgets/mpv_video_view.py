@@ -132,6 +132,7 @@ class _BlurRegionOverlayWindow(QWidget):
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setMouseTracking(True)
         self._normalized_rect = QRectF(0.25, 0.2, 0.5, 0.22)
+        self._has_region = False
         self._drag_mode = ""
         self._drag_offset = QPointF()
         self._rect_on_press = QRectF()
@@ -147,8 +148,13 @@ class _BlurRegionOverlayWindow(QWidget):
 
     def set_editable(self, editable: bool):
         self._editable = bool(editable)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, not self._editable)
         self.setCursor(Qt.OpenHandCursor if self._editable else Qt.ArrowCursor)
         if self._editable:
+            if not self._has_region:
+                self._has_region = True
+                if callable(self._on_region_changed):
+                    self._on_region_changed()
             self.sync_to_view()
         else:
             self.hide()
@@ -157,14 +163,15 @@ class _BlurRegionOverlayWindow(QWidget):
     def clear_region(self):
         self.hide()
         self._drag_mode = ""
+        self._has_region = False
         self._target_view = None
         self.update()
 
     def has_region(self) -> bool:
-        return self.isVisible()
+        return self._has_region
 
     def sync_to_view(self):
-        if not self._editable or not self._target_view or not self._target_view.isVisible():
+        if not self._target_view or not self._target_view.isVisible() or not self._has_region:
             self.hide()
             return
         top_left = self._target_view.mapToGlobal(QPoint(0, 0))
@@ -319,6 +326,11 @@ class _BlurRegionOverlayWindow(QWidget):
             painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
             for handle_rect in self._handle_rects(rect).values():
                 painter.drawEllipse(handle_rect)
+        painter.setPen(QColor(110, 231, 214, 200))
+        font = painter.font()
+        font.setPixelSize(11)
+        painter.setFont(font)
+        painter.drawText(int(rect.left() + 10), int(rect.top() + 18), "BLUR")
 
 
 class MpvVideoView(QWidget):

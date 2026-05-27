@@ -1,5 +1,6 @@
 import hashlib
 import os
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -583,23 +584,32 @@ class VoiceSamplePreviewWorker(QThread):
             wav_path = os.path.join(temp_dir, f"voice_sample_{cache_key}.wav")
             base_wav_path = os.path.join(temp_dir, f"voice_sample_{cache_key}_base.wav")
             if abs(float(self.voice_speed) - 1.0) >= 0.02:
-                if os.path.exists(wav_path):
-                    self.finished.emit(wav_path, "")
+                if self._is_preview_audio_usable(wav_path):
+                    self.finished.emit(self._normalize_preview_wav(wav_path, temp_dir=temp_dir), "")
                     return
+                self._remove_if_exists(wav_path)
             elif os.path.exists(base_wav_path):
-                self.finished.emit(base_wav_path, "")
-                return
+                if self._is_preview_audio_usable(base_wav_path):
+                    self.finished.emit(self._normalize_preview_wav(base_wav_path, temp_dir=temp_dir), "")
+                    return
+                self._remove_if_exists(base_wav_path)
             engine = EngineRuntime()
+            staging_base_wav_path = os.path.join(temp_dir, f"voice_sample_{cache_key}_base_work.wav")
+            self._remove_if_exists(staging_base_wav_path)
             engine.synthesize_segment(
                 text=self.text,
-                wav_path=base_wav_path,
+                wav_path=staging_base_wav_path,
                 voice=self.voice_name,
                 speed=1.0,
                 tmp_dir=temp_dir,
                 on_progress=self.progress.emit,
             )
+            if not self._is_preview_audio_usable(staging_base_wav_path):
+                raise RuntimeError("Generated voice preview audio is empty or invalid.")
+            os.replace(staging_base_wav_path, base_wav_path)
             speed_value = float(self.voice_speed)
             if abs(speed_value - 1.0) >= 0.02:
+                self._remove_if_exists(wav_path)
                 output = engine.change_wav_speed(
                     input_wav_path=base_wav_path,
                     output_wav_path=wav_path,
@@ -607,10 +617,75 @@ class VoiceSamplePreviewWorker(QThread):
                 )
             else:
                 output = base_wav_path
+            if not self._is_preview_audio_usable(output):
+                raise RuntimeError("Voice preview audio could not be prepared for playback.")
+            output = self._normalize_preview_wav(output, temp_dir=temp_dir)
+            if not self._is_preview_audio_usable(output):
+                raise RuntimeError("Normalized voice preview audio is empty or invalid.")
             self.finished.emit(output, "")
         except Exception as exc:
             details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
             self.finished.emit("", details or str(exc))
+
+    def _normalize_preview_wav(self, wav_path: str, *, temp_dir: str) -> str:
+        candidate = str(wav_path or "").strip()
+        if not candidate or not os.path.exists(candidate):
+            return candidate
+        try:
+            normalized_path = os.path.join(temp_dir, f"{Path(candidate).stem}_normalized.wav")
+            ffmpeg_path = Path(bin_path("ffmpeg", "ffmpeg.exe"))
+            if ffmpeg_path.exists():
+                cmd = [
+                    str(ffmpeg_path),
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    candidate,
+                    "-vn",
+                    "-c:a",
+                    "pcm_s16le",
+                    "-ar",
+                    "16000",
+                    "-ac",
+                    "1",
+                    normalized_path,
+                ]
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                if proc.returncode == 0 and self._is_preview_audio_usable(normalized_path):
+                    return normalized_path
+        except Exception:
+            pass
+        return candidate
+
+    def _is_preview_audio_usable(self, audio_path: str) -> bool:
+        candidate = str(audio_path or "").strip()
+        if not candidate or not os.path.exists(candidate):
+            return False
+        if os.path.getsize(candidate) <= 44:
+            return False
+        ffprobe_path = Path(bin_path("ffmpeg", "ffprobe.exe"))
+        if not ffprobe_path.exists():
+            return True
+        try:
+            proc = subprocess.run(
+                [str(ffprobe_path), "-v", "error", "-show_streams", candidate],
+                capture_output=True,
+                text=True,
+            )
+            return proc.returncode == 0 and bool((proc.stdout or "").strip())
+        except Exception:
+            return False
+
+    def _remove_if_exists(self, path: str) -> None:
+        candidate = str(path or "").strip()
+        if not candidate:
+            return
+        try:
+            if os.path.exists(candidate):
+                os.remove(candidate)
+        except Exception:
+            pass
 
 
 

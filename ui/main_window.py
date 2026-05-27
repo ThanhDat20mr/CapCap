@@ -549,6 +549,8 @@ class VideoTranslatorGUI(QMainWindow):
         self._timeline_video_thumbnails = []
         self._pending_timeline_waveform_refresh = False
         self._pending_timeline_thumbnail_refresh = False
+        self._subtitle_custom_style_state = None
+        self._subtitle_preset_apply_in_progress = False
         self._video_filter_ui_sync = False
         self._video_filter_preset_key = "original"
         self._video_filter_intensity = 75
@@ -570,6 +572,9 @@ class VideoTranslatorGUI(QMainWindow):
         }
         self._pending_video_filter_preview = False
         self._filter_thumbnail_visible = False
+        self._filter_preview_blur_was_checked = False
+        self._filter_preview_ocr_was_editable = False
+        self._suspend_ocr_overlay = False
         self._play_video_filter_preview_when_ready = False
         self._filter_thumbnail_target_height = 320
         self._video_filter_preview_dirty = False
@@ -667,21 +672,23 @@ class VideoTranslatorGUI(QMainWindow):
             },
             "custom": {
                 "label": "Custom",
-                "font_name": self.subtitle_font_combo.currentText().strip() or "Arial",
-                "font_size": int(self.subtitle_font_size_spin.value()),
-                "font_color": self.subtitle_color_hex,
-                "highlight_color": "#00E5FF",
+                "font_name": "Segoe UI",
+                "font_size": 60,
+                "font_color": "#FFFFFF",
+                "highlight_color": "#FFD400",
                 "outline_color": "#000000",
-                "outline_width": 3 if bool(getattr(self, "subtitle_outline_cb", None) and self.subtitle_outline_cb.isChecked()) else 0,
+                "outline_width": 3,
                 "shadow_color": "#000000",
                 "shadow_depth": 1,
                 "shadow_alpha": 0.3,
-                "background_box": bool(self.subtitle_background_cb.isChecked()),
-                "background_color": getattr(self, "subtitle_background_color_hex", "#000000"),
-                "background_alpha": float(self.subtitle_bg_alpha_spin.value()) if hasattr(self, "subtitle_bg_alpha_spin") else 0.6,
-                "animation": self.subtitle_animation_combo.currentText().strip() or "Static",
-                "bold": bool(self.subtitle_bold_cb.isChecked()),
-                "summary": "Fully manual preset. Font, size, color, animation and background follow your own selections.",
+                "background_box": False,
+                "background_color": "#000000",
+                "background_alpha": 0.6,
+                "animation": "Pop In",
+                "bold": True,
+                "auto_keyword_highlight": False,
+                "highlight_mode": "Auto",
+                "summary": "Your editable working preset. Manual style changes can switch here automatically.",
             },
         }
         return presets.get(preset, presets["tiktok"]).copy()
@@ -854,6 +861,8 @@ class VideoTranslatorGUI(QMainWindow):
             return free_value
         if free_value and free_value in getattr(self, "voice_catalog_map", {}):
             return free_value
+        if "ngochuyen" in getattr(self, "voice_catalog_map", {}):
+            return "ngochuyen"
         if "vi_VN-vais1000-medium" in getattr(self, "voice_catalog_map", {}):
             return "vi_VN-vais1000-medium"
         if hasattr(self, "free_voice_combo") and self.free_voice_combo.count() > 0:
@@ -863,7 +872,7 @@ class VideoTranslatorGUI(QMainWindow):
             fallback_entry_id = str(self.free_voice_combo.itemData(0, self.VOICE_ENTRY_ID_ROLE) or "").strip()
             if fallback_entry_id:
                 return fallback_entry_id
-        return "vi_VN-vais1000-medium"
+        return "ngochuyen"
 
     def on_voice_engine_changed(self):
         self._voiceover_force_refresh = True
@@ -1150,6 +1159,8 @@ class VideoTranslatorGUI(QMainWindow):
             self.free_voice_combo.setCurrentIndex(0)
         if previous_free:
             self.set_voice_combo_value(self.free_voice_combo, previous_free)
+        elif "ngochuyen" in self.voice_catalog_map:
+            self.set_voice_combo_value(self.free_voice_combo, "ngochuyen")
         elif "vi_VN-vais1000-medium" in self.voice_catalog_map:
             self.set_voice_combo_value(self.free_voice_combo, "vi_VN-vais1000-medium")
         if not self._voice_signals_bound:
@@ -2386,7 +2397,32 @@ class VideoTranslatorGUI(QMainWindow):
             self.subtitle_custom_y_label.setVisible(is_custom)
         if hasattr(self, "subtitle_custom_y_spin"):
             self.subtitle_custom_y_spin.setVisible(is_custom)
+        if hasattr(self, "subtitle_bottom_offset_label"):
+            self.subtitle_bottom_offset_label.setVisible(not is_custom)
+        if hasattr(self, "subtitle_bottom_offset_spin"):
+            self.subtitle_bottom_offset_spin.setVisible(not is_custom)
         self.update_subtitle_preview_style()
+
+    def get_subtitle_position_config(self) -> dict:
+        alignment_map = {
+            "Bottom Left": 1,
+            "Bottom Center": 2,
+            "Bottom": 2,
+            "Bottom Right": 3,
+            "Center": 5,
+            "Top Center": 8,
+            "Top": 8,
+        }
+        return {
+            "position_mode": "custom" if self.is_custom_subtitle_position_mode() else "anchor",
+            "alignment_label": self.subtitle_align_combo.currentText().strip(),
+            "alignment": alignment_map.get(self.subtitle_align_combo.currentText(), 2),
+            "margin_v": int(self.subtitle_bottom_offset_spin.value()),
+            "x_offset": int(self.subtitle_x_offset_spin.value()),
+            "custom_position_enabled": self.is_custom_subtitle_position_mode(),
+            "custom_position_x": int(self.subtitle_custom_x_spin.value()),
+            "custom_position_y": int(self.subtitle_custom_y_spin.value()),
+        }
 
     def _saved_subtitle_style_payload(self) -> dict:
         return {
@@ -2395,10 +2431,6 @@ class VideoTranslatorGUI(QMainWindow):
             "size": int(self.subtitle_font_size_spin.value()),
             "color": self.subtitle_color_hex,
             "background_color": getattr(self, "subtitle_background_color_hex", "#000000"),
-            "position_mode": str(self.subtitle_position_mode_combo.currentData() or "anchor"),
-            "position": self.subtitle_align_combo.currentText().strip(),
-            "custom_x": int(self.subtitle_custom_x_spin.value()),
-            "custom_y": int(self.subtitle_custom_y_spin.value()),
             "animation": self.subtitle_animation_combo.currentText().strip(),
             "animation_time": float(self.subtitle_animation_time_spin.value()),
             "karaoke_timing_mode": str(self.subtitle_karaoke_timing_combo.currentData() or "vietnamese"),
@@ -2410,6 +2442,75 @@ class VideoTranslatorGUI(QMainWindow):
             "highlight_color": self.subtitle_highlight_color_combo.currentText().strip(),
             "highlight_mode": self.subtitle_highlight_mode_combo.currentText().strip(),
         }
+
+    def _current_subtitle_style_controls_state(self) -> dict:
+        return {
+            "font": self.subtitle_font_combo.currentText().strip(),
+            "size": int(self.subtitle_font_size_spin.value()),
+            "color": self.subtitle_color_hex,
+            "background_color": getattr(self, "subtitle_background_color_hex", "#000000"),
+            "animation": self.subtitle_animation_combo.currentText().strip(),
+            "animation_time": float(self.subtitle_animation_time_spin.value()),
+            "karaoke_timing_mode": str(self.subtitle_karaoke_timing_combo.currentData() or "vietnamese"),
+            "background": bool(self.subtitle_background_cb.isChecked()),
+            "outline": bool(getattr(self, "subtitle_outline_cb", None) and self.subtitle_outline_cb.isChecked()),
+            "background_alpha": float(self.subtitle_bg_alpha_spin.value()) if hasattr(self, "subtitle_bg_alpha_spin") else 0.6,
+            "bold": bool(self.subtitle_bold_cb.isChecked()),
+            "auto_keyword_highlight": bool(self.subtitle_keyword_highlight_cb.isChecked()),
+            "highlight_color": self.subtitle_highlight_color_combo.currentText().strip(),
+            "highlight_mode": self.subtitle_highlight_mode_combo.currentText().strip(),
+            "single_line": bool(getattr(self, "subtitle_single_line_cb", None) and self.subtitle_single_line_cb.isChecked()),
+        }
+
+    def _apply_subtitle_style_controls_state(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            return
+        self.subtitle_font_combo.setCurrentText(str(state.get("font", self.subtitle_font_combo.currentText())))
+        self.subtitle_font_size_spin.setValue(int(state.get("size", self.subtitle_font_size_spin.value())))
+        self.subtitle_color_hex = str(state.get("color", self.subtitle_color_hex)).upper()
+        self.subtitle_color_btn.setText(self.subtitle_color_hex)
+        self.subtitle_background_color_hex = str(
+            state.get("background_color", getattr(self, "subtitle_background_color_hex", "#000000"))
+        ).upper()
+        if hasattr(self, "subtitle_background_color_btn"):
+            self.subtitle_background_color_btn.setText(self.subtitle_background_color_hex)
+        self.subtitle_animation_combo.setCurrentText(str(state.get("animation", self.subtitle_animation_combo.currentText())))
+        self.subtitle_animation_time_spin.setValue(float(state.get("animation_time", self.subtitle_animation_time_spin.value())))
+        karaoke_mode = str(state.get("karaoke_timing_mode", self.subtitle_karaoke_timing_combo.currentData() or "vietnamese"))
+        karaoke_index = self.subtitle_karaoke_timing_combo.findData(karaoke_mode)
+        if karaoke_index >= 0:
+            self.subtitle_karaoke_timing_combo.setCurrentIndex(karaoke_index)
+        self.subtitle_background_cb.setChecked(bool(state.get("background", self.subtitle_background_cb.isChecked())))
+        if hasattr(self, "subtitle_outline_cb"):
+            self.subtitle_outline_cb.setChecked(bool(state.get("outline", self.subtitle_outline_cb.isChecked())))
+        if hasattr(self, "subtitle_bg_alpha_spin"):
+            self.subtitle_bg_alpha_spin.setValue(float(state.get("background_alpha", self.subtitle_bg_alpha_spin.value())))
+        self.subtitle_bold_cb.setChecked(bool(state.get("bold", self.subtitle_bold_cb.isChecked())))
+        self.subtitle_keyword_highlight_cb.setChecked(
+            bool(state.get("auto_keyword_highlight", self.subtitle_keyword_highlight_cb.isChecked()))
+        )
+        self.subtitle_highlight_color_combo.setCurrentText(
+            str(state.get("highlight_color", self.subtitle_highlight_color_combo.currentText()))
+        )
+        self.subtitle_highlight_mode_combo.setCurrentText(
+            str(state.get("highlight_mode", self.subtitle_highlight_mode_combo.currentText()))
+        )
+        if hasattr(self, "subtitle_single_line_cb"):
+            self.subtitle_single_line_cb.setChecked(bool(state.get("single_line", self.subtitle_single_line_cb.isChecked())))
+
+    def _capture_subtitle_custom_style_state(self) -> None:
+        self._subtitle_custom_style_state = self._current_subtitle_style_controls_state()
+
+    def on_subtitle_style_control_edited(self, *_args):
+        if getattr(self, "_subtitle_preset_apply_in_progress", False):
+            return
+        self._capture_subtitle_custom_style_state()
+        custom_radio = getattr(self, "subtitle_preset_custom_radio", None)
+        if custom_radio is not None and not custom_radio.isChecked():
+            custom_radio.blockSignals(True)
+            custom_radio.setChecked(True)
+            custom_radio.blockSignals(False)
+            self.on_subtitle_preset_changed()
 
     def _read_saved_subtitle_style_presets(self) -> dict:
         raw_value = self.settings.value("saved_subtitle_styles", "{}")
@@ -2458,7 +2559,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.subtitle_preset_youtube_radio.setChecked(True)
         elif key == "minimal":
             self.subtitle_preset_minimal_radio.setChecked(True)
-        elif key == "custom":
+        elif key == "custom" and getattr(self, "subtitle_preset_custom_radio", None):
             self.subtitle_preset_custom_radio.setChecked(True)
         else:
             self.subtitle_preset_tiktok_radio.setChecked(True)
@@ -2470,13 +2571,6 @@ class VideoTranslatorGUI(QMainWindow):
         self.subtitle_background_color_hex = str(preset.get("background_color", getattr(self, "subtitle_background_color_hex", "#000000"))).upper()
         if hasattr(self, "subtitle_background_color_btn"):
             self.subtitle_background_color_btn.setText(self.subtitle_background_color_hex)
-        position_mode = str(preset.get("position_mode", self.subtitle_position_mode_combo.currentData() or "anchor")).strip().lower()
-        position_mode_index = self.subtitle_position_mode_combo.findData(position_mode)
-        if position_mode_index >= 0:
-            self.subtitle_position_mode_combo.setCurrentIndex(position_mode_index)
-        self.subtitle_align_combo.setCurrentText(str(preset.get("position", self.subtitle_align_combo.currentText())))
-        self.subtitle_custom_x_spin.setValue(int(preset.get("custom_x", self.subtitle_custom_x_spin.value())))
-        self.subtitle_custom_y_spin.setValue(int(preset.get("custom_y", self.subtitle_custom_y_spin.value())))
         self.subtitle_animation_combo.setCurrentText(str(preset.get("animation", self.subtitle_animation_combo.currentText())))
         self.subtitle_animation_time_spin.setValue(float(preset.get("animation_time", self.subtitle_animation_time_spin.value())))
         karaoke_mode = str(preset.get("karaoke_timing_mode", self.subtitle_karaoke_timing_combo.currentData() or "vietnamese"))
@@ -2492,6 +2586,7 @@ class VideoTranslatorGUI(QMainWindow):
         self.subtitle_keyword_highlight_cb.setChecked(bool(preset.get("auto_keyword_highlight", self.subtitle_keyword_highlight_cb.isChecked())))
         self.subtitle_highlight_color_combo.setCurrentText(str(preset.get("highlight_color", self.subtitle_highlight_color_combo.currentText())))
         self.subtitle_highlight_mode_combo.setCurrentText(str(preset.get("highlight_mode", self.subtitle_highlight_mode_combo.currentText())))
+        self._capture_subtitle_custom_style_state()
         self.on_subtitle_preset_changed()
 
     def ensure_current_project(self):
@@ -2680,6 +2775,7 @@ class VideoTranslatorGUI(QMainWindow):
         if self.current_translated_segments or self.current_segments:
             self.apply_segments_to_timeline()
             self.set_selected_segment_index(0, sync_ui=True)
+        self._update_ocr_overlay()
 
     def resolve_background_audio_path(self) -> str:
         manual_candidate = self.bg_music_edit.text().strip() if hasattr(self, "bg_music_edit") else ""
@@ -2782,7 +2878,15 @@ class VideoTranslatorGUI(QMainWindow):
         update_frame_preview_thumbnail_impl(self, image_path, QPixmap, Qt)
 
     def show_filter_thumbnail_preview(self, image_path: str):
+        already_visible = bool(getattr(self, "_filter_thumbnail_visible", False))
         self._filter_thumbnail_visible = True
+        if already_visible:
+            self.update_frame_preview_thumbnail(image_path)
+            if hasattr(self, "frame_preview_badge_label"):
+                self._position_frame_preview_badge()
+                self.frame_preview_badge_label.show()
+            return
+        self._suspend_preview_region_tools_for_filter()
         if hasattr(self, "preview_context_label"):
             self.preview_context_label.hide()
         if hasattr(self, "frame_preview_status_label"):
@@ -2793,9 +2897,6 @@ class VideoTranslatorGUI(QMainWindow):
                 live_height = int(self.video_view.height() or 0)
                 if live_height > 0:
                     target_height = max(320, live_height)
-            current_height = int(getattr(self.frame_preview_image_label, "height", lambda: 0)() or 0)
-            if current_height > 0:
-                target_height = max(target_height, current_height)
             self._filter_thumbnail_target_height = target_height
             if hasattr(self.frame_preview_image_label, "setMinimumHeight"):
                 self.frame_preview_image_label.setMinimumHeight(target_height)
@@ -2804,20 +2905,20 @@ class VideoTranslatorGUI(QMainWindow):
             self.frame_preview_image_label.show()
         if hasattr(self, "video_view"):
             self.video_view.hide()
+        self._force_hide_ocr_overlay_for_filter()
         self.update_frame_preview_thumbnail(image_path)
         if hasattr(self, "frame_preview_badge_label"):
             self._position_frame_preview_badge()
             self.frame_preview_badge_label.show()
+        QTimer.singleShot(0, self._force_hide_ocr_overlay_for_filter)
 
     def hide_filter_thumbnail_preview(self):
         self._filter_thumbnail_visible = False
         if hasattr(self, "frame_preview_badge_label"):
             self.frame_preview_badge_label.hide()
-        if hasattr(self, "frame_preview_image_label") and self.frame_preview_image_label is not None:
-            current_height = int(getattr(self.frame_preview_image_label, "height", lambda: 0)() or 0)
-            if current_height > 0:
-                self._filter_thumbnail_target_height = max(320, current_height)
         if hasattr(self, "frame_preview_image_label"):
+            if hasattr(self.frame_preview_image_label, "setMinimumHeight"):
+                self.frame_preview_image_label.setMinimumHeight(0)
             if hasattr(self.frame_preview_image_label, "setMaximumHeight"):
                 self.frame_preview_image_label.setMaximumHeight(16777215)
             if hasattr(self.frame_preview_image_label, "clear_frame_image"):
@@ -2829,6 +2930,48 @@ class VideoTranslatorGUI(QMainWindow):
             self.preview_context_label.hide()
         if hasattr(self, "video_view"):
             self.video_view.show()
+        self._restore_preview_region_tools_after_filter()
+
+    def _suspend_preview_region_tools_for_filter(self):
+        self._suspend_ocr_overlay = True
+        self._filter_preview_blur_was_checked = bool(
+            hasattr(self, "blur_area_btn") and self.blur_area_btn.isChecked()
+        )
+        overlay = getattr(self, "ocr_region_overlay", None)
+        self._filter_preview_ocr_was_editable = bool(getattr(overlay, "_editable", False)) if overlay is not None else False
+
+        if hasattr(self, "blur_area_btn"):
+            self.blur_area_btn.setEnabled(False)
+        if hasattr(self, "video_view"):
+            self.video_view.set_blur_edit_enabled(False)
+        if overlay is not None:
+            overlay.set_editable(False)
+            overlay.hide()
+
+    def _force_hide_ocr_overlay_for_filter(self):
+        if not bool(getattr(self, "_filter_thumbnail_visible", False)):
+            return
+        overlay = getattr(self, "ocr_region_overlay", None)
+        if overlay is not None:
+            overlay.set_editable(False)
+            overlay.hide()
+
+    def _restore_preview_region_tools_after_filter(self):
+        self._suspend_ocr_overlay = False
+        if hasattr(self, "blur_area_btn"):
+            self.blur_area_btn.setEnabled(True)
+        if hasattr(self, "video_view") and hasattr(self, "blur_area_btn"):
+            self.video_view.set_blur_edit_enabled(bool(self.blur_area_btn.isChecked()))
+
+        overlay = getattr(self, "ocr_region_overlay", None)
+        if overlay is not None:
+            self._update_ocr_overlay()
+            if (
+                bool(getattr(self, "_filter_preview_ocr_was_editable", False))
+                and os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr"
+            ):
+                overlay.set_editable(True)
+                overlay.sync_to_view()
 
     def _position_frame_preview_badge(self):
         badge = getattr(self, "frame_preview_badge_label", None)
@@ -2864,13 +3007,12 @@ class VideoTranslatorGUI(QMainWindow):
         is_ocr = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr"
         btn = getattr(self, "ocr_region_btn", None)
         if btn:
-            btn.setVisible(is_ocr)
+            btn.hide()
         if not is_ocr:
             overlay.hide()
             overlay.set_editable(False)
-            if btn:
-                btn.setChecked(False)
         else:
+            overlay.set_editable(False)
             overlay.sync_to_view()
 
     def cleanup_file_if_exists(self, path: str):
@@ -3478,6 +3620,7 @@ class VideoTranslatorGUI(QMainWindow):
             return
         self.subtitle_color_hex = color.name().upper()
         self.subtitle_color_btn.setText(self.subtitle_color_hex)
+        self.on_subtitle_style_control_edited()
         self.update_subtitle_preview_style()
 
     def choose_subtitle_background_color(self):
@@ -3488,6 +3631,7 @@ class VideoTranslatorGUI(QMainWindow):
         self.subtitle_background_color_hex = color.name().upper()
         if hasattr(self, "subtitle_background_color_btn"):
             self.subtitle_background_color_btn.setText(self.subtitle_background_color_hex)
+        self.on_subtitle_style_control_edited()
         self.update_subtitle_preview_style()
 
     def update_subtitle_preview_style(self):
@@ -3507,11 +3651,7 @@ class VideoTranslatorGUI(QMainWindow):
         preset = self.get_subtitle_preset_config()
         export_font_size = int(self.subtitle_font_size_spin.value())
         preview_font_size = max(10, int(round(export_font_size * (preview_h / source_h))))
-        font_name = (
-            self.subtitle_font_combo.currentText().strip()
-            if self.get_selected_subtitle_preset() == "custom"
-            else preset.get("font_name", "Segoe UI")
-        )
+        font_name = self.subtitle_font_combo.currentText().strip() or preset.get("font_name", "Segoe UI")
         bg_alpha = float(preset.get("background_alpha", 0.0))
         bg_color = QColor(preset.get("background_color", "#000000"))
         bg_color.setAlpha(max(0, min(255, int(round(bg_alpha * 255.0)))))
@@ -3521,17 +3661,18 @@ class VideoTranslatorGUI(QMainWindow):
             font_color=QColor(self.subtitle_color_hex),
             outline_width=preset.get("outline_width", 2),
             outline_color=QColor(preset.get("outline_color", "#000000")),
-            background_box=bool(self.subtitle_background_cb.isChecked() if self.get_selected_subtitle_preset() == "custom" else preset.get("background_box", False)),
+            background_box=bool(self.subtitle_background_cb.isChecked()),
             background_color=bg_color,
             single_line=bool(getattr(self, "subtitle_single_line_cb", None) and self.subtitle_single_line_cb.isChecked()),
         )
-        item.set_alignment(self.subtitle_align_combo.currentText())
+        position = self.get_subtitle_position_config()
+        item.set_alignment(position.get("alignment_label", "Bottom"))
         item.set_positioning(
-            x_offset=int(self.subtitle_x_offset_spin.value()),
-            bottom_offset=int(self.subtitle_bottom_offset_spin.value()),
-            custom_position_enabled=self.is_custom_subtitle_position_mode(),
-            custom_x_percent=int(self.subtitle_custom_x_spin.value()),
-            custom_y_percent=int(self.subtitle_custom_y_spin.value()),
+            x_offset=int(position.get("x_offset", 0)),
+            bottom_offset=int(position.get("margin_v", 30)),
+            custom_position_enabled=bool(position.get("custom_position_enabled", False)),
+            custom_x_percent=int(position.get("custom_position_x", 50)),
+            custom_y_percent=int(position.get("custom_position_y", 86)),
         )
         self.video_view.reposition_subtitle()
         self.sync_live_subtitle_preview()
@@ -3564,25 +3705,12 @@ class VideoTranslatorGUI(QMainWindow):
             self._single_line_split_cache = split
 
     def get_subtitle_export_style(self, segments=None):
-        alignment_map = {
-            "Bottom Left": 1,
-            "Bottom Center": 2,
-            "Bottom": 2,
-            "Bottom Right": 3,
-            "Center": 5,
-            "Top Center": 8,
-            "Top": 8,
-        }
         preset = self.get_subtitle_preset_config()
-        is_custom = self.get_selected_subtitle_preset() == "custom"
         export_font_size = max(1, int(round(int(self.subtitle_font_size_spin.value()) * self.subtitle_export_font_scale)))
         style_segments = segments if segments is not None else self.get_active_segments()
+        position = self.get_subtitle_position_config()
         return {
-            "font_name": (
-                self.subtitle_font_combo.currentText().strip()
-                if is_custom
-                else preset.get("font_name", "Arial")
-            ) or preset.get("font_name", "Arial"),
+            "font_name": self.subtitle_font_combo.currentText().strip() or preset.get("font_name", "Arial"),
             "font_size": export_font_size,
             "font_color": self._hex_to_ass_color(self.subtitle_color_hex),
             "highlight_color": self._hex_to_ass_color(self._highlight_color_hex()),
@@ -3593,28 +3721,28 @@ class VideoTranslatorGUI(QMainWindow):
             "shadow_alpha": float(preset.get("shadow_alpha", 0.0)),
             "background_color": self._hex_to_ass_color(preset.get("background_color", "#000000")),
             "background_alpha": float(preset.get("background_alpha", 0.0)),
-            "animation": (
-                self.subtitle_animation_combo.currentText().strip()
-                if is_custom
-                else preset.get("animation", "Static")
-            ) or preset.get("animation", "Static"),
+            "animation": self.subtitle_animation_combo.currentText().strip() or preset.get("animation", "Static"),
             "animation_duration": float(self.subtitle_animation_time_spin.value()),
             "karaoke_timing_mode": str(self.subtitle_karaoke_timing_combo.currentData() or "vietnamese"),
-            "position_mode": "custom" if self.is_custom_subtitle_position_mode() else "anchor",
-            "alignment": alignment_map.get(self.subtitle_align_combo.currentText(), 2),
-            "margin_v": int(self.subtitle_bottom_offset_spin.value()),
-            "custom_position_enabled": self.is_custom_subtitle_position_mode(),
-            "custom_position_x": int(self.subtitle_custom_x_spin.value()),
-            "custom_position_y": int(self.subtitle_custom_y_spin.value()),
-            "background_box": bool(self.subtitle_background_cb.isChecked() if is_custom else preset.get("background_box", False)),
-            "bold": bool(self.subtitle_bold_cb.isChecked() if is_custom else preset.get("bold", False)),
+            "position_mode": str(position.get("position_mode", "anchor")),
+            "alignment": int(position.get("alignment", 2)),
+            "margin_v": int(position.get("margin_v", 30)),
+            "custom_position_enabled": bool(position.get("custom_position_enabled", False)),
+            "custom_position_x": int(position.get("custom_position_x", 50)),
+            "custom_position_y": int(position.get("custom_position_y", 86)),
+            "background_box": bool(self.subtitle_background_cb.isChecked()),
+            "bold": bool(self.subtitle_bold_cb.isChecked()),
             "preset_key": self.get_selected_subtitle_preset(),
             "auto_keyword_highlight": bool(self.subtitle_keyword_highlight_cb.isChecked())
             and self.subtitle_highlight_mode_combo.currentText().strip() in ("Auto", "Auto + Manual")
             and not any(seg.get("auto_highlights") for seg in (style_segments or [])),
             "manual_highlights": self._build_render_highlight_lists(style_segments or []),
             "word_timings": [list(seg.get("words", [])) for seg in (style_segments or [])],
-            "blur_region": self.video_view.get_blur_region_normalized() if hasattr(self, "video_view") else None,
+            "blur_region": (
+                self.video_view.get_blur_region_normalized()
+                if hasattr(self, "video_view") and hasattr(self, "blur_area_btn") and self.blur_area_btn.isChecked()
+                else None
+            ),
             "render_subtitles": False,
         }
 
@@ -3645,43 +3773,44 @@ class VideoTranslatorGUI(QMainWindow):
 
     def on_subtitle_preset_changed(self):
         preset = self.get_subtitle_preset_config()
-        is_custom = self.get_selected_subtitle_preset() == "custom"
-        if not is_custom:
-            self.subtitle_font_combo.setCurrentText(preset.get("font_name", "Arial"))
-            self.subtitle_animation_combo.setCurrentText(preset.get("animation", "Static"))
-            self.subtitle_background_cb.setChecked(bool(preset.get("background_box", False)))
-            if hasattr(self, "subtitle_outline_cb"):
-                self.subtitle_outline_cb.setChecked(bool(preset.get("outline_width", 0) > 0))
-            if hasattr(self, "subtitle_bg_alpha_spin"):
-                self.subtitle_bg_alpha_spin.setValue(float(preset.get("background_alpha", self.subtitle_bg_alpha_spin.value())))
-            self.subtitle_bold_cb.setChecked(bool(preset.get("bold", False)))
-            if hasattr(self, "subtitle_keyword_highlight_cb"):
-                self.subtitle_keyword_highlight_cb.setChecked(bool(preset.get("auto_keyword_highlight", False)))
-            if hasattr(self, "subtitle_highlight_color_combo"):
-                color_name = "Yellow" if preset.get("highlight_color", "").upper() == "#FFD400" else "Cyan"
-                self.subtitle_highlight_color_combo.setCurrentText(color_name)
-            if hasattr(self, "subtitle_highlight_mode_combo"):
-                self.subtitle_highlight_mode_combo.setCurrentText(str(preset.get("highlight_mode", "Auto")))
-        self.subtitle_font_combo.setEnabled(is_custom)
-        self.subtitle_animation_combo.setEnabled(is_custom)
-        self.subtitle_karaoke_timing_combo.setEnabled(is_custom)
-        self.subtitle_background_cb.setEnabled(is_custom)
-        if hasattr(self, "subtitle_outline_cb"):
-            self.subtitle_outline_cb.setEnabled(is_custom)
-        if hasattr(self, "subtitle_bg_alpha_spin"):
-            self.subtitle_bg_alpha_spin.setEnabled(is_custom)
-        self.subtitle_bold_cb.setEnabled(is_custom)
+        selected = self.get_selected_subtitle_preset()
+        self._subtitle_preset_apply_in_progress = True
+        try:
+            if selected == "custom":
+                if self._subtitle_custom_style_state:
+                    self._apply_subtitle_style_controls_state(self._subtitle_custom_style_state)
+            else:
+                self.subtitle_font_combo.setCurrentText(preset.get("font_name", "Arial"))
+                self.subtitle_font_size_spin.setValue(int(preset.get("font_size", self.subtitle_font_size_spin.value())))
+                self.subtitle_animation_combo.setCurrentText(preset.get("animation", "Static"))
+                self.subtitle_background_cb.setChecked(bool(preset.get("background_box", False)))
+                if hasattr(self, "subtitle_outline_cb"):
+                    self.subtitle_outline_cb.setChecked(bool(preset.get("outline_width", 0) > 0))
+                if hasattr(self, "subtitle_bg_alpha_spin"):
+                    self.subtitle_bg_alpha_spin.setValue(float(preset.get("background_alpha", self.subtitle_bg_alpha_spin.value())))
+                self.subtitle_bold_cb.setChecked(bool(preset.get("bold", False)))
+                if hasattr(self, "subtitle_keyword_highlight_cb"):
+                    self.subtitle_keyword_highlight_cb.setChecked(bool(preset.get("auto_keyword_highlight", False)))
+                if hasattr(self, "subtitle_highlight_color_combo"):
+                    color_name = "Yellow" if preset.get("highlight_color", "").upper() == "#FFD400" else "Cyan"
+                    self.subtitle_highlight_color_combo.setCurrentText(color_name)
+                if hasattr(self, "subtitle_highlight_mode_combo"):
+                    self.subtitle_highlight_mode_combo.setCurrentText(str(preset.get("highlight_mode", "Auto")))
+        finally:
+            self._subtitle_preset_apply_in_progress = False
         if hasattr(self, "style_library_card"):
-            self.style_library_card.setVisible(is_custom)
+            self.style_library_card.setVisible(True)
         if hasattr(self, "highlight_card"):
-            self.highlight_card.setVisible(is_custom)
+            self.highlight_card.setVisible(True)
         if hasattr(self, "custom_title_card"):
-            self.custom_title_card.setVisible(is_custom)
+            self.custom_title_card.setVisible(True)
         if hasattr(self, "subtitle_preset_summary_label"):
             self.subtitle_preset_summary_label.setText(
                 f"{preset.get('label', 'Preset')}: {preset.get('summary', '')}"
             )
         self._update_animation_time_visibility()
+        if selected == "custom":
+            self._capture_subtitle_custom_style_state()
         self.on_subtitle_position_mode_changed()
 
     def _update_animation_time_visibility(self):
@@ -4744,6 +4873,8 @@ class VideoTranslatorGUI(QMainWindow):
     def play_audio_preview_file(self, audio_path: str):
         if not audio_path or not os.path.exists(audio_path):
             raise FileNotFoundError("Audio preview file was not found.")
+        if os.path.getsize(audio_path) <= 44:
+            raise RuntimeError("Audio preview file is empty or invalid.")
         if hasattr(self, "media_player") and self.media_player.is_playing():
             self.media_player.pause()
             if hasattr(self, "timeline"):
@@ -4800,25 +4931,24 @@ class VideoTranslatorGUI(QMainWindow):
             overlay.hide()
             overlay.set_editable(False)
             self.ocr_region_btn.setStyleSheet("QPushButton { color: #6ee7d6; font-weight: bold; font-size: 10px; padding: 0; }")
+            if hasattr(self, "video_view") and hasattr(self, "blur_area_btn") and self.blur_area_btn.isChecked():
+                self.video_view.set_blur_edit_enabled(True)
             return
         blur_btn = getattr(self, "blur_area_btn", None)
         if blur_btn and blur_btn.isChecked():
-            blur_btn.blockSignals(True)
-            blur_btn.setChecked(False)
-            blur_btn.blockSignals(False)
             self.video_view.set_blur_edit_enabled(False)
-            if hasattr(self, "media_player") and hasattr(self.media_player, "clear_blur_region"):
-                self.media_player.clear_blur_region()
-            self.apply_preview_blur_region()
-        overlay.set_editable(False)
+        overlay.set_editable(True)
         overlay.sync_to_view()
-        self.ocr_region_btn.setStyleSheet("QPushButton { color: #6ee7d6; font-weight: bold; font-size: 10px; padding: 0; }")
+        self.apply_preview_blur_region()
+        self.log("[OCR Region] drag inside the video preview to move or resize the OCR crop.")
 
     def apply_preview_blur_region(self):
         if not hasattr(self, "media_player") or not hasattr(self, "video_view"):
             return
-        if hasattr(self, "blur_area_btn") and self.blur_area_btn.isChecked():
-            self.media_player.set_blur_region(self.video_view.get_blur_region_normalized())
+        blur_enabled = bool(hasattr(self, "blur_area_btn") and self.blur_area_btn.isChecked())
+        blur_region = self.video_view.get_blur_region_normalized() if hasattr(self.video_view, "get_blur_region_normalized") else None
+        if blur_enabled and blur_region:
+            self.media_player.set_blur_region(blur_region)
         else:
             self.media_player.clear_blur_region()
 
@@ -5592,8 +5722,7 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "blur_area_btn"):
             self.blur_area_btn.setEnabled(v_ok)
         if hasattr(self, "ocr_region_btn"):
-            self.ocr_region_btn.setEnabled(v_ok and os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr")
-            self.ocr_region_btn.setVisible(os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr")
+            self.ocr_region_btn.hide()
         if hasattr(self, "free_voice_combo"):
             self.free_voice_combo.setEnabled(
                 generated_mode
@@ -5640,6 +5769,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.tabs.setTabEnabled(2, v_ok and mode in ("voice", "both"))
         self.update_workflow_availability()
         self.update_guidance_panel()
+        self._update_ocr_overlay()
 
     def dragEnterEvent(self, event):
         mime_data = event.mimeData()
@@ -6062,6 +6192,27 @@ class VideoTranslatorGUI(QMainWindow):
         provider_layout.addWidget(provider_combo, 1)
         layout.addLayout(provider_layout)
 
+        local_model_layout = QVBoxLayout()
+        local_model_label = QLabel("Local AI Model:")
+        local_model_combo = QComboBox(dialog)
+        local_model_combo.addItem("Normal Quality AI Model (Hy-MT2)", "normal")
+        local_model_combo.addItem("High Quality AI Model (Gemma 4)", "high")
+        current_local_model_tier = (os.getenv("LOCAL_TRANSLATOR_MODEL_TIER") or "").strip().lower()
+        current_local_model_path = (os.getenv("LOCAL_TRANSLATOR_MODEL_PATH") or "").strip().lower()
+        if current_local_model_tier not in {"normal", "high"}:
+            if current_local_model_path.endswith("gemma-4-e4b-it-q4_k_m.gguf"):
+                current_local_model_tier = "high"
+            else:
+                current_local_model_tier = "normal"
+        idx = local_model_combo.findData(current_local_model_tier)
+        if idx >= 0:
+            local_model_combo.setCurrentIndex(idx)
+        local_model_layout.addWidget(local_model_label)
+        local_model_layout.addWidget(local_model_combo)
+        local_model_label.setVisible(not remote_mode)
+        local_model_combo.setVisible(not remote_mode)
+        layout.addLayout(local_model_layout)
+
         key_section_widget = QWidget(dialog)
         key_layout = QVBoxLayout(key_section_widget)
         key_layout.setContentsMargins(0, 0, 0, 0)
@@ -6100,11 +6251,24 @@ class VideoTranslatorGUI(QMainWindow):
         provider_hint.setVisible(not remote_mode)
         layout.addWidget(provider_hint)
 
+        local_model_note = QLabel(
+            "Normal Quality uses Hy-MT2 and the current lightweight prompt. "
+            "High Quality uses Gemma 4 and the older richer prompt. "
+            "High Quality needs a better GPU or it will run slower on CPU."
+        )
+        local_model_note.setObjectName("helperLabel")
+        local_model_note.setWordWrap(True)
+        local_model_note.setVisible(not remote_mode)
+        layout.addWidget(local_model_note)
+
         def update_provider_fields():
             p = provider_combo.currentData()
             is_openai = p == "openai"
             is_local = p == "local"
             key_section_widget.setVisible(is_openai)
+            local_model_label.setVisible(not remote_mode and is_local)
+            local_model_combo.setVisible(not remote_mode and is_local)
+            local_model_note.setVisible(not remote_mode and is_local)
             base_url_label.setVisible(not remote_mode and not is_local)
             base_url_edit.setVisible(not remote_mode and not is_local)
             test_btn.setVisible(not remote_mode and not is_local)
@@ -6125,8 +6289,16 @@ class VideoTranslatorGUI(QMainWindow):
                 base_url_edit.setVisible(False)
                 base_url_label.setVisible(False)
                 key_section_widget.setVisible(False)
-                model_edit.setText(os.getenv("LOCAL_TRANSLATOR_MODEL_PATH", "models/ai/Hy-MT2-1.8B-Q4_K_M.gguf"))
-                provider_hint.setText("Select a GGUF model file. Download from Hugging Face.")
+                selected_tier = str(local_model_combo.currentData() or "normal").strip().lower()
+                if selected_tier == "high":
+                    model_edit.setText("models/ai/gemma-4-E4B-it-Q4_K_M.gguf")
+                    provider_hint.setText("Download Gemma 4 GGUF from Manage Resources. High Quality needs a better GPU.")
+                else:
+                    model_edit.setText("models/ai/Hy-MT2-1.8B-Q4_K_M.gguf")
+                    provider_hint.setText("Download Hy-MT2 GGUF from Manage Resources. Normal Quality is the default lighter model.")
+            model_edit.setReadOnly(is_local)
+
+        local_model_combo.currentIndexChanged.connect(update_provider_fields)
 
         test_btn = QPushButton("Test Connection", dialog)
         test_btn.setVisible(not remote_mode)
@@ -6228,6 +6400,7 @@ class VideoTranslatorGUI(QMainWindow):
         new_ocr_region = str(region_combo.currentData() or "bottom").strip().lower()
         new_key = key_edit.text().strip()
         new_model = model_edit.text().strip()
+        new_local_model_tier = str(local_model_combo.currentData() or "normal").strip().lower()
         new_provider = str(provider_combo.currentData()).strip()
         new_base_url = base_url_edit.text().strip()
 
@@ -6260,9 +6433,14 @@ class VideoTranslatorGUI(QMainWindow):
                     "OPENAI_BASE_URL": new_base_url or "http://localhost:11434/v1",
                 }
             elif new_provider == "local":
+                if new_local_model_tier == "high":
+                    new_model = "models/ai/gemma-4-E4B-it-Q4_K_M.gguf"
+                else:
+                    new_model = "models/ai/Hy-MT2-1.8B-Q4_K_M.gguf"
                 updates = {
                     "AI_POLISHER_PROVIDER": "local",
                     "OPENAI_PROVIDER": "local",
+                    "LOCAL_TRANSLATOR_MODEL_TIER": new_local_model_tier,
                     "LOCAL_TRANSLATOR_MODEL_PATH": new_model,
                 }
             else:

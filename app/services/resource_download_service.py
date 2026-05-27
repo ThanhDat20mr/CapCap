@@ -11,6 +11,11 @@ from runtime_paths import app_path, join_root, models_path
 
 
 class ResourceDownloadService:
+    NORMAL_AI_RESOURCE_ID = "ai:local-normal"
+    HIGH_AI_RESOURCE_ID = "ai:local-high"
+    NORMAL_AI_FILENAME = "Hy-MT2-1.8B-Q4_K_M.gguf"
+    HIGH_AI_FILENAME = "gemma-4-E4B-it-Q4_K_M.gguf"
+
     def __init__(self, workspace_root: str):
         self.workspace_root = workspace_root
         self.repo_id = os.getenv("CAPCAP_RESOURCE_REPO", "Hacht/CapCapResource").strip() or "Hacht/CapCapResource"
@@ -185,11 +190,11 @@ class ResourceDownloadService:
             return "installed"
         return "partial"
 
-    def _ai_model_filename(self) -> str:
-        return "Hy-MT2-1.8B-Q4_K_M.gguf"
+    def _ai_model_filename(self, tier: str = "normal") -> str:
+        return self.HIGH_AI_FILENAME if str(tier or "").strip().lower() == "high" else self.NORMAL_AI_FILENAME
 
-    def _ai_model_local_path(self) -> str:
-        return models_path("ai", self._ai_model_filename())
+    def _ai_model_local_path(self, tier: str = "normal") -> str:
+        return models_path("ai", self._ai_model_filename(tier))
 
     def _whisper_cache_root(self) -> str:
         return models_path("faster_whisper")
@@ -239,12 +244,20 @@ class ResourceDownloadService:
     def list_resources(self) -> list[dict]:
         resources: list[dict] = [
             {
-                "id": "ai:local-gguf",
-                "name": "Local AI Model (GGUF)",
+                "id": self.NORMAL_AI_RESOURCE_ID,
+                "name": "Normal Quality AI Model (Hy-MT2)",
                 "kind": "ai",
-                "status": "installed" if self.is_resource_installed("ai:local-gguf") else "missing",
-                "target_dir": os.path.dirname(self._ai_model_local_path()),
-                "description": "Model for local AI polish and rewrite.",
+                "status": "installed" if self.is_resource_installed(self.NORMAL_AI_RESOURCE_ID) else "missing",
+                "target_dir": os.path.dirname(self._ai_model_local_path("normal")),
+                "description": "Default local GGUF model. Faster and lighter. Uses the normal-quality prompt.",
+            },
+            {
+                "id": self.HIGH_AI_RESOURCE_ID,
+                "name": "High Quality AI Model (Gemma 4)",
+                "kind": "ai",
+                "status": "installed" if self.is_resource_installed(self.HIGH_AI_RESOURCE_ID) else "missing",
+                "target_dir": os.path.dirname(self._ai_model_local_path("high")),
+                "description": "Higher quality local GGUF model. Needs a better GPU or will run slower on CPU. Uses the high-quality prompt.",
             },
             {
                 "id": "whisper:medium",
@@ -279,8 +292,10 @@ class ResourceDownloadService:
         return resources
 
     def is_resource_installed(self, resource_id: str) -> bool:
-        if resource_id == "ai:local-gguf":
-            return os.path.exists(self._ai_model_local_path())
+        if resource_id in {self.NORMAL_AI_RESOURCE_ID, "ai:local-gguf"}:
+            return os.path.exists(self._ai_model_local_path("normal"))
+        if resource_id == self.HIGH_AI_RESOURCE_ID:
+            return os.path.exists(self._ai_model_local_path("high"))
         if resource_id == "cuda:whisper":
             fw_dir = join_root("bin", "cuda12_fw")
             cuda_ok = os.path.exists(os.path.join(fw_dir, "cublas64_12.dll"))
@@ -346,16 +361,19 @@ class ResourceDownloadService:
                 "huggingface_hub is not installed. Run `pip install huggingface_hub` first."
             ) from exc
 
-        if resource_id == "ai:local-gguf":
-            print(f"[DEBUG] ai:local-gguf download start. repo={self.repo_id} file={self._ai_model_filename()}")
-            print(f"[DEBUG] local_dir={join_root('models')} target={self._ai_model_local_path()}")
+        if resource_id in {self.NORMAL_AI_RESOURCE_ID, self.HIGH_AI_RESOURCE_ID, "ai:local-gguf"}:
+            tier = "high" if resource_id == self.HIGH_AI_RESOURCE_ID else "normal"
+            filename = self._ai_model_filename(tier)
+            target_path = self._ai_model_local_path(tier)
+            print(f"[DEBUG] {resource_id} download start. repo={self.repo_id} file={filename}")
+            print(f"[DEBUG] local_dir={join_root('models')} target={target_path}")
             if progress_cb:
-                progress_cb(-1, "Downloading local AI GGUF model from Hugging Face...")
+                progress_cb(-1, f"Downloading {os.path.basename(filename)} from Hugging Face...")
             try:
                 downloaded = self._download_hf_file(
                     repo_id=self.repo_id,
                     revision=self.revision,
-                    filename=self._ai_model_filename(),
+                    filename=filename,
                     local_dir=join_root("models"),
                     hf_hub_download=hf_hub_download,
                     hf_hub_url=hf_hub_url,
@@ -363,13 +381,12 @@ class ResourceDownloadService:
                     progress_cb=progress_cb,
                     start_percent=0,
                     end_percent=100,
-                    label="Downloading local AI GGUF model",
+                    label=f"Downloading {os.path.basename(filename)}",
                 )
                 print(f"[DEBUG] download returned: {downloaded}")
             except Exception as exc:
                 print(f"[DEBUG] _download_hf_file FAILED: {exc}")
                 raise
-            target_path = self._ai_model_local_path()
             print(f"[DEBUG] moving to target: {target_path}")
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
             normalized_source = os.path.normcase(os.path.abspath(downloaded))
@@ -380,7 +397,7 @@ class ResourceDownloadService:
                 shutil.move(downloaded, target_path)
                 self._cleanup_empty_voice_cache_dirs(os.path.dirname(downloaded))
             if progress_cb:
-                progress_cb(100, "Local AI GGUF model is ready.")
+                progress_cb(100, f"{os.path.basename(filename)} is ready.")
             return
 
         if resource_id == "cuda:whisper":

@@ -12,6 +12,8 @@ from runtime_paths import join_root, models_path
 
 
 class LocalPolisherProvider:
+    NORMAL_MODEL_FILENAME = "Hy-MT2-1.8B-Q4_K_M.gguf"
+    HIGH_MODEL_FILENAME = "gemma-4-E4B-it-Q4_K_M.gguf"
     _model_lock = threading.Lock()
     _cached_model = None
     _cached_model_path = ""
@@ -154,8 +156,9 @@ class LocalPolisherProvider:
         return f"CPU-only local AI. Detected {cpu_count} logical CPU threads."
 
     def __init__(self):
-        default_model = models_path("ai", "Hy-MT2-1.8B-Q4_K_M.gguf")
+        default_model = models_path("ai", self.NORMAL_MODEL_FILENAME)
         self.model_path = os.getenv("LOCAL_TRANSLATOR_MODEL_PATH", default_model).strip()
+        self.model_tier = self._resolve_model_tier()
         self.hardware_info = self.detect_runtime_capabilities()
         recommended = self.recommended_runtime_config(self.hardware_info)
         self.n_ctx = self._safe_int(os.getenv("LOCAL_TRANSLATOR_N_CTX", str(recommended["n_ctx"])), recommended["n_ctx"])
@@ -208,20 +211,15 @@ class LocalPolisherProvider:
             target_lang=target_lang,
             style_instruction=style_instruction,
         )
-
         system_note = (
             "System note: Translate or rewrite subtitles for short videos. "
             "Return only numbered lines like '1. text'. Keep the exact line count.\n\n"
         )
         try:
-            result = model.create_chat_completion(
-                messages=[
-                    {"role": "user", "content": system_note + prompt},
-                ],
+            result = self._generate_text(
+                model=model,
+                prompt=system_note + prompt,
                 temperature=self.temperature,
-                top_p=self.top_p,
-                top_k=self.top_k,
-                repeat_penalty=self.repeat_penalty,
                 max_tokens=self._estimate_max_tokens(source_texts, translated_texts),
             )
         except Exception as exc:
@@ -243,6 +241,23 @@ class LocalPolisherProvider:
         return lines, [], f"local-gguf ({os.path.basename(self.model_path)})"
 
     def _build_prompt(self, source_texts, translated_texts, src_lang, target_lang, style_instruction) -> str:
+        if self.model_tier == "high":
+            return self._build_high_quality_prompt(
+                source_texts=source_texts,
+                translated_texts=translated_texts,
+                src_lang=src_lang,
+                target_lang=target_lang,
+                style_instruction=style_instruction,
+            )
+        return self._build_normal_quality_prompt(
+            source_texts=source_texts,
+            translated_texts=translated_texts,
+            src_lang=src_lang,
+            target_lang=target_lang,
+            style_instruction=style_instruction,
+        )
+
+    def _build_normal_quality_prompt(self, source_texts, translated_texts, src_lang, target_lang, style_instruction) -> str:
         is_direct = not translated_texts
         if is_direct:
             joined = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(source_texts))
@@ -261,6 +276,50 @@ class LocalPolisherProvider:
         if style_instruction:
             prompt = f"Style: {style_instruction}\n\n{prompt}"
         return prompt
+
+    def _build_high_quality_prompt(self, source_texts, translated_texts, src_lang, target_lang, style_instruction) -> str:
+        is_direct = not translated_texts
+        style_part = f" Style: {style_instruction}" if style_instruction else ""
+        dubbing_mode = "[mode=dubbing_rewrite]" in str(style_instruction or "").lower()
+        if is_direct:
+            lines = [f"{i + 1}. {s}" for i, s in enumerate(source_texts)]
+            header = (
+                f"Translate these subtitle lines from {src_lang} to {target_lang}.{style_part}\n"
+                "Target: natural Vietnamese for short-form video voiceover/subtitles.\n"
+                "Format: Number. Text"
+            )
+        else:
+            lines = [f"{i + 1}. {s} ||| {t}" for i, (s, t) in enumerate(zip(source_texts, translated_texts))]
+            if dubbing_mode:
+                header = (
+                    f"Rewrite these dubbing drafts from {src_lang} to {target_lang}.{style_part}\n"
+                    "Target: short spoken Vietnamese for TTS timing rescue.\n"
+                    "Format: Number. Source ||| Draft"
+                )
+            else:
+                header = (
+                    f"Rewrite these subtitle translations from {src_lang} to {target_lang}.{style_part}\n"
+                    "Target: natural Vietnamese for short-form video voiceover/subtitles.\n"
+                    "Format: Number. Source ||| Draft"
+                )
+        rules = (
+            "Rules: Keep meaning accurate, concise, natural, and easy to read quickly. "
+            "Return only numbered lines. No commentary, no code fences, no extra headings."
+        )
+        if dubbing_mode:
+            rules = (
+                "Rules: Rewrite for spoken dubbing timing, not subtitle readability. "
+                "Use the metadata in the source line as hard constraints, especially max_words_vi and measured_ratio. "
+                "The output must be shorter than the draft when the draft is overlong. "
+                "Preserve names, numbers, product names, and key claims exactly. "
+                "Remove filler first. Keep one concise spoken line per number. "
+                "Return only numbered lines. No commentary, no code fences, no extra headings."
+            )
+        return (
+            f"{header}\n"
+            f"{rules}\n\n"
+            + "\n".join(lines)
+        )
 
     def _get_model(self):
         signature = (
@@ -342,7 +401,19 @@ class LocalPolisherProvider:
                 content = message.get("content")
                 if isinstance(content, str) and content.strip():
                     return content.strip()
+                text = choices[0].get("text")
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
         return str(result or "").strip()
+
+    def _resolve_model_tier(self) -> str:
+        configured = str(os.getenv("LOCAL_TRANSLATOR_MODEL_TIER", "")).strip().lower()
+        if configured in {"normal", "high"}:
+            return configured
+        model_name = os.path.basename(self.model_path).strip().lower()
+        if model_name == self.HIGH_MODEL_FILENAME.lower():
+            return "high"
+        return "normal"
 
     def split_single_line_text(
         self,
@@ -374,14 +445,10 @@ class LocalPolisherProvider:
         )
 
         try:
-            result = model.create_chat_completion(
-                messages=[
-                    {"role": "user", "content": prompt},
-                ],
+            result = self._generate_text(
+                model=model,
+                prompt=prompt,
                 temperature=0.0,
-                top_p=self.top_p,
-                top_k=self.top_k,
-                repeat_penalty=self.repeat_penalty,
                 max_tokens=min(256, self.max_tokens),
             )
         except Exception as exc:
@@ -424,14 +491,10 @@ class LocalPolisherProvider:
         )
 
         try:
-            result = model.create_chat_completion(
-                messages=[
-                    {"role": "user", "content": prompt},
-                ],
+            result = self._generate_text(
+                model=model,
+                prompt=prompt,
                 temperature=0.0,
-                top_p=self.top_p,
-                top_k=self.top_k,
-                repeat_penalty=self.repeat_penalty,
                 max_tokens=min(512, self.max_tokens),
             )
         except Exception as exc:
@@ -468,6 +531,30 @@ class LocalPolisherProvider:
         estimated = 160 + (total_chars // 2)
         estimated = max(256, min(self.max_tokens, estimated))
         return estimated
+
+    def _generate_text(self, *, model, prompt: str, temperature: float, max_tokens: int):
+        if self._requires_plain_completion(model):
+            return model.create_completion(
+                prompt=prompt,
+                temperature=temperature,
+                top_p=self.top_p,
+                top_k=self.top_k,
+                repeat_penalty=self.repeat_penalty,
+                max_tokens=max_tokens,
+            )
+        return model.create_chat_completion(
+            messages=[
+                {"role": "user", "content": prompt},
+            ],
+            temperature=temperature,
+            top_p=self.top_p,
+            top_k=self.top_k,
+            repeat_penalty=self.repeat_penalty,
+            max_tokens=max_tokens,
+        )
+
+    def _requires_plain_completion(self, model) -> bool:
+        return False
 
     def _parse_numbered_output(self, raw: str) -> list[str]:
         items: list[str] = []

@@ -7,7 +7,7 @@ class TTSAdapter:
         *,
         text: str,
         wav_path: str,
-        voice: str = "vi_VN-vais1000-medium",
+        voice: str = "ngochuyen",
         speed: float = 1.0,
         tmp_dir: str | None = None,
         on_progress: callable = None,

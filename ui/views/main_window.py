@@ -183,7 +183,6 @@ def _connect_ui_signals(gui):
         gui.subtitle_single_line_cb.toggled.connect(gui.on_single_line_toggled)
     gui.use_existing_audio_radio.toggled.connect(gui.on_audio_source_mode_changed)
     gui.blur_area_btn.toggled.connect(gui.toggle_blur_area_editing)
-    gui.ocr_region_btn.toggled.connect(gui.toggle_ocr_region_editing)
     if hasattr(gui, "video_view") and hasattr(gui.video_view, "framingChanged"):
         gui.video_view.framingChanged.connect(gui.on_preview_framing_changed)
     gui.transcript_text.textChanged.connect(gui.refresh_ui_state)
@@ -216,6 +215,23 @@ def _connect_ui_signals(gui):
         gui.subtitle_outline_cb.toggled.connect(gui.update_subtitle_preview_style)
     if hasattr(gui, "subtitle_bg_alpha_spin"):
         gui.subtitle_bg_alpha_spin.valueChanged.connect(gui.update_subtitle_preview_style)
+
+    gui.subtitle_font_combo.currentTextChanged.connect(gui.on_subtitle_style_control_edited)
+    gui.subtitle_font_size_spin.valueChanged.connect(gui.on_subtitle_style_control_edited)
+    gui.subtitle_animation_combo.currentTextChanged.connect(gui.on_subtitle_style_control_edited)
+    gui.subtitle_bold_cb.toggled.connect(gui.on_subtitle_style_control_edited)
+    gui.subtitle_keyword_highlight_cb.toggled.connect(gui.on_subtitle_style_control_edited)
+    gui.subtitle_highlight_color_combo.currentTextChanged.connect(gui.on_subtitle_style_control_edited)
+    gui.subtitle_highlight_mode_combo.currentTextChanged.connect(gui.on_subtitle_style_control_edited)
+    gui.subtitle_animation_time_spin.valueChanged.connect(gui.on_subtitle_style_control_edited)
+    gui.subtitle_background_cb.toggled.connect(gui.on_subtitle_style_control_edited)
+    gui.subtitle_karaoke_timing_combo.currentTextChanged.connect(gui.on_subtitle_style_control_edited)
+    if hasattr(gui, "subtitle_outline_cb"):
+        gui.subtitle_outline_cb.toggled.connect(gui.on_subtitle_style_control_edited)
+    if hasattr(gui, "subtitle_bg_alpha_spin"):
+        gui.subtitle_bg_alpha_spin.valueChanged.connect(gui.on_subtitle_style_control_edited)
+    if hasattr(gui, "subtitle_single_line_cb"):
+        gui.subtitle_single_line_cb.toggled.connect(gui.on_subtitle_style_control_edited)
 
     gui.on_advanced_toggled(bool(getattr(gui, "toggle_advanced_btn", None) and gui.toggle_advanced_btn.isChecked()))
 
