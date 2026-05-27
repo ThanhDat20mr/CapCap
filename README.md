@@ -120,7 +120,7 @@ requirements-local.txt:
 ## Key Environment Variables (`.env`)
 
 | Variable | Default | Description |
-|---|---|---|---|
+|---|---|---|
 | `AI_POLISHER_PROVIDER` | `local` | AI provider: `local` (GGUF), `gemini` (OpenAI API) |
 | `OPENAI_PROVIDER` | `local` | `local`, `openai`, or `ollama` |
 | `OPENAI_API_KEY` | (none) | API key (only needed for OpenAI provider) |
