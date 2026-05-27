@@ -615,7 +615,7 @@ class VideoTranslatorGUI(QMainWindow):
             "tiktok": {
                 "label": "TikTok",
                 "font_name": "Montserrat",
-                "font_size": 68,
+                "font_size": 30,
                 "font_color": "#FFFFFF",
                 "highlight_color": "#FFD400",
                 "outline_color": "#000000",
@@ -635,7 +635,7 @@ class VideoTranslatorGUI(QMainWindow):
             "youtube": {
                 "label": "YouTube",
                 "font_name": "Roboto",
-                "font_size": 52,
+                "font_size": 30,
                 "font_color": "#FFFFFF",
                 "highlight_color": "#FFFFFF",
                 "outline_color": "#000000",
@@ -655,7 +655,7 @@ class VideoTranslatorGUI(QMainWindow):
             "minimal": {
                 "label": "Short",
                 "font_name": "Inter",
-                "font_size": 48,
+                "font_size": 30,
                 "font_color": "#FFFFFF",
                 "highlight_color": "#FFFFFF",
                 "outline_color": "#000000",
@@ -673,7 +673,7 @@ class VideoTranslatorGUI(QMainWindow):
             "custom": {
                 "label": "Custom",
                 "font_name": "Segoe UI",
-                "font_size": 60,
+                "font_size": 30,
                 "font_color": "#FFFFFF",
                 "highlight_color": "#FFD400",
                 "outline_color": "#000000",
