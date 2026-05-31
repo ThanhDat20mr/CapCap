@@ -13,6 +13,7 @@
 - **GPU-accelerated** — plug in NVIDIA GPU, install driver only, get 3-5x faster
 - Three output modes: `subtitle only`, `voice only`, `subtitle + voice`
 - Speech-to-text: `faster-whisper` (CPU or GPU) or `RapidOCR` (video subtitle)
+- OCR subtitle region editor with separate show/hide control
 - AI translation — 3 providers:
   - **Local GGUF** (default, offline, CPU/GPU, `.gguf` model)
     - **Normal Quality AI Model** — `Hy-MT2-1.8B-Q4_K_M.gguf`
@@ -21,10 +22,12 @@
   - **Ollama** (local, no internet, `ollama pull qwen2.5:7b`)
 - Free Google translate fallback — no API key needed
 - Vietnamese voice with `Piper` (fully offline) or `edge-tts` (online)
+- Default bundled Piper voice: `ngochuyen`
 - Vocal/instrumental separation via ONNX Runtime (CPU, ~9s for 10s audio)
 - VAD + denoise + loudness normalization for cleaner transcription
 - Smart Generate — one button: transcribe → translate → voice → preview
 - Timeline editing, subtitle styling, video filters
+- Translation-to-TTS cache prefetch to reduce voice generation wait time
 - Subtitle + voice export with FFmpeg
 
 ## Quick Start
@@ -39,6 +42,8 @@
    - **Ollama** — install [Ollama](https://ollama.com), run `ollama pull qwen2.5:7b`
 5. Save → Load video → click **Generate**
 
+If you use OCR mode, open **Settings → Manage Resources** and download **OCR Engine (RapidOCR PP-OCRv4)** first.
+
 No key? Google translate fallback works for free (slower, lower quality).
 
 ## CPU vs GPU
@@ -46,9 +51,11 @@ No key? Google translate fallback works for free (slower, lower quality).
 | Component | CPU | GPU (NVIDIA) |
 |---|---|---|
 | faster-whisper | ✅ Works (~30s/10s audio) | ✅ 5x faster (~6s) |
+| RapidOCR | ✅ Works | ✅ Supported |
 | Vocal separation (ONNX) | ✅ Works (~9s) | CPU only |
 | Piper TTS | ✅ Works | CPU only |
-| AI translation | ✅ Cloud API | Same |
+| Local GGUF translation | ✅ Works | ✅ Supported |
+| Cloud API translation | ✅ Works | Same |
 
 **GPU requirements:** NVIDIA GPU + driver installed. CUDA runtime bundled — no CUDA Toolkit download needed.
 
@@ -63,13 +70,21 @@ No key? Google translate fallback works for free (slower, lower quality).
 - `Media` — video, audio, background music, output quality, aspect ratio, canvas (Fit/Fill), Reset Framing
 - `Language` — source/target language, Whisper model
 - `Voice` — engine (Fast Voice only, Piper + edge-tts), gender, speed, voice preview
-- `Style` — TikTok, YouTube, Short, Custom presets, font, color, alignment, background box, Single-line subtitle (Netflix)
+- `Style`
+  - `Presets` — TikTok, YouTube, Short, Custom
+  - `Text Position` — placement mode, placement, custom X/Y, vertical offset
+  - `Text Style` — font, font size, colors, background box, outline, bold, single-line subtitle
+  - `Animation & Timing` — animation, duration, text timing
 - `Filter` — video filters (blur, brightness, contrast, etc.)
 - `Advanced` — audio handling (Fast/Clean), ducking, timing sync
 
 ### Center Preview
 - Video player with live subtitle overlay
-- Play/Pause, Reset, Preview, Blur area controls
+- Play/Pause, Reset, Preview
+- Blur controls split into:
+  - `Blur` — effect on/off
+  - `BOX` — show/hide blur edit region
+- `OCR` button — show/hide OCR region in OCR mode
 - Speed and audio track selection
 
 ### Subtitle Inspector (Right Panel)
@@ -81,6 +96,10 @@ No key? Google translate fallback works for free (slower, lower quality).
 - Card with timing info, original text, and tabbed editor:
   - `Subtitle` tab — text editor, highlight selection
   - `Voice` tab — spoken text editor, `Use voice for subtitle`, `Regenerate voice`
+
+Behavior note:
+- By default, TTS reads the same text shown in the subtitle.
+- A separate voice text is only used when you explicitly edit it in the inspector and regenerate voice.
 
 ### Timeline
 - Multi-lane: Subtitle, Audio, Video
@@ -128,6 +147,8 @@ requirements-local.txt:
 | `OPENAI_BASE_URL` | (empty for local) | API endpoint URL (OpenAI/Ollama only) |
 | `LOCAL_TRANSLATOR_MODEL_TIER` | `normal` | Local GGUF quality tier: `normal` (Hy-MT2) or `high` (Gemma 4) |
 | `LOCAL_TRANSLATOR_MODEL_PATH` | `models/ai/Hy-MT2...` | GGUF model path (local provider) |
+| `OCR_SUBTITLE_REGION` | `bottom` | OCR crop preset: `bottom` or `top` |
+| `OCR_SUBTITLE_RECT` | (empty) | Explicit normalized OCR crop rectangle from preview editor |
 | `CAPCAP_WHISPER_DEVICE` | (auto-detect) | Force `cpu` to avoid CUDA conflicts |
 | `CAPCAP_QUIET` | `false` | Set `true` to suppress server logs |
 | `CAPCAP_RUNTIME_PROFILE` | `local` | `local` or `remote` |
@@ -169,10 +190,18 @@ python app/remote_api_server.py
 
 1. Load a video and choose the source and target language.
 2. Select audio handling mode: **Fast** (full audio) or **Clean** (vocal separation + VAD + denoise).
-3. Click **Generate** — runs transcription → AI translation → voice → preview.
+3. Click **Generate**.
+   - Subtitle/OCR preparation runs first
+   - AI translation runs next
+   - TTS cache prefetch can start during translation for voice modes
 4. Review subtitle styling, timing, and voice text in the editor.
 5. Fine-tune segments in the subtitle inspector and timeline.
 6. Preview the result, then export subtitles, dubbed audio, or the full video.
+
+Performance notes:
+- Heavy preview assets such as exact-frame preview, waveform, and timeline thumbnails are intentionally deferred to keep long-video loading responsive.
+- `Translate -> TTS` overlap is enabled to reduce waiting time before voice preview/export.
+- Piper TTS currently runs on CPU.
 
 ## Project Structure
 
@@ -203,11 +232,12 @@ CapCap/
 │   │   └── providers/
 │   │       ├── gemini_polisher.py    # OpenAI-compatible API provider
 │   │       ├── google_web_translator.py  # Free fallback translator
-│   │       └── local_polisher.py   # Local GGUF (legacy)
+│   │       └── local_polisher.py   # Local GGUF provider + output validation
+│   ├── ocr_processor.py          # RapidOCR subtitle extraction + OCR cleanup
 │   ├── whisper_processor.py      # Whisper ASR with CUDA/CPU fallback
 │   ├── vocal_processor.py        # ONNX Runtime vocal separation
 │   ├── audio_mixer.py            # Voice track builder + time-stretch
-│   └── services/                 # Engine runtime, project, chunking, etc.
+│   └── services/                 # Engine runtime, project, chunking, scheduler, etc.
 ├── bin/
 │   ├── ffmpeg/                   # Bundled FFmpeg
 │   ├── mpv/                      # Bundled libmpv
@@ -220,7 +250,14 @@ CapCap/
 
 ## CUDA / GPU
 
-GPU speeds up **whisper transcription only**. Everything else runs on CPU.
+GPU can accelerate:
+- `faster-whisper`
+- `RapidOCR`
+- local GGUF translation (if the bundled `llama-cpp-python` build supports GPU offload)
+
+CPU-only paths in the current app:
+- Piper TTS
+- vocal separation in the current setup
 
 | What you need | Where to get |
 |---|---|
