@@ -72,8 +72,6 @@ class Segment:
             self.final_text = translated_text
         elif not self.final_text:
             self.final_text = translated_text
-        if not self.tts_text:
-            self.tts_text = self.final_text or translated_text
         self.status = "translated"
 
     @property
@@ -87,7 +85,7 @@ class Segment:
 
     @property
     def tts_source_text(self) -> str:
-        return self.tts_text or self.subtitle_text
+        return self.subtitle_text
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -111,8 +109,6 @@ class Segment:
             "end": self.end,
             "text": self.subtitle_text,
         }
-        if self.tts_text:
-            payload["tts_text"] = self.tts_text
         for key in ("tts_group_id", "tts_group_start", "tts_group_end"):
             if key in self.metadata:
                 payload[key] = self.metadata.get(key)

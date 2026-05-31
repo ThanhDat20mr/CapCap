@@ -124,9 +124,9 @@ class _SubtitleOverlayWidget(QWidget):
 class _BlurRegionOverlayWindow(QWidget):
     HANDLE_SIZE = 12
     MIN_WIDTH = 32
-    MIN_HEIGHT = 24
+    MIN_HEIGHT = 10
 
-    def __init__(self, on_region_changed=None):
+    def __init__(self, on_region_changed=None, on_edit_finished=None):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
@@ -140,6 +140,7 @@ class _BlurRegionOverlayWindow(QWidget):
         self._editable = False
         self._target_view = None
         self._on_region_changed = on_region_changed
+        self._on_edit_finished = on_edit_finished
         self.hide()
 
     def attach_to_view(self, view: QWidget):
@@ -171,7 +172,12 @@ class _BlurRegionOverlayWindow(QWidget):
         return self._has_region
 
     def sync_to_view(self):
-        if not self._target_view or not self._target_view.isVisible() or not self._has_region:
+        if (
+            not self._target_view
+            or not self._target_view.isVisible()
+            or not self._has_region
+            or not self._editable
+        ):
             self.hide()
             return
         top_left = self._target_view.mapToGlobal(QPoint(0, 0))
@@ -301,9 +307,12 @@ class _BlurRegionOverlayWindow(QWidget):
         event.accept()
 
     def mouseReleaseEvent(self, event):
+        finished_drag = bool(self._drag_mode)
         self._drag_mode = ""
         if self._editable:
             self.setCursor(Qt.OpenHandCursor)
+        if finished_drag and callable(self._on_edit_finished):
+            self._on_edit_finished()
         event.accept()
 
     def paintEvent(self, event):
@@ -336,6 +345,7 @@ class _BlurRegionOverlayWindow(QWidget):
 class MpvVideoView(QWidget):
     """Hosts an MPV video surface and overlays."""
     blurRegionChanged = Signal()
+    blurEditFinished = Signal()
     subtitlePositionChanged = Signal(int, int)  # x_percent, y_percent
     framingChanged = Signal(float, float)
 
@@ -358,7 +368,10 @@ class MpvVideoView(QWidget):
         self.video_surface.setAttribute(Qt.WA_NativeWindow, True)
         self.video_surface.setAutoFillBackground(True)
         self.video_surface.setStyleSheet("background-color: black;")
-        self.blur_overlay = _BlurRegionOverlayWindow(on_region_changed=self.blurRegionChanged.emit)
+        self.blur_overlay = _BlurRegionOverlayWindow(
+            on_region_changed=self.blurRegionChanged.emit,
+            on_edit_finished=self.blurEditFinished.emit,
+        )
         self.ratio_badge = QLabel(self)
         self.ratio_badge.setObjectName("previewRatioBadge")
         self.ratio_badge.setAlignment(Qt.AlignCenter)

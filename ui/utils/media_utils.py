@@ -80,8 +80,12 @@ def toggle_play(gui):
                     gui.preview_video()
                     return
             gui.seek_frame_preview_timer.stop()
+            if hasattr(gui, "set_subtitle_inspector_details_visible"):
+                gui.set_subtitle_inspector_details_visible(False, sync=False)
             if hasattr(gui, "hide_filter_thumbnail_preview"):
                 gui.hide_filter_thumbnail_preview()
+            if hasattr(gui, "set_blur_overlay_active_for_preview"):
+                gui.set_blur_overlay_active_for_preview(False)
             gui.media_player.play()
             gui.timeline.set_playing(True)
         if hasattr(gui, "_refresh_preview_audio_controls"):
@@ -167,6 +171,7 @@ def browse_video(gui):
         from views.launcher import LauncherWindow
         LauncherWindow.add_recent(gui.settings, file_path)
     gui.media_player.setSource(QUrl.fromLocalFile(file_path))
+    gui._allow_post_pipeline_preview_assets = False
     gui.refresh_video_dimensions(file_path)
 
     gui.timeline.set_segments([])
@@ -179,20 +184,18 @@ def browse_video(gui):
     gui.current_project_state = gui.ensure_current_project()
     gui.load_project_context(gui.current_project_state)
 
-    # Auto-extract original audio when video is selected
-    if hasattr(gui, "run_extraction"):
-        print(f"[BrowseVideo] queue auto-extraction for {file_path}")
-        QTimer.singleShot(50, gui.run_extraction)
-
     try:
         gui.media_player.pause()
     except Exception:
         pass
+    if hasattr(gui, "auto_frame_preview_timer"):
+        gui.auto_frame_preview_timer.stop()
+    if hasattr(gui, "seek_frame_preview_timer"):
+        gui.seek_frame_preview_timer.stop()
     QTimer.singleShot(120, lambda: gui.media_player.setPosition(0))
     QTimer.singleShot(220, gui.video_view.reposition_subtitle)
     gui.refresh_ui_state()
     gui.sync_live_subtitle_preview()
-    gui.schedule_auto_frame_preview()
     if hasattr(gui, "_refresh_preview_audio_controls"):
         gui._refresh_preview_audio_controls()
 

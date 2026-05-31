@@ -1,5 +1,7 @@
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
+import time
+
+from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView
 
 
@@ -28,6 +30,7 @@ class TimelineWidget(QGraphicsView):
     DEFAULT_PX_PER_SECOND = 100
     MIN_PX_PER_SECOND = 40
     MAX_PX_PER_SECOND = 260
+    SEEK_DRAG_INTERVAL_MS = 75
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -77,6 +80,7 @@ class TimelineWidget(QGraphicsView):
         self._drag_offset_seconds = 0.0
         self._drag_feedback_start = 0.0
         self._drag_feedback_end = 0.0
+        self._last_seek_emit_at_ms = 0.0
         self._track_visibility = {
             "video": True,
             "text": True,
@@ -142,29 +146,14 @@ class TimelineWidget(QGraphicsView):
         self.layoutChanged.emit()
 
     def set_waveform_data(self, samples, duration_s: float):
-        normalized_samples = []
-        for sample in list(samples or []):
-            if isinstance(sample, (list, tuple)):
-                normalized_samples.append([float(max(0.0, min(1.0, value))) for value in sample])
-            else:
-                normalized_samples.append(float(max(0.0, min(1.0, sample))))
-        normalized_duration = max(0.0, float(duration_s or 0.0))
-        if normalized_samples == self._waveform_samples and abs(normalized_duration - self._waveform_duration_s) < 0.0001:
-            return
-        self._waveform_samples = normalized_samples
-        self._waveform_duration_s = normalized_duration
+        # Waveform rendering is disabled to keep the timeline lightweight on long videos.
+        self._waveform_samples = []
+        self._waveform_duration_s = 0.0
         self.refresh()
 
     def set_video_thumbnails(self, thumbnails):
-        normalized = []
-        for item in list(thumbnails or []):
-            if not isinstance(item, (list, tuple)) or len(item) != 2:
-                continue
-            timestamp_s, pixmap = item
-            if not isinstance(pixmap, QPixmap) or pixmap.isNull():
-                continue
-            normalized.append((float(timestamp_s), pixmap))
-        self._video_thumbnails = normalized
+        # Thumbnail rendering is disabled for long-video performance.
+        self._video_thumbnails = []
         self.refresh()
 
     def _waveform_slice(self, start_s: float, end_s: float, bars: int):
@@ -204,6 +193,11 @@ class TimelineWidget(QGraphicsView):
                 nearby_peak = max(float(value) for value in neighbor_chunk) if neighbor_chunk else 0.0
                 values.append(max(0.03, current_peak, nearby_peak * 0.82))
         return values
+
+    def _add_rounded_rect(self, x, y, w, h, radius, pen, brush):
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(float(x), float(y), float(w), float(h)), float(radius), float(radius))
+        return self._scene.addPath(path, pen, brush)
 
     def _segment_index_at_scene_pos(self, scene_pos):
         x_pos = float(scene_pos.x())
@@ -305,38 +299,46 @@ class TimelineWidget(QGraphicsView):
         start_x = 0.0
         end_x = duration_s * self.pixels_per_second
         seg_w = max(16, end_x - start_x)
-        self._scene.addRect(start_x, row["y"] + 11, seg_w, row["h"] - 22, QPen(pen_color, 1), fill_color)
-        waveform_values = self._waveform_slice(0.0, duration_s, max(18, int(seg_w // 2)))
+        lane = self._add_rounded_rect(
+            start_x,
+            row["y"] + 11,
+            seg_w,
+            row["h"] - 22,
+            10,
+            QPen(pen_color, 1),
+            fill_color,
+        )
+        lane.setOpacity(1.0)
+        waveform_values = self._waveform_slice(0.0, duration_s, max(28, min(88, int(seg_w // 3.5))))
         if waveform_values:
-            wave_top = row["y"] + 8.0
-            wave_bottom = row["y"] + row["h"] - 6.0
-            wave_height = max(10.0, wave_bottom - wave_top)
-            step = seg_w / max(1, len(waveform_values))
+            wave_mid = row["y"] + (row["h"] / 2.0) + 1.0
+            wave_top = row["y"] + 12.0
+            wave_bottom = row["y"] + row["h"] - 12.0
+            wave_span = max(10.0, wave_bottom - wave_top)
+            step = max(3.0, seg_w / max(1, len(waveform_values)))
+            bar_w = max(2.0, min(5.0, step * 0.48))
             column_energies = []
             for amp in waveform_values:
-                if isinstance(amp, list):
-                    band_values = [float(value) for value in amp]
-                    if band_values:
-                        energy = sum(value * value for value in band_values) / len(band_values)
-                        column_energies.append(energy ** 0.5)
-                    else:
-                        column_energies.append(0.0)
-                else:
-                    column_energies.append(float(amp))
+                column_energies.append(float(amp) if not isinstance(amp, list) else float(max(amp) if amp else 0.0))
             smoothed = []
             for idx_energy, value in enumerate(column_energies):
                 prev_v = column_energies[idx_energy - 1] if idx_energy > 0 else value
                 next_v = column_energies[idx_energy + 1] if idx_energy + 1 < len(column_energies) else value
-                smoothed.append((prev_v * 0.2) + (value * 0.6) + (next_v * 0.2))
+                smoothed.append((prev_v * 0.18) + (value * 0.64) + (next_v * 0.18))
             for wave_idx, amp in enumerate(smoothed):
-                x_pos = start_x + (wave_idx * step) + (step / 2.0)
-                intensity = max(0.12, float(amp) ** 0.78)
-                spike_height = max(3.0, wave_height * intensity)
-                hue = int((wave_idx / max(1, len(smoothed) - 1)) * 300.0)
-                color = QColor.fromHsv(hue, hue_sat, 235, 235)
-                wave_pen = QPen(color, max(1.2, min(2.4, step * 0.34)))
-                wave_pen.setCapStyle(Qt.RoundCap)
-                self._scene.addLine(x_pos, wave_bottom - spike_height, x_pos, wave_bottom, wave_pen)
+                x_pos = start_x + (wave_idx * step) + ((step - bar_w) / 2.0)
+                intensity = max(0.10, float(amp) ** 0.70)
+                bar_h = max(3.0, wave_span * (0.10 + 0.58 * intensity))
+                color = QColor(110, 231, 214, 235)
+                pen = QPen(color, 1)
+                brush = QBrush(color)
+                top_h = max(1.5, bar_h * 0.72)
+                bottom_h = max(1.5, bar_h * 0.60)
+                self._scene.addRect(x_pos, wave_mid - top_h, bar_w, top_h, pen, brush)
+                self._scene.addRect(x_pos, wave_mid, bar_w, bottom_h, pen, brush)
+            center_pen = QPen(QColor(110, 231, 214, 100), 1)
+            center_pen.setCapStyle(Qt.RoundCap)
+            self._scene.addLine(start_x + 4, wave_mid, end_x - 4, wave_mid, center_pen)
 
     def _draw_audio_segment(self, row, idx, seg, start_x, end_x, seg_w, is_active, ratio=1.0):
         if not row.get("visible"):
@@ -360,7 +362,8 @@ class TimelineWidget(QGraphicsView):
             wave_hue_sat = (0 if is_active else 0, 220 if is_active else 190)
             fallback_color = QColor("#e82828" if is_active else "#c01818")
 
-        self._scene.addRect(start_x, row["y"] + 11, seg_w, row["h"] - 22, rect_pen, rect_fill)
+        capsule = self._add_rounded_rect(start_x, row["y"] + 11, seg_w, row["h"] - 22, 10, rect_pen, rect_fill)
+        capsule.setOpacity(0.98)
         if is_active:
             left_handle = self._scene.addRect(start_x - 2, row["y"] + 10, 4, row["h"] - 20, QPen(handle_color, 1), handle_color)
             right_handle = self._scene.addRect(end_x - 2, row["y"] + 10, 4, row["h"] - 20, QPen(handle_color, 1), handle_color)
@@ -370,22 +373,20 @@ class TimelineWidget(QGraphicsView):
         waveform_values = self._waveform_slice(
             float(seg.get("start", 0.0)),
             float(seg.get("end", 0.0)),
-            max(18, min(160, int(seg_w // 2))),
+            max(20, min(96, int(seg_w // 4))),
         )
         if waveform_values:
-            wave_top = row["y"] + 8.0
-            wave_bottom = row["y"] + row["h"] - 6.0
-            wave_height = max(10.0, wave_bottom - wave_top)
-            step = seg_w / max(1, len(waveform_values))
+            wave_mid = row["y"] + (row["h"] / 2.0) + 1.0
+            wave_top = row["y"] + 12.0
+            wave_bottom = row["y"] + row["h"] - 12.0
+            wave_span = max(10.0, wave_bottom - wave_top)
+            step = max(3.0, seg_w / max(1, len(waveform_values)))
+            bar_w = max(2.0, min(5.0, step * 0.48))
             column_energies = []
             for amp in waveform_values:
                 if isinstance(amp, list):
                     band_values = [float(value) for value in amp]
-                    if band_values:
-                        energy = sum(value * value for value in band_values) / len(band_values)
-                        column_energies.append(energy ** 0.5)
-                    else:
-                        column_energies.append(0.0)
+                    column_energies.append(max(band_values) if band_values else 0.0)
                 else:
                     column_energies.append(float(amp))
 
@@ -393,17 +394,22 @@ class TimelineWidget(QGraphicsView):
             for idx_energy, value in enumerate(column_energies):
                 prev_v = column_energies[idx_energy - 1] if idx_energy > 0 else value
                 next_v = column_energies[idx_energy + 1] if idx_energy + 1 < len(column_energies) else value
-                smoothed.append((prev_v * 0.2) + (value * 0.6) + (next_v * 0.2))
+                smoothed.append((prev_v * 0.18) + (value * 0.64) + (next_v * 0.18))
 
             for wave_idx, amp in enumerate(smoothed):
-                x_pos = start_x + (wave_idx * step) + (step / 2.0)
-                intensity = max(0.12, float(amp) ** 0.78)
-                spike_height = max(3.0, wave_height * intensity)
-                hue = int((wave_idx / max(1, len(smoothed) - 1)) * 300.0)
-                color = QColor.fromHsv(hue, wave_hue_sat[0], wave_hue_sat[1], 235)
-                wave_pen = QPen(color, max(1.2, min(2.4, step * 0.34)))
-                wave_pen.setCapStyle(Qt.RoundCap)
-                self._scene.addLine(x_pos, wave_bottom - spike_height, x_pos, wave_bottom, wave_pen)
+                x_pos = start_x + (wave_idx * step) + ((step - bar_w) / 2.0)
+                intensity = max(0.10, float(amp) ** 0.70)
+                bar_h = max(3.0, wave_span * (0.10 + 0.58 * intensity))
+                color = QColor(110, 231, 214, 235) if ratio <= 1.05 else QColor(255, 209, 102, 235)
+                pen = QPen(color, 1)
+                brush = QBrush(color)
+                top_h = max(1.5, bar_h * 0.72)
+                bottom_h = max(1.5, bar_h * 0.60)
+                self._scene.addRect(x_pos, wave_mid - top_h, bar_w, top_h, pen, brush)
+                self._scene.addRect(x_pos, wave_mid, bar_w, bottom_h, pen, brush)
+            center_pen = QPen(QColor(110, 231, 214, 100), 1)
+            center_pen.setCapStyle(Qt.RoundCap)
+            self._scene.addLine(start_x + 4, wave_mid, end_x - 4, wave_mid, center_pen)
         else:
             fallback_pen = QPen(fallback_color, 1.0)
             fallback_pen.setCapStyle(Qt.RoundCap)
@@ -475,22 +481,24 @@ class TimelineWidget(QGraphicsView):
         video_row = self._layout.get("video", {})
         if self.duration > 0 and video_row.get("visible"):
             full_clip_w = max(24, (self.duration / 1000.0) * self.pixels_per_second)
-            video_rect = self._scene.addRect(
+            video_rect = self._add_rounded_rect(
                 4,
                 video_row["y"] + 7,
                 max(20, full_clip_w - 8),
                 video_row["h"] - 14,
+                12,
                 QPen(QColor("#4ecdc4"), 1),
                 QColor(78, 205, 196, 48),
             )
+            video_rect.setOpacity(0.96)
             clip_x = 4
             clip_y = video_row["y"] + 7
             clip_w = max(20, full_clip_w - 8)
             clip_h = video_row["h"] - 14
             if self._video_thumbnails:
                 thumb_items = sorted(self._video_thumbnails, key=lambda item: item[0])
-                tile_w = max(42.0, min(92.0, clip_h * 1.45))
-                tile_count = max(1, int((clip_w + tile_w - 1) // tile_w))
+                tile_count = max(4, min(6, len(thumb_items)))
+                tile_w = max(52.0, clip_w / max(1, tile_count))
                 for idx in range(tile_count):
                     progress = idx / max(1, tile_count - 1)
                     sample_idx = min(len(thumb_items) - 1, int(round(progress * (len(thumb_items) - 1))))
@@ -515,10 +523,29 @@ class TimelineWidget(QGraphicsView):
                         min(target_w, scaled.width()),
                         min(target_h, scaled.height()),
                     )
+                    frame = self._add_rounded_rect(
+                        slot_x + 1,
+                        clip_y + 1,
+                        target_w,
+                        target_h,
+                        8,
+                        QPen(QColor(255, 255, 255, 18), 1),
+                        QBrush(QColor(255, 255, 255, 8)),
+                    )
+                    frame.setZValue(-6)
                     item = self._scene.addPixmap(cropped)
                     item.setPos(slot_x + 1, clip_y + 1)
                     item.setOpacity(0.92)
                     item.setZValue(-5)
+                glow = self._scene.addRect(
+                    clip_x,
+                    clip_y,
+                    clip_w,
+                    clip_h,
+                    QPen(Qt.NoPen),
+                    QBrush(QColor(78, 205, 196, 12)),
+                )
+                glow.setZValue(-8)
 
         audio_row = self._layout.get("audio", {})
         text_row = self._layout.get("text", {})
@@ -640,6 +667,8 @@ class TimelineWidget(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self.is_moving_playhead:
+            self.handle_seek(event.position().toPoint(), force=True)
         self.is_moving_playhead = False
         self._drag_mode = ""
         self._drag_segment_index = -1
@@ -649,10 +678,17 @@ class TimelineWidget(QGraphicsView):
         self.refresh()
         super().mouseReleaseEvent(event)
 
-    def handle_seek(self, pos):
+    def handle_seek(self, pos, *, force=False):
         scene_pos = self.mapToScene(pos)
         ms = int((scene_pos.x() / self.pixels_per_second) * 1000)
         ms = max(0, min(ms, self.duration))
+        if not force and self.is_moving_playhead:
+            now_ms = time.monotonic() * 1000.0
+            if (now_ms - self._last_seek_emit_at_ms) < self.SEEK_DRAG_INTERVAL_MS:
+                return
+            self._last_seek_emit_at_ms = now_ms
+        elif force:
+            self._last_seek_emit_at_ms = time.monotonic() * 1000.0
         self.seekRequested.emit(ms)
 
     def wheelEvent(self, event):

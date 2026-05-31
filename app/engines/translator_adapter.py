@@ -22,7 +22,7 @@ class TranslatorAdapter:
         model_path=None,
         src_lang: str = "auto",
         enable_polish: bool = True,
-        optimize_subtitles: bool = True,
+        optimize_subtitles: bool = False,
         style_instruction: str = "",
     ) -> str:
         funcs = self._translator_module()
@@ -42,8 +42,9 @@ class TranslatorAdapter:
         model_path=None,
         src_lang: str = "auto",
         enable_polish: bool = True,
-        optimize_subtitles: bool = True,
+        optimize_subtitles: bool = False,
         style_instruction: str = "",
+        batch_callback=None,
     ):
         funcs = self._translator_module()
         return funcs["translate_segments"](
@@ -53,6 +54,7 @@ class TranslatorAdapter:
             enable_polish=enable_polish,
             optimize_subtitles=optimize_subtitles,
             style_instruction=style_instruction,
+            batch_callback=batch_callback,
         )
 
     def rewrite_segments(self, source_segments, translated_segments, *, model_path=None, src_lang: str = "auto", style_instruction: str = ""):

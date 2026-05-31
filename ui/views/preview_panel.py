@@ -35,18 +35,21 @@ def _set_preview_icon_button(button: QPushButton, icon_path: str, tooltip: str):
 class OcrRegionOverlay(QWidget):
     _HANDLE_SIZE = 10
     _MIN_W = 40
-    _MIN_H = 16
+    _MIN_H = 10
 
     def __init__(self):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool)
+        self.setAutoFillBackground(False)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
-        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, False)
+        self.setStyleSheet("background: transparent;")
         self.setMouseTracking(True)
         self._norm = QRectF(0.0, 0.75, 1.0, 0.25)
         self._load_rect()
         self._target_view = None
         self._main_window = None
+        self._requested_visible = True
         self._editable = False
         self._drag_mode = ""
         self._drag_offset = QRectF()
@@ -76,9 +79,14 @@ class OcrRegionOverlay(QWidget):
 
     def set_editable(self, editable: bool):
         self._editable = editable
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, not self._editable)
         if not editable:
             self._drag_mode = ""
             self.setCursor(Qt.ArrowCursor)
+            try:
+                self.releaseKeyboard()
+            except Exception:
+                pass
         else:
             self.setCursor(Qt.OpenHandCursor)
             self.grabKeyboard()
@@ -92,10 +100,25 @@ class OcrRegionOverlay(QWidget):
         btn = getattr(w, "ocr_region_btn", None)
         if btn is None:
             return
-        if self._editable:
+        if not bool(getattr(w, "_ocr_overlay_visible", True)):
+            btn.setStyleSheet("QPushButton { color: #7a8ea3; font-weight: bold; font-size: 10px; padding: 0; }")
+        elif self._editable:
             btn.setStyleSheet("QPushButton { color: #ffb450; font-weight: bold; font-size: 10px; padding: 0; }")
         else:
             btn.setStyleSheet("QPushButton { color: #6ee7d6; font-weight: bold; font-size: 10px; padding: 0; }")
+
+    def _is_requested_visible(self) -> bool:
+        if hasattr(self, "_requested_visible"):
+            return bool(self._requested_visible)
+        w = self._main_window
+        if w is None and self._target_view is not None:
+            w = self._target_view.window()
+            if w is not None:
+                self._main_window = w
+                self._main_window.installEventFilter(self)
+        if w is None:
+            return True
+        return bool(getattr(w, "_ocr_overlay_visible", True))
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape and self._editable:
@@ -107,17 +130,24 @@ class OcrRegionOverlay(QWidget):
 
     def eventFilter(self, obj, event):
         if obj is self._main_window:
-            if event.type() == QtCore.QEvent.WindowDeactivate:
-                self.hide()
-            elif event.type() in (QtCore.QEvent.WindowActivate, QtCore.QEvent.Resize, QtCore.QEvent.Move, QtCore.QEvent.Show):
-                self.sync_to_view()
+            if event.type() in (QtCore.QEvent.WindowActivate, QtCore.QEvent.Resize, QtCore.QEvent.Move, QtCore.QEvent.Show):
+                if self._is_requested_visible():
+                    self.sync_to_view()
+                else:
+                    self.hide()
         return False
 
     def sync_to_view(self):
-        if not self._target_view or not self._target_view.isVisible():
+        if not self._target_view:
             self.hide()
             return
+        if self._main_window is None and self._target_view.window() is not None:
+            self._main_window = self._target_view.window()
+            self._main_window.installEventFilter(self)
         if self._main_window is not None and bool(getattr(self._main_window, "_suspend_ocr_overlay", False)):
+            self.hide()
+            return
+        if not self._is_requested_visible():
             self.hide()
             return
         engine = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower()
@@ -266,6 +296,9 @@ class OcrRegionOverlay(QWidget):
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        p.setCompositionMode(QPainter.CompositionMode_Source)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 0))
+        p.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
         color = QColor(110, 231, 214) if not self._editable else QColor(255, 180, 80)
         a = 120 if not self._editable else 180
@@ -499,6 +532,7 @@ def build_preview_panel(gui):
 
     preview_card = QFrame()
     preview_card.setObjectName("statusCard")
+    preview_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     preview_card_layout = QVBoxLayout(preview_card)
     preview_card_layout.setContentsMargins(12, 12, 12, 10)
     preview_card_layout.setSpacing(8)
@@ -517,12 +551,18 @@ def build_preview_panel(gui):
     gui.preview_btn = QPushButton()
     gui.blur_area_btn = QPushButton()
     gui.blur_area_btn.setCheckable(True)
+    gui.blur_edit_btn = QPushButton()
+    gui.blur_edit_btn.setCheckable(True)
     gui.ocr_region_btn = QPushButton()
     gui.ocr_region_btn.setCheckable(True)
     _set_preview_icon_button(gui.play_btn, os.path.join(icons_dir, "play.svg"), "Play or pause preview")
     _set_preview_icon_button(gui.stop_btn, os.path.join(icons_dir, "reset.svg"), "Reset preview to the beginning")
     _set_preview_icon_button(gui.preview_btn, os.path.join(icons_dir, "preview.svg"), "Render a fresh preview using current subtitle and audio")
-    _set_preview_icon_button(gui.blur_area_btn, os.path.join(icons_dir, "blur.svg"), "Toggle blur area editing")
+    _set_preview_icon_button(gui.blur_area_btn, os.path.join(icons_dir, "blur.svg"), "Turn blur effect on or off")
+    gui.blur_edit_btn.setText("BOX")
+    gui.blur_edit_btn.setToolTip("Show or hide the blur edit region")
+    gui.blur_edit_btn.setFixedSize(38, 38)
+    gui.blur_edit_btn.setStyleSheet("QPushButton { color: #8ad7ff; font-weight: bold; font-size: 10px; padding: 0; }")
     gui.ocr_region_btn.setText("OCR")
     gui.ocr_region_btn.setToolTip("Edit OCR subtitle region")
     gui.ocr_region_btn.setFixedSize(38, 38)
@@ -532,6 +572,8 @@ def build_preview_panel(gui):
     controls_layout.addWidget(gui.stop_btn)
     controls_layout.addWidget(gui.preview_btn)
     controls_layout.addWidget(gui.blur_area_btn)
+    controls_layout.addWidget(gui.blur_edit_btn)
+    controls_layout.addWidget(gui.ocr_region_btn)
 
     preview_audio_layout = QHBoxLayout()
     preview_audio_layout.setSpacing(10)
@@ -599,6 +641,7 @@ def build_preview_panel(gui):
         _ocr_orig_show(event)
         _sync_ocr_overlay()
     _ocr_video.showEvent = _ocr_show_handler
+    QtCore.QTimer.singleShot(0, _sync_ocr_overlay)
 
     timeline_card = QFrame()
     timeline_card.setObjectName("statusCard")
@@ -701,10 +744,18 @@ def build_preview_panel(gui):
     gui.transcript_text.setPlaceholderText("The original subtitle transcript will appear here...")
     gui.transcript_text.hide()
 
+    inspector_shell = QWidget()
+    inspector_shell.setObjectName("subtitleInspectorShell")
+    inspector_shell.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+    inspector_shell_layout = QHBoxLayout(inspector_shell)
+    inspector_shell_layout.setContentsMargins(0, 0, 0, 0)
+    inspector_shell_layout.setSpacing(0)
+
     inspector_card = QFrame()
     inspector_card.setObjectName("statusCard")
     inspector_card.setMinimumWidth(360)
     inspector_card.setMaximumWidth(560)
+    gui.subtitle_inspector_card = inspector_card
     inspector_layout = QVBoxLayout(inspector_card)
     inspector_layout.setContentsMargins(14, 14, 14, 14)
     inspector_layout.setSpacing(10)
@@ -716,8 +767,24 @@ def build_preview_panel(gui):
     inspector_title = QLabel("Subtitle Inspector")
     inspector_title.setObjectName("statusHeadline")
     inspector_copy.addWidget(inspector_title)
+    gui.subtitle_inspector_summary_label = QLabel("Selected subtitle: none")
+    gui.subtitle_inspector_summary_label.setObjectName("helperLabel")
+    gui.subtitle_inspector_summary_label.setWordWrap(True)
+    inspector_copy.addWidget(gui.subtitle_inspector_summary_label)
     inspector_header.addLayout(inspector_copy, 1)
+    inspector_toolbar = QHBoxLayout()
+    inspector_toolbar.setSpacing(8)
+    gui.subtitle_inspector_edit_btn = QPushButton("Edit subtitle")
+    gui.subtitle_inspector_edit_btn.clicked.connect(gui.show_subtitle_inspector_details)
+    inspector_toolbar.addWidget(gui.subtitle_inspector_edit_btn)
+    inspector_header.addLayout(inspector_toolbar, 0)
     inspector_layout.addLayout(inspector_header)
+
+    gui.subtitle_inspector_details_widget = QWidget()
+    gui.subtitle_inspector_details_widget.setObjectName("segmentInspectorDetails")
+    inspector_details_layout = QVBoxLayout(gui.subtitle_inspector_details_widget)
+    inspector_details_layout.setContentsMargins(0, 0, 0, 0)
+    inspector_details_layout.setSpacing(10)
 
     inspector_actions_row = QHBoxLayout()
     inspector_actions_row.setSpacing(8)
@@ -761,12 +828,37 @@ def build_preview_panel(gui):
     gui.segment_editor_layout.setContentsMargins(0, 0, 0, 0)
     gui.segment_editor_layout.setSpacing(10)
     gui.segment_editor_scroll.setWidget(gui.segment_editor_container)
-    inspector_layout.addWidget(gui.segment_editor_scroll, 1)
+    inspector_details_layout.addWidget(gui.segment_editor_scroll, 1)
+    inspector_layout.addWidget(gui.subtitle_inspector_details_widget, 1)
+    gui.subtitle_inspector_details_widget.setVisible(False)
+
+    inspector_handle = QFrame()
+    inspector_handle.setObjectName("subtitleInspectorHandle")
+    inspector_handle.setFixedWidth(34)
+    inspector_handle_layout = QVBoxLayout(inspector_handle)
+    inspector_handle_layout.setContentsMargins(0, 0, 0, 0)
+    inspector_handle_layout.setSpacing(0)
+    inspector_handle_layout.addStretch(1)
+    gui.subtitle_inspector_toggle_btn = QPushButton("◀")
+    gui.subtitle_inspector_toggle_btn.setCheckable(True)
+    gui.subtitle_inspector_toggle_btn.setChecked(False)
+    gui.subtitle_inspector_toggle_btn.setObjectName("subtitleInspectorHandleBtn")
+    gui.subtitle_inspector_toggle_btn.setFixedSize(28, 110)
+    gui.subtitle_inspector_toggle_btn.clicked.connect(lambda checked: gui.toggle_subtitle_inspector_details(bool(checked)))
+    inspector_handle_layout.addWidget(gui.subtitle_inspector_toggle_btn, 0, Qt.AlignHCenter)
+    inspector_handle_layout.addStretch(1)
+
+    inspector_shell_layout.addWidget(inspector_card, 1)
+    inspector_shell_layout.addWidget(inspector_handle, 0)
+    gui.subtitle_inspector_details_widget.setVisible(False)
+    gui.subtitle_inspector_shell = inspector_shell
+    gui.subtitle_inspector_handle = inspector_handle
+    inspector_shell.setFixedWidth(max(34, inspector_handle.sizeHint().width() or inspector_handle.width() or 34))
 
     workspace_row = QHBoxLayout()
     workspace_row.setSpacing(10)
     workspace_row.addWidget(preview_card, 1)
-    workspace_row.addWidget(inspector_card, 1)
+    workspace_row.addWidget(inspector_shell, 0)
 
     right_layout.addLayout(workspace_row, 5)
     right_layout.addWidget(timeline_card, 3)

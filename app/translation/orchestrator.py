@@ -29,10 +29,11 @@ class TranslationOrchestrator:
         src_lang: str = "zh-Hans",
         target_lang: str = "vi",
         enable_polish: bool = True,
-        optimize_subtitles: bool = True,
+        optimize_subtitles: bool = False,
         ms_batch_size: int = 50,
         polish_batch_size: int = 25,
         style_instruction: str = "",
+        batch_callback=None,
     ) -> TranslationResult:
         if not segments:
             return TranslationResult(success=False, errors=["No segments to translate."], stage="input")
@@ -40,6 +41,7 @@ class TranslationOrchestrator:
         source_texts = [s.get("text") or "" for s in segments]
         normalized_src = self._normalize_source_language(src_lang)
         warnings = []
+        optimize_subtitles = False
 
         if enable_polish:
             provider_type, polisher = self._resolve_ai_provider()
@@ -47,26 +49,20 @@ class TranslationOrchestrator:
                 try:
                     mode_label = self._describe_ai_provider(provider_type)
                     merged_style = str(style_instruction or "")
-                    if optimize_subtitles and provider_type != "local":
-                        merged_style = (
-                            "Subtitle-optimized translation. "
-                            "Make it natural, concise, timing-friendly Vietnamese. "
-                            "Prefer one line per segment, use <br> only when needed. "
-                            "Keep names/numbers/products exactly. "
-                            + merged_style
-                        )
                     print(
                         f"[AI Translation] Starting translation (provider: {mode_label}, batch_size={polish_batch_size})..."
                     )
                     translated_texts, providers_used, batch_warnings = self._run_ai_batches(
                         polisher=polisher,
                         provider_type=provider_type,
+                        base_segments=segments,
                         source_texts=source_texts,
                         translated_texts=None,
                         src_lang=normalized_src,
                         target_lang=target_lang,
                         style_instruction=merged_style,
                         polish_batch_size=polish_batch_size,
+                        batch_callback=batch_callback,
                     )
                     warnings.extend(batch_warnings)
 
@@ -75,17 +71,6 @@ class TranslationOrchestrator:
 
                     print(f"[AI Translation] Success: completed via {', '.join(providers_used) or 'AI'}")
                     final_segments = clone_with_texts(segments, translated_texts, provider=provider_type, polished=True)
-                    if optimize_subtitles and provider_type == "local":
-                        final_segments = self._maybe_optimize_subtitle_segments(
-                            polisher=polisher,
-                            provider_type=provider_type,
-                            source_segments=segments,
-                            translated_segments=final_segments,
-                            src_lang=normalized_src,
-                            target_lang=target_lang,
-                            warnings=warnings,
-                            style_instruction=style_instruction,
-                        )
                     return TranslationResult(
                         success=True,
                         segments=final_segments,
@@ -104,6 +89,7 @@ class TranslationOrchestrator:
         print(f"[Translation] Starting Google web translate fallback (batch_size={ms_batch_size})...")
         try:
             translated_texts = []
+            offset = 0
             for batch in split_text_batches(source_texts, ms_batch_size):
                 translated_batch = self.google_web.translate_batch(
                     batch,
@@ -111,6 +97,15 @@ class TranslationOrchestrator:
                     target_lang=target_lang,
                 )
                 translated_texts.extend(translated_batch)
+                self._emit_batch_callback(
+                    batch_callback=batch_callback,
+                    base_segments=segments,
+                    start_idx=offset,
+                    translated_texts=translated_batch,
+                    provider="google-web",
+                    polished=False,
+                )
+                offset += len(batch)
 
             if not validate_texts(translated_texts, len(segments)):
                 raise TranslationValidationError("Google web translate returned an invalid number of segments.")
@@ -131,6 +126,7 @@ class TranslationOrchestrator:
                     warnings.append(f"Google web translate failed, falling back to Microsoft: {exc}")
                     print(f"[Translation] WARNING: Google web translate failed, trying Microsoft Translator: {exc}")
                     translated_texts = []
+                    offset = 0
                     for batch in split_text_batches(source_texts, ms_batch_size):
                         translated_batch = self.microsoft.translate_batch(
                             batch,
@@ -138,6 +134,15 @@ class TranslationOrchestrator:
                             target_lang=target_lang,
                         )
                         translated_texts.extend(translated_batch)
+                        self._emit_batch_callback(
+                            batch_callback=batch_callback,
+                            base_segments=segments,
+                            start_idx=offset,
+                            translated_texts=translated_batch,
+                            provider="microsoft",
+                            polished=False,
+                        )
+                        offset += len(batch)
                     if not validate_texts(translated_texts, len(segments)):
                         raise TranslationValidationError("Microsoft Translator returned an invalid number of segments.")
                     print("[Translation] Success: Microsoft translation completed.")
@@ -264,12 +269,14 @@ class TranslationOrchestrator:
         *,
         polisher,
         provider_type: str,
+        base_segments: list[dict],
         source_texts: list[str],
         translated_texts: list[str] | None,
         src_lang: str,
         target_lang: str,
         style_instruction: str,
         polish_batch_size: int,
+        batch_callback=None,
     ) -> tuple[list[str], list[str], list[str]]:
         warnings = []
         providers_used = set()
@@ -279,6 +286,7 @@ class TranslationOrchestrator:
             source_batches = list(split_text_batches(source_texts, local_batch_size))
             translated_batches = list(split_text_batches(translated_texts, local_batch_size)) if translated_texts else [None] * len(source_batches)
             merged: list[str] = []
+            offset = 0
             for idx, source_batch in enumerate(source_batches):
                 batch_trans = translated_batches[idx]
                 try:
@@ -293,12 +301,22 @@ class TranslationOrchestrator:
                     warnings.extend(batch_warnings)
                     if provider_name:
                         providers_used.add(provider_name)
+                    self._emit_batch_callback(
+                        batch_callback=batch_callback,
+                        base_segments=base_segments,
+                        start_idx=offset,
+                        translated_texts=batch_result,
+                        provider=provider_type,
+                        polished=True,
+                    )
+                    offset += len(source_batch)
                 except Exception as batch_exc:
                     single_size = max(1, len(source_batch) // 2)
                     if single_size < len(source_batch):
                         print(f"[AI Translation] Batch {idx + 1} failed ({batch_exc}), retrying with smaller batches ({single_size} lines)...")
                         sub_sources = list(split_text_batches(source_batch, single_size))
                         sub_trans = list(split_text_batches(batch_trans, single_size)) if batch_trans else [None] * len(sub_sources)
+                        sub_offset = offset
                         for sub_idx, sub_src in enumerate(sub_sources):
                             sub_t = sub_trans[sub_idx] if sub_trans else None
                             try:
@@ -313,26 +331,59 @@ class TranslationOrchestrator:
                                 warnings.extend(sub_warnings)
                                 if sub_provider:
                                     providers_used.add(sub_provider)
+                                self._emit_batch_callback(
+                                    batch_callback=batch_callback,
+                                    base_segments=base_segments,
+                                    start_idx=sub_offset,
+                                    translated_texts=sub_result,
+                                    provider=provider_type,
+                                    polished=True,
+                                )
                             except Exception:
                                 print(f"[AI Translation] Sub-batch {sub_idx + 1} re-failed, using Google fallback for {len(sub_src)} lines...")
+                                fallback_result = []
                                 for src_line in sub_src:
                                     try:
                                         gb = self.google_web.translate_batch([src_line], src_lang=src_lang, target_lang=target_lang)
                                         merged.extend(gb)
+                                        fallback_result.extend(gb)
                                     except Exception:
                                         merged.append(src_line)
+                                        fallback_result.append(src_line)
                                         warnings.append(f"Google fallback also failed for line: {src_line[:50]}")
+                                self._emit_batch_callback(
+                                    batch_callback=batch_callback,
+                                    base_segments=base_segments,
+                                    start_idx=sub_offset,
+                                    translated_texts=fallback_result,
+                                    provider="google-web-retry",
+                                    polished=False,
+                                )
                                 providers_used.add("google-web-retry")
+                            sub_offset += len(sub_src)
+                        offset += len(source_batch)
                     else:
                         print(f"[AI Translation] Batch {idx + 1} failed ({batch_exc}), using Google fallback for {len(source_batch)} lines...")
+                        fallback_result = []
                         for src_line in source_batch:
                             try:
                                 gb = self.google_web.translate_batch([src_line], src_lang=src_lang, target_lang=target_lang)
                                 merged.extend(gb)
+                                fallback_result.extend(gb)
                             except Exception:
                                 merged.append(src_line)
+                                fallback_result.append(src_line)
                                 warnings.append(f"Google fallback also failed for line: {src_line[:50]}")
+                        self._emit_batch_callback(
+                            batch_callback=batch_callback,
+                            base_segments=base_segments,
+                            start_idx=offset,
+                            translated_texts=fallback_result,
+                            provider="google-web-retry",
+                            polished=False,
+                        )
                         providers_used.add("google-web-retry")
+                        offset += len(source_batch)
             return merged, sorted(providers_used), warnings
 
         source_batches = list(split_text_batches(source_texts, max(polish_batch_size, 60)))
@@ -367,6 +418,29 @@ class TranslationOrchestrator:
         for idx in range(len(source_batches)):
             merged.extend(translated_texts_map[idx])
         return merged, sorted(providers_used), warnings
+
+    def _emit_batch_callback(
+        self,
+        *,
+        batch_callback,
+        base_segments: list[dict],
+        start_idx: int,
+        translated_texts: list[str],
+        provider: str,
+        polished: bool,
+    ) -> None:
+        if batch_callback is None or not translated_texts:
+            return
+        try:
+            batch_segments = clone_with_texts(
+                list(base_segments[start_idx:start_idx + len(translated_texts)]),
+                list(translated_texts),
+                provider=provider,
+                polished=polished,
+            )
+            batch_callback(start_idx, batch_segments)
+        except Exception as exc:
+            print(f"[Translation] Batch callback skipped: {exc}")
     def _maybe_optimize_subtitle_segments(
         self,
         *,
@@ -434,12 +508,6 @@ class TranslationOrchestrator:
                     target_lang=target_lang,
                 )
                 print(f'[AI Subtitle Optimization] Single-line cue split: {before_count} -> {len(optimized_segments)} cues')
-            if self._style_prefers_ai_keyword_highlight(style_instruction):
-                optimized_segments = self._maybe_generate_ai_keyword_highlights(
-                    optimized_segments,
-                    target_lang=target_lang,
-                    warnings=warnings,
-                )
             return optimized_segments
         except Exception as exc:
             msg = f'Subtitle optimization skipped: {exc}'
@@ -616,7 +684,6 @@ class TranslationOrchestrator:
     def _strip_layout_markers(self, style_instruction: str) -> str:
         text = str(style_instruction or '')
         text = text.replace('[subtitle_layout=single_line]', ' ')
-        text = text.replace('[keyword_highlight=ai_local]', ' ')
         text = text.replace('|  |', '|')
         text = text.replace('||', '|')
         parts = [part.strip() for part in text.split('|') if part.strip()]
@@ -633,69 +700,6 @@ class TranslationOrchestrator:
 
     def _remove_phrase_case_insensitive(self, text: str, phrase: str) -> str:
         return re.sub(re.escape(phrase), '', text, flags=re.IGNORECASE).replace('  ', ' ').strip()
-
-    def _style_prefers_ai_keyword_highlight(self, style_instruction: str) -> bool:
-        normalized = str(style_instruction or '').strip().lower()
-        return '[keyword_highlight=ai_local]' in normalized
-
-    def _maybe_generate_ai_keyword_highlights(
-        self,
-        segments: list[dict],
-        *,
-        target_lang: str,
-        warnings: list[str],
-    ) -> list[dict]:
-        if not segments:
-            return segments
-        polisher = self.local_polisher
-        if not polisher.is_configured():
-            msg = 'AI keyword highlight skipped: Local provider is not configured.'
-            print(f'[AI Keyword Highlight] WARNING: {msg}')
-            warnings.append(msg)
-            return segments
-
-        texts = [' '.join(str(seg.get('text') or '').replace('\n', ' ').split()).strip() for seg in segments]
-        batch_size = 10
-        all_highlights: list[list[str]] = []
-        try:
-            for start_idx in range(0, len(texts), batch_size):
-                batch = texts[start_idx:start_idx + batch_size]
-                all_highlights.extend(
-                    polisher.select_keyword_highlights_batch(
-                        texts=batch,
-                        target_lang=target_lang,
-                        max_keywords=2,
-                    )
-                )
-            if len(all_highlights) != len(segments):
-                raise TranslationValidationError('AI keyword highlight returned invalid segment count.')
-        except Exception as exc:
-            msg = f'AI keyword highlight skipped: {exc}'
-            print(f'[AI Keyword Highlight] WARNING: {msg}')
-            warnings.append(msg)
-            return segments
-
-        updated_segments: list[dict] = []
-        for seg, phrases in zip(segments, all_highlights):
-            updated = dict(seg)
-            updated['auto_highlights'] = self._normalize_auto_highlight_phrases(updated.get('text', ''), phrases)
-            updated_segments.append(updated)
-        print('[AI Keyword Highlight] Success: local highlight phrases generated.')
-        return updated_segments
-
-    def _normalize_auto_highlight_phrases(self, text: str, phrases) -> list[str]:
-        source_text = str(text or '')
-        lowered = source_text.lower()
-        cleaned: list[str] = []
-        seen = set()
-        for phrase in phrases or []:
-            normalized = ' '.join(str(phrase or '').replace('\n', ' ').split()).strip(' ,;|')
-            key = normalized.lower()
-            if not normalized or key in seen or key not in lowered:
-                continue
-            seen.add(key)
-            cleaned.append(normalized)
-        return cleaned
 
     def _split_segments_for_single_line(
         self,
@@ -714,7 +718,6 @@ class TranslationOrchestrator:
             start = float(seg.get('start', 0.0) or 0.0)
             end = float(seg.get('end', 0.0) or 0.0)
             duration = max(0.6, end - start)
-            tts_text = ' '.join(str(seg.get('tts_text') or text).replace('\n', ' ').split()).strip() or text
             group_id = f"tts-{seg.get('id', len(split_segments) + 1)}-{int(round(start * 1000))}"
             chunks = self._split_text_into_single_line_chunks(
                 text,
@@ -726,7 +729,6 @@ class TranslationOrchestrator:
             if len(chunks) <= 1:
                 updated = dict(seg)
                 updated['text'] = chunks[0] if chunks else text
-                updated['tts_text'] = tts_text
                 updated['tts_group_id'] = group_id
                 updated['tts_group_start'] = round(start, 3)
                 updated['tts_group_end'] = round(end, 3)
@@ -738,7 +740,6 @@ class TranslationOrchestrator:
             for idx, chunk in enumerate(chunks):
                 updated = dict(seg)
                 updated['text'] = chunk
-                updated['tts_text'] = tts_text
                 updated['tts_group_id'] = group_id
                 updated['tts_group_start'] = round(start, 3)
                 updated['tts_group_end'] = round(end, 3)

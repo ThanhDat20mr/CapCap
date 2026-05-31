@@ -89,7 +89,38 @@ def parse_numbered_lines(raw: str) -> list[str]:
     first_num = re.search(r"^\s*\d+\.", cleaned, re.MULTILINE)
     if first_num:
         cleaned = cleaned[first_num.start():]
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+
     items = []
+    pattern = re.compile(r"^\s*(\d+)\.\s*(.*?)(?=^\s*\d+\.\s*|\Z)", re.MULTILINE | re.DOTALL)
+    for match in pattern.finditer(cleaned):
+        body = str(match.group(2) or "").strip()
+        if not body:
+            continue
+        body_lines = []
+        for raw_line in body.splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith(("Assistant:", "Translation:", "Trợ lý:", "Dịch:", "Note:", "Here", "Sure", "OK", "Let", "I'll", "The")):
+                continue
+            body_lines.append(stripped)
+        normalized = " ".join(body_lines).strip()
+        while True:
+            nested = re.match(r"^\s*\d+\.\s*(.+?)\s*$", normalized)
+            if not nested:
+                break
+            candidate = nested.group(1).strip()
+            if not candidate or candidate == normalized:
+                break
+            normalized = candidate
+        if normalized:
+            items.append(normalized)
+
+    if items:
+        return items
+
+    fallback_items = []
     for line in cleaned.splitlines():
         stripped = line.strip()
         if not stripped:
@@ -98,5 +129,14 @@ def parse_numbered_lines(raw: str) -> list[str]:
             continue
         match = re.match(r"^\s*\d+\.\s*(.+?)\s*$", line)
         if match:
-            items.append(match.group(1).strip())
-    return items
+            candidate = match.group(1).strip()
+            while True:
+                nested = re.match(r"^\s*\d+\.\s*(.+?)\s*$", candidate)
+                if not nested:
+                    break
+                inner = nested.group(1).strip()
+                if not inner or inner == candidate:
+                    break
+                candidate = inner
+            fallback_items.append(candidate)
+    return fallback_items

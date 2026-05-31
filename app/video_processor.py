@@ -2,7 +2,7 @@ import subprocess
 import os
 import re
 
-from highlight_selector import find_highlights
+from new_highlight_selector import auto_select_matches
 from runtime_paths import bin_path
 
 
@@ -601,7 +601,7 @@ def _apply_keyword_highlight(text: str, *, preset_key: str, highlight_color: str
     if not ordered_spans and (preset_key or "").strip().lower() != "highlight":
         return source_text
     if not ordered_spans:
-        candidates = find_highlights(source_text, max_highlights=2)
+        candidates = auto_select_matches(source_text, max_keywords=2)
         if not candidates:
             return source_text
         ordered_spans = [(candidate.start, candidate.end) for candidate in sorted(candidates, key=lambda item: item.start)]

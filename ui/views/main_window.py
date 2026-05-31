@@ -182,7 +182,9 @@ def _connect_ui_signals(gui):
     if hasattr(gui, "subtitle_single_line_cb"):
         gui.subtitle_single_line_cb.toggled.connect(gui.on_single_line_toggled)
     gui.use_existing_audio_radio.toggled.connect(gui.on_audio_source_mode_changed)
-    gui.blur_area_btn.toggled.connect(gui.toggle_blur_area_editing)
+    gui.blur_area_btn.toggled.connect(gui.toggle_blur_effect_enabled)
+    gui.blur_edit_btn.toggled.connect(gui.toggle_blur_area_editing)
+    gui.ocr_region_btn.clicked.connect(gui.toggle_ocr_overlay_visibility)
     if hasattr(gui, "video_view") and hasattr(gui.video_view, "framingChanged"):
         gui.video_view.framingChanged.connect(gui.on_preview_framing_changed)
     gui.transcript_text.textChanged.connect(gui.refresh_ui_state)
@@ -296,6 +298,7 @@ def _initialize_ui_state(gui):
     gui.on_output_mode_changed(gui.output_mode_combo.currentText())
     gui.update_project_header()
     gui.refresh_ui_state()
+    gui.set_subtitle_inspector_details_visible(False, sync=False)
     gui.sync_segment_editor_rows()
     gui.set_controls_panel_visible(False)
 

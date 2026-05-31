@@ -11,7 +11,7 @@ class RemoteTranslatorAdapter:
         model_path=None,
         src_lang: str = "auto",
         enable_polish: bool = True,
-        optimize_subtitles: bool = True,
+        optimize_subtitles: bool = False,
         style_instruction: str = "",
     ) -> str:
         response = remote_api_post(
@@ -33,8 +33,9 @@ class RemoteTranslatorAdapter:
         model_path=None,
         src_lang: str = "auto",
         enable_polish: bool = True,
-        optimize_subtitles: bool = True,
+        optimize_subtitles: bool = False,
         style_instruction: str = "",
+        batch_callback=None,
     ):
         response = remote_api_post(
             "/v1/translate-segments",

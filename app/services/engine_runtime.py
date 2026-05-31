@@ -92,7 +92,7 @@ class EngineRuntime:
         model_path=None,
         src_lang: str = "auto",
         enable_polish: bool = True,
-        optimize_subtitles: bool = True,
+        optimize_subtitles: bool = False,
         style_instruction: str = "",
     ) -> str:
         return self.translator.translate_srt(
@@ -111,8 +111,9 @@ class EngineRuntime:
         model_path=None,
         src_lang: str = "auto",
         enable_polish: bool = True,
-        optimize_subtitles: bool = True,
+        optimize_subtitles: bool = False,
         style_instruction: str = "",
+        batch_callback=None,
     ):
         return self.translator.translate_segments(
             segments,
@@ -121,6 +122,7 @@ class EngineRuntime:
             enable_polish=enable_polish,
             optimize_subtitles=optimize_subtitles,
             style_instruction=style_instruction,
+            batch_callback=batch_callback,
         )
 
     def rewrite_translation_segments(self, source_segments, translated_segments, *, model_path=None, src_lang: str = "auto", style_instruction: str = ""):

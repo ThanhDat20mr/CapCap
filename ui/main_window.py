@@ -39,6 +39,7 @@ from helpers import (
     parse_srt_to_segments,
     validate_srt_text,
 )
+from new_highlight_selector import auto_select_matches
 from video_processor import srt_to_ass
 from utils.display_utils import (
     cleanup_temp_preview_files as cleanup_temp_preview_files_impl,
@@ -81,6 +82,8 @@ from workers import (
     ExtractionWorker,
     ResourceDownloadWorker,
     SegmentAudioPreviewWorker,
+    TimelineThumbnailWorker,
+    TimelineWaveformWorker,
     VoiceSamplePreviewWorker,
     VocalSeparationWorker,
     VoiceOverWorker,
@@ -222,6 +225,30 @@ class VideoTranslatorGUI(QMainWindow):
                 background-color: #0d1624;
                 border: 1px solid #24384f;
                 border-radius: 14px;
+            }
+            QFrame#subtitleInspectorHandle {
+                background-color: #0d1624;
+                border: 1px solid #24384f;
+                border-left: none;
+                border-top-right-radius: 14px;
+                border-bottom-right-radius: 14px;
+            }
+            QPushButton#subtitleInspectorHandleBtn {
+                background-color: #162638;
+                color: #8ad7ff;
+                border: 1px solid #31506d;
+                border-right: none;
+                border-top-left-radius: 999px;
+                border-bottom-left-radius: 999px;
+                border-top-right-radius: 0px;
+                border-bottom-right-radius: 0px;
+                font-size: 20px;
+                font-weight: 900;
+                padding: 0px;
+            }
+            QPushButton#subtitleInspectorHandleBtn:hover {
+                background-color: #1d3047;
+                border-color: #4d82b5;
             }
             QLabel#heroTitle {
                 font-size: 20px;
@@ -527,6 +554,7 @@ class VideoTranslatorGUI(QMainWindow):
         self._voice_signals_bound = False
         self._media_backend_ready = False
         self._blur_region_signal_bound = False
+        self._blur_edit_finished_signal_bound = False
         self._preview_audio_signals_bound = False
         self.media_player = _BootstrapMediaBackend()
         self.voice_preview_dialog = None
@@ -544,11 +572,15 @@ class VideoTranslatorGUI(QMainWindow):
         self._timeline_waveform_cache_key = None
         self._timeline_waveform_samples = []
         self._timeline_waveform_duration_s = 0.0
-        self._waveform_extracting = False
+        self._timeline_waveform_worker = None
+        self._desired_timeline_waveform_request = None
         self._timeline_video_thumb_cache_key = None
         self._timeline_video_thumbnails = []
+        self._timeline_thumbnail_worker = None
+        self._desired_timeline_thumbnail_request = None
         self._pending_timeline_waveform_refresh = False
         self._pending_timeline_thumbnail_refresh = False
+        self._allow_post_pipeline_preview_assets = False
         self._subtitle_custom_style_state = None
         self._subtitle_preset_apply_in_progress = False
         self._video_filter_ui_sync = False
@@ -573,12 +605,15 @@ class VideoTranslatorGUI(QMainWindow):
         self._pending_video_filter_preview = False
         self._filter_thumbnail_visible = False
         self._filter_preview_blur_was_checked = False
+        self._filter_preview_blur_edit_was_checked = False
         self._filter_preview_ocr_was_editable = False
         self._suspend_ocr_overlay = False
+        self._ocr_overlay_visible = True
         self._play_video_filter_preview_when_ready = False
         self._filter_thumbnail_target_height = 320
         self._video_filter_preview_dirty = False
         self._video_filter_apply_requested = False
+        self._blur_edit_finish_syncing = False
         # Simple pipeline runner (Run All)
         self._pipeline_active = False
         self._pipeline_step = ""
@@ -738,6 +773,14 @@ class VideoTranslatorGUI(QMainWindow):
                     pass
             self.video_view.blurRegionChanged.connect(self.apply_preview_blur_region)
             self._blur_region_signal_bound = True
+        if hasattr(self, "video_view") and hasattr(self.video_view, "blurEditFinished"):
+            if getattr(self, "_blur_edit_finished_signal_bound", False):
+                try:
+                    self.video_view.blurEditFinished.disconnect(self.on_blur_edit_finished)
+                except Exception:
+                    pass
+            self.video_view.blurEditFinished.connect(self.on_blur_edit_finished)
+            self._blur_edit_finished_signal_bound = True
 
     def _configure_local_voice_mode_ui(self):
         if hasattr(self, "use_free_voice_radio"):
@@ -1837,121 +1880,94 @@ class VideoTranslatorGUI(QMainWindow):
         video_hash = hashlib.md5(video_path.encode("utf-8")).hexdigest()[:12]
         return os.path.join(self.get_workspace_temp_root(create=True), f"waveform_{video_hash}.wav")
 
+    def _timeline_waveform_request_signature(self):
+        audio_path = self.resolve_timeline_audio_visualization_path()
+        if audio_path and os.path.exists(audio_path):
+            try:
+                stat = os.stat(audio_path)
+                return (
+                    "v2-envelope",
+                    "audio",
+                    os.path.abspath(audio_path),
+                    int(stat.st_size),
+                    int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
+                )
+            except Exception:
+                return ("v2-envelope", "audio", os.path.abspath(audio_path), 0, 0)
+
+        video_path = self._normalize_local_file_path(self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else "")
+        if video_path and os.path.exists(video_path):
+            try:
+                stat = os.stat(video_path)
+                return (
+                    "v2-envelope",
+                    "video-fallback",
+                    os.path.abspath(video_path),
+                    int(stat.st_size),
+                    int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
+                    str(getattr(self, "_preview_audio_track_mode", "original") or "original"),
+                )
+            except Exception:
+                return (
+                    "v2-envelope",
+                    "video-fallback",
+                    os.path.abspath(video_path),
+                    0,
+                    0,
+                    str(getattr(self, "_preview_audio_track_mode", "original") or "original"),
+                )
+        return None
+
+    def _timeline_thumbnail_request_signature(self):
+        video_path = self._normalize_local_file_path(self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else "")
+        duration_s = max(0.0, float(getattr(self.timeline, "duration", 0) or 0) / 1000.0) if hasattr(self, "timeline") else 0.0
+        if not video_path or not os.path.exists(video_path) or duration_s <= 0.0:
+            return None
+        try:
+            stat = os.stat(video_path)
+            return (
+                os.path.abspath(video_path),
+                int(stat.st_size),
+                int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
+                int(round(duration_s)),
+            )
+        except Exception:
+            return (os.path.abspath(video_path), 0, 0, int(round(duration_s)))
+
     def refresh_timeline_waveform(self):
         if not hasattr(self, "timeline"):
             print("[Timeline] no timeline widget")
             return
-        audio_path = self.resolve_timeline_audio_visualization_path()
-        print(f"[Timeline] refresh_waveform audio_path={audio_path} exists={os.path.exists(audio_path) if audio_path else False}")
-        if not audio_path or not os.path.exists(audio_path):
-            video_path = self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else ""
-            if video_path and os.path.exists(video_path):
-                temp_audio = self._waveform_temp_path()
-                print(f"[Timeline] temp_audio={temp_audio} exists={os.path.exists(temp_audio) if temp_audio else False}")
-                if temp_audio and not os.path.exists(temp_audio):
-                    from runtime_paths import bin_path
-                    import subprocess
-                    ffmpeg = os.path.join(bin_path("ffmpeg"), "ffmpeg.exe")
-                    try:
-                        subprocess.run(
-                            [ffmpeg, "-y", "-loglevel", "error", "-i", video_path,
-                             "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", temp_audio],
-                            check=True, timeout=60,
-                        )
-                        print(f"[Timeline] extracted fallback audio: {temp_audio}")
-                    except Exception as exc:
-                        print(f"[Timeline] waveform extract failed: {exc}")
-                if temp_audio and os.path.exists(temp_audio):
-                    audio_path = temp_audio
-            if not audio_path or not os.path.exists(audio_path):
-                self._timeline_waveform_cache_key = None
-                self._timeline_waveform_samples = []
-                self._timeline_waveform_duration_s = 0.0
-                self.timeline.set_waveform_data([], 0.0)
-                return
+        self._desired_timeline_waveform_request = None
+        self._timeline_waveform_cache_key = None
+        self._timeline_waveform_samples = []
+        self._timeline_waveform_duration_s = 0.0
+        self.timeline.set_waveform_data([], 0.0)
 
-        try:
-            stat = os.stat(audio_path)
-            cache_key = (
-                os.path.abspath(audio_path),
-                int(stat.st_size),
-                int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
+    def _on_timeline_waveform_ready(self, request_signature, waveform, duration_s, error):
+        self._timeline_waveform_worker = None
+        if request_signature != self._desired_timeline_waveform_request:
+            self.refresh_timeline_waveform()
+            return
+        if error:
+            print(f"[Timeline] waveform generation failed: {error}")
+            self._timeline_waveform_cache_key = request_signature
+            self._timeline_waveform_samples = []
+            self._timeline_waveform_duration_s = 0.0
+        else:
+            self._timeline_waveform_cache_key = request_signature
+            self._timeline_waveform_samples = list(waveform or [])
+            self._timeline_waveform_duration_s = max(0.0, float(duration_s or 0.0))
+            print(
+                f"[Timeline] waveform generated: samples={len(self._timeline_waveform_samples)} "
+                f"duration={self._timeline_waveform_duration_s:.1f}s"
             )
-        except Exception:
-            cache_key = (os.path.abspath(audio_path), 0, 0)
-
-        if cache_key != self._timeline_waveform_cache_key:
-            try:
-                from audio_mixer import _require_pydub
-                _require_pydub()
-                from pydub import AudioSegment
-                import numpy as np
-
-                audio = AudioSegment.from_file(audio_path).set_channels(1)
-                samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
-                duration_s = max(0.0, len(audio) / 1000.0)
-                if samples.size:
-                    sample_rate = max(8000, int(audio.frame_rate or 16000))
-                    samples = samples.astype(np.float32)
-                    samples /= max(1.0, float(np.max(np.abs(samples))) or 1.0)
-                    bucket_count = int(min(2400, max(600, duration_s * 40)))
-                    chunk_size = max(256, int(np.ceil(samples.size / max(1, bucket_count))))
-                    band_count = 8
-                    spectrum = []
-                    for start in range(0, samples.size, chunk_size):
-                        chunk = samples[start:start + chunk_size]
-                        if chunk.size < 32:
-                            spectrum.append([0.0] * band_count)
-                            continue
-                        if chunk.size < chunk_size:
-                            chunk = np.pad(chunk, (0, chunk_size - chunk.size))
-                        window = np.hanning(chunk.size)
-                        fft = np.fft.rfft(chunk * window)
-                        magnitudes = np.abs(fft)
-                        if magnitudes.size <= 1:
-                            spectrum.append([0.0] * band_count)
-                            continue
-                        freqs = np.fft.rfftfreq(chunk.size, d=1.0 / sample_rate)
-                        band_edges = np.geomspace(40.0, min(8000.0, sample_rate / 2.0), num=band_count + 1)
-                        band_values = []
-                        for band_idx in range(band_count):
-                            mask = (freqs >= band_edges[band_idx]) & (freqs < band_edges[band_idx + 1])
-                            band_mag = magnitudes[mask]
-                            if band_mag.size:
-                                band_values.append(float(np.mean(band_mag)))
-                            else:
-                                band_values.append(0.0)
-                        spectrum.append(band_values)
-
-                    if spectrum:
-                        band_max = [max(column[idx] for column in spectrum) or 1.0 for idx in range(len(spectrum[0]))]
-                        waveform = []
-                        for column in spectrum:
-                            waveform.append(
-                                [
-                                    min(1.0, (float(value) / float(band_max[idx])) ** 0.75)
-                                    for idx, value in enumerate(column)
-                                ]
-                            )
-                    else:
-                        waveform = []
-                else:
-                    waveform = []
-                    duration_s = 0.0
-                self._timeline_waveform_cache_key = cache_key
-                self._timeline_waveform_samples = waveform
-                self._timeline_waveform_duration_s = duration_s
-                print(f"[Timeline] waveform generated: samples={len(waveform)} duration={duration_s:.1f}s")
-            except Exception as exc:
-                print(f"[Timeline] waveform generation failed: {exc}")
-                self._timeline_waveform_cache_key = cache_key
-                self._timeline_waveform_samples = []
-                self._timeline_waveform_duration_s = 0.0
-
-        print(f"[Timeline] set_waveform_data: samples={len(self._timeline_waveform_samples)} duration={self._timeline_waveform_duration_s:.1f}s")
-        self.timeline.set_waveform_data(self._timeline_waveform_samples, self._timeline_waveform_duration_s)
+        if hasattr(self, "timeline"):
+            self.timeline.set_waveform_data(self._timeline_waveform_samples, self._timeline_waveform_duration_s)
 
     def schedule_timeline_visual_refresh(self, *, waveform: bool = True, thumbnails: bool = True, delay_ms: int = 40):
+        if not bool(getattr(self, "_allow_post_pipeline_preview_assets", False)):
+            return
         if waveform:
             self._pending_timeline_waveform_refresh = True
         if thumbnails:
@@ -1975,99 +1991,32 @@ class VideoTranslatorGUI(QMainWindow):
     def refresh_timeline_video_thumbnails(self):
         if not hasattr(self, "timeline"):
             return
+        # Timeline thumbnails are disabled to keep long videos lightweight.
+        self._timeline_video_thumb_cache_key = None
+        self._timeline_video_thumbnails = []
+        self.timeline.set_video_thumbnails([])
+        self._desired_timeline_thumbnail_request = None
+        return
 
-        video_path = self._normalize_local_file_path(self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else "")
-        duration_s = max(0.0, float(getattr(self.timeline, "duration", 0) or 0) / 1000.0)
-        if not video_path or not os.path.exists(video_path) or duration_s <= 0.0:
-            self._timeline_video_thumb_cache_key = None
-            self._timeline_video_thumbnails = []
-            self.timeline.set_video_thumbnails([])
+    def _on_timeline_video_thumbnails_ready(self, request_signature, thumbnails, error):
+        self._timeline_thumbnail_worker = None
+        if request_signature != self._desired_timeline_thumbnail_request:
+            self.refresh_timeline_video_thumbnails()
             return
-
-        try:
-            stat = os.stat(video_path)
-            cache_key = (
-                os.path.abspath(video_path),
-                int(stat.st_size),
-                int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
-                int(round(duration_s)),
-            )
-        except Exception:
-            cache_key = (os.path.abspath(video_path), 0, 0, int(round(duration_s)))
-
-        if cache_key != self._timeline_video_thumb_cache_key:
-            thumbnails = []
-            ffmpeg_candidates = [
-                bin_path("ffmpeg", "ffmpeg.exe"),
-                bin_path("ffmpeg.exe"),
-                shutil.which("ffmpeg"),
-                shutil.which("ffmpeg.exe"),
-            ]
-            ffmpeg_path = ""
-            for candidate in ffmpeg_candidates:
-                if candidate and os.path.isfile(candidate):
-                    ffmpeg_path = candidate
-                    break
-
-            if ffmpeg_path and os.path.isfile(ffmpeg_path):
-                thumb_count = max(4, min(10, int(round(duration_s / 3.0)) or 6))
-                if duration_s <= 1.0:
-                    timestamps = [0.0]
-                else:
-                    timestamps = [
-                        min(duration_s - 0.05, max(0.0, ((idx + 0.5) * duration_s) / thumb_count))
-                        for idx in range(thumb_count)
-                    ]
-
-                thumb_dir = self.get_project_temp_dir("timeline_video_thumbs")
-                os.makedirs(thumb_dir, exist_ok=True)
-                digest = hashlib.md5(f"{video_path}|{cache_key[1]}|{cache_key[2]}|{cache_key[3]}".encode("utf-8")).hexdigest()[:16]
-
-                startupinfo = None
-                creationflags = 0
-                if os.name == "nt":
-                    startupinfo = subprocess.STARTUPINFO()
-                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-                for idx, timestamp_s in enumerate(timestamps):
-                    output_path = os.path.join(thumb_dir, f"{digest}_{idx:02d}.jpg")
-                    if not os.path.exists(output_path):
-                        cmd = [
-                            ffmpeg_path,
-                            "-y",
-                            "-ss",
-                            f"{timestamp_s:.3f}",
-                            "-i",
-                            video_path,
-                            "-frames:v",
-                            "1",
-                            "-q:v",
-                            "4",
-                            "-vf",
-                            "scale=180:-1:force_original_aspect_ratio=decrease",
-                            output_path,
-                        ]
-                        try:
-                            subprocess.run(
-                                cmd,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                check=False,
-                                timeout=20,
-                                startupinfo=startupinfo,
-                                creationflags=creationflags,
-                            )
-                        except Exception:
-                            continue
-                    pixmap = QPixmap(output_path)
-                    if not pixmap.isNull():
-                        thumbnails.append((float(timestamp_s), pixmap))
-
-            self._timeline_video_thumb_cache_key = cache_key
-            self._timeline_video_thumbnails = thumbnails
-
-        self.timeline.set_video_thumbnails(self._timeline_video_thumbnails)
+        if error:
+            print(f"[Timeline] thumbnail generation failed: {error}")
+            self._timeline_video_thumb_cache_key = request_signature
+            self._timeline_video_thumbnails = []
+        else:
+            pixmaps = []
+            for timestamp_s, output_path in list(thumbnails or []):
+                pixmap = QPixmap(str(output_path or ""))
+                if not pixmap.isNull():
+                    pixmaps.append((float(timestamp_s), pixmap))
+            self._timeline_video_thumb_cache_key = request_signature
+            self._timeline_video_thumbnails = pixmaps
+        if hasattr(self, "timeline"):
+            self.timeline.set_video_thumbnails(self._timeline_video_thumbnails)
 
     def on_audio_source_mode_changed(self):
         if not hasattr(self, "audio_source_hint_label"):
@@ -2666,7 +2615,7 @@ class VideoTranslatorGUI(QMainWindow):
             src_lang=self.get_source_language_code(),
             target_lang=self.get_target_language_code(),
             enable_polish=self.is_ai_polish_enabled(),
-            optimize_subtitles=self.is_ai_subtitle_optimization_enabled(),
+            optimize_subtitles=False,
             style_instruction=self.get_ai_style_instruction(),
         )
 
@@ -2720,6 +2669,7 @@ class VideoTranslatorGUI(QMainWindow):
     def load_project_context(self, state):
         if not state:
             return
+        self._allow_post_pipeline_preview_assets = False
         audio_handling_mode = str(getattr(state, "settings", {}).get("audio_handling_mode", "") or "").strip().lower()
         if audio_handling_mode and hasattr(self, "audio_handling_combo"):
             combo_index = self.audio_handling_combo.findData(audio_handling_mode)
@@ -2762,6 +2712,8 @@ class VideoTranslatorGUI(QMainWindow):
         self.current_translated_segment_models = context["current_translated_segment_models"]
         self.current_segments = context["current_segments"]
         self.current_translated_segments = context["current_translated_segments"]
+        if self.current_translated_segments:
+            self.refresh_auto_keyword_highlights(force=True)
         if self.get_audio_handling_mode() == "clean" and self.last_vocals_path and os.path.exists(self.last_vocals_path):
             self.audio_source_edit.setText(self.last_vocals_path)
         elif self.last_extracted_audio and os.path.exists(self.last_extracted_audio):
@@ -2773,9 +2725,16 @@ class VideoTranslatorGUI(QMainWindow):
         if self.current_translated_segments:
             self.translated_text.setText(self.format_to_srt(self.current_translated_segments))
         if self.current_translated_segments or self.current_segments:
+            self._enable_post_pipeline_preview_assets(refresh=True)
             self.apply_segments_to_timeline()
             self.set_selected_segment_index(0, sync_ui=True)
         self._update_ocr_overlay()
+
+    def _enable_post_pipeline_preview_assets(self, *, refresh: bool = True):
+        self._allow_post_pipeline_preview_assets = True
+        if refresh:
+            self.refresh_timeline_waveform()
+            self.refresh_timeline_video_thumbnails()
 
     def resolve_background_audio_path(self) -> str:
         manual_candidate = self.bg_music_edit.text().strip() if hasattr(self, "bg_music_edit") else ""
@@ -2828,6 +2787,8 @@ class VideoTranslatorGUI(QMainWindow):
         return bool(self.parse_srt_to_segments(translated_srt))
 
     def schedule_auto_frame_preview(self):
+        if not bool(getattr(self, "_allow_post_pipeline_preview_assets", False)):
+            return
         if not hasattr(self, "auto_preview_frame_cb") or not self.auto_preview_frame_cb.isChecked():
             return
         if self.auto_preview_frame_cb.isHidden():
@@ -2843,6 +2804,8 @@ class VideoTranslatorGUI(QMainWindow):
         self.start_exact_frame_preview(show_dialog=False)
 
     def schedule_seek_frame_preview(self):
+        if not bool(getattr(self, "_allow_post_pipeline_preview_assets", False)):
+            return
         if not hasattr(self, "auto_preview_frame_cb") or not self.auto_preview_frame_cb.isChecked():
             return
         if self.auto_preview_frame_cb.isHidden():
@@ -2937,11 +2900,16 @@ class VideoTranslatorGUI(QMainWindow):
         self._filter_preview_blur_was_checked = bool(
             hasattr(self, "blur_area_btn") and self.blur_area_btn.isChecked()
         )
+        self._filter_preview_blur_edit_was_checked = bool(
+            hasattr(self, "blur_edit_btn") and self.blur_edit_btn.isChecked()
+        )
         overlay = getattr(self, "ocr_region_overlay", None)
         self._filter_preview_ocr_was_editable = bool(getattr(overlay, "_editable", False)) if overlay is not None else False
 
         if hasattr(self, "blur_area_btn"):
             self.blur_area_btn.setEnabled(False)
+        if hasattr(self, "blur_edit_btn"):
+            self.blur_edit_btn.setEnabled(False)
         if hasattr(self, "video_view"):
             self.video_view.set_blur_edit_enabled(False)
         if overlay is not None:
@@ -2960,8 +2928,9 @@ class VideoTranslatorGUI(QMainWindow):
         self._suspend_ocr_overlay = False
         if hasattr(self, "blur_area_btn"):
             self.blur_area_btn.setEnabled(True)
-        if hasattr(self, "video_view") and hasattr(self, "blur_area_btn"):
-            self.video_view.set_blur_edit_enabled(bool(self.blur_area_btn.isChecked()))
+        if hasattr(self, "blur_edit_btn"):
+            self.blur_edit_btn.setEnabled(True)
+        self._sync_blur_controls()
 
         overlay = getattr(self, "ocr_region_overlay", None)
         if overlay is not None:
@@ -3007,13 +2976,36 @@ class VideoTranslatorGUI(QMainWindow):
         is_ocr = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr"
         btn = getattr(self, "ocr_region_btn", None)
         if btn:
-            btn.hide()
+            btn.setVisible(is_ocr)
+            btn.blockSignals(True)
+            btn.setChecked(bool(getattr(self, "_ocr_overlay_visible", True)))
+            btn.blockSignals(False)
         if not is_ocr:
+            overlay._requested_visible = False
             overlay.hide()
             overlay.set_editable(False)
         else:
-            overlay.set_editable(False)
-            overlay.sync_to_view()
+            overlay._requested_visible = bool(getattr(self, "_ocr_overlay_visible", True))
+            if bool(getattr(self, "_ocr_overlay_visible", True)):
+                overlay.set_editable(True)
+                overlay.sync_to_view()
+            else:
+                overlay.set_editable(False)
+                overlay.hide()
+
+    def toggle_ocr_overlay_visibility(self, checked: bool):
+        self._ocr_overlay_visible = bool(checked)
+        overlay = getattr(self, "ocr_region_overlay", None)
+        if overlay is not None:
+            overlay._requested_visible = bool(checked)
+            overlay.set_editable(bool(checked))
+            if checked:
+                overlay.sync_to_view()
+                overlay.raise_()
+                QTimer.singleShot(0, overlay.sync_to_view)
+            else:
+                overlay.hide()
+        self._update_ocr_overlay()
 
     def cleanup_file_if_exists(self, path: str):
         cleanup_file_if_exists_impl(path)
@@ -3414,9 +3406,6 @@ class VideoTranslatorGUI(QMainWindow):
         cb = getattr(self, "skip_translation_cb", None)
         return cb is not None and cb.isChecked()
 
-    def is_ai_subtitle_optimization_enabled(self):
-        return bool(self.is_ai_polish_enabled())
-
     def is_ai_dubbing_rewrite_enabled(self):
         return bool(getattr(self, "ai_dubbing_rewrite_cb", None) and self.ai_dubbing_rewrite_cb.isChecked())
 
@@ -3433,13 +3422,6 @@ class VideoTranslatorGUI(QMainWindow):
                 style_parts.append(custom_style)
         if hasattr(self, "subtitle_single_line_cb") and self.subtitle_single_line_cb.isChecked():
             style_parts.append("[subtitle_layout=single_line]")
-        if (
-            hasattr(self, "subtitle_keyword_highlight_cb")
-            and self.subtitle_keyword_highlight_cb.isChecked()
-            and hasattr(self, "subtitle_highlight_mode_combo")
-            and self.subtitle_highlight_mode_combo.currentText().strip() in ("Auto", "Auto + Manual")
-        ):
-            style_parts.append("[keyword_highlight=ai_local]")
         return " | ".join(part for part in style_parts if part).strip()
 
     def on_output_mode_changed(self, value: str):
@@ -3597,6 +3579,17 @@ class VideoTranslatorGUI(QMainWindow):
             self.left_panel_scroll_area.setVisible(visible)
         if hasattr(self, "toggle_panel_btn"):
             self.toggle_panel_btn.setText("Hide Controls" if visible else "Show Controls")
+        QTimer.singleShot(0, self._resync_preview_region_overlays)
+
+    def _resync_preview_region_overlays(self):
+        try:
+            self._sync_blur_controls()
+        except Exception:
+            pass
+        try:
+            self._update_ocr_overlay()
+        except Exception:
+            pass
 
     def update_progress_checklist(self):
         pass
@@ -3740,7 +3733,7 @@ class VideoTranslatorGUI(QMainWindow):
             "word_timings": [list(seg.get("words", [])) for seg in (style_segments or [])],
             "blur_region": (
                 self.video_view.get_blur_region_normalized()
-                if hasattr(self, "video_view") and hasattr(self, "blur_area_btn") and self.blur_area_btn.isChecked()
+                if hasattr(self, "video_view") and self._blur_effect_enabled()
                 else None
             ),
             "render_subtitles": False,
@@ -3900,6 +3893,15 @@ class VideoTranslatorGUI(QMainWindow):
         if "match_subtitle_button" in row:
             row["match_subtitle_button"].setEnabled(bool(spoken_text) and subtitle_text != spoken_text)
 
+    def _resolve_segment_voice_text(self, segment: dict) -> str:
+        current = dict(segment or {})
+        subtitle_text = " ".join(str(current.get("text", "") or "").split()).strip()
+        if bool(current.get("voice_edited")):
+            edited_text = " ".join(str(current.get("tts_text") or current.get("dubbing_vi") or "").split()).strip()
+            if edited_text:
+                return edited_text
+        return subtitle_text
+
     def on_segment_spoken_text_edited(self, index: int, editor: QTextEdit):
         if getattr(self, "_syncing_segment_editor", False):
             return
@@ -3939,17 +3941,12 @@ class VideoTranslatorGUI(QMainWindow):
     def _normalize_manual_highlight(self, text: str) -> str:
         return re.sub(r"\s+", " ", (text or "").replace("\u2029", " ").replace("\n", " ")).strip()
 
-    def refresh_ai_keyword_highlights(self, force: bool = False):
+    def refresh_auto_keyword_highlights(self, force: bool = False):
         if not getattr(self, "current_translated_segments", None):
             return
         if not getattr(self, "subtitle_keyword_highlight_cb", None) or not self.subtitle_keyword_highlight_cb.isChecked():
             return
         if not hasattr(self, "subtitle_highlight_mode_combo") or self.subtitle_highlight_mode_combo.currentText().strip() not in ("Auto", "Auto + Manual"):
-            return
-
-        provider = self._local_polisher_provider_cls()()
-        if not provider.is_configured():
-            self.log("[AI Keyword Highlight] Local provider is not configured, keeping fallback highlight behavior.")
             return
 
         pending_indexes = []
@@ -3968,16 +3965,11 @@ class VideoTranslatorGUI(QMainWindow):
         if not pending_texts:
             return
 
-        self.log(f"[AI Keyword Highlight] Generating highlight phrases for {len(pending_texts)} subtitle lines...")
-        batch_size = 10
-        resolved_batches = []
-        for start_idx in range(0, len(pending_texts), batch_size):
-            batch = pending_texts[start_idx:start_idx + batch_size]
-            try:
-                resolved_batches.extend(provider.select_keyword_highlights_batch(texts=batch, target_lang="vi", max_keywords=2))
-            except Exception as exc:
-                self.log(f"[AI Keyword Highlight] Fallback to built-in auto highlight: {exc}")
-                return
+        self.log(f"[Auto Highlight] Generating highlight phrases for {len(pending_texts)} subtitle lines...")
+        resolved_batches = [
+            [candidate.text for candidate in auto_select_matches(text, max_keywords=2)]
+            for text in pending_texts
+        ]
 
         for idx, phrases in zip(pending_indexes, resolved_batches):
             segment = self.current_translated_segments[idx]
@@ -4576,8 +4568,112 @@ class VideoTranslatorGUI(QMainWindow):
                 return row
         return None
 
+    def _is_subtitle_inspector_details_visible(self) -> bool:
+        widget = getattr(self, "subtitle_inspector_details_widget", None)
+        return bool(widget and widget.isVisible())
+
+    def _sync_subtitle_inspector_shell_width(self, visible: bool):
+        shell = getattr(self, "subtitle_inspector_shell", None)
+        card = getattr(self, "subtitle_inspector_card", None)
+        handle = getattr(self, "subtitle_inspector_handle", None)
+        if shell is None:
+            return
+        handle_width = 34
+        if handle is not None:
+            handle_width = max(handle_width, int(handle.sizeHint().width() or handle.width() or 34))
+        if visible and card is not None:
+            card_width = int(card.maximumWidth() or card.sizeHint().width() or card.minimumWidth() or 560)
+            target_width = handle_width + max(360, card_width)
+        else:
+            target_width = handle_width
+        shell.setMinimumWidth(target_width)
+        shell.setMaximumWidth(target_width)
+        shell.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+
+    def _update_subtitle_inspector_summary(self, rows=None):
+        rows = rows if rows is not None else self._segment_editor_display_rows()
+        count = len(rows or [])
+        if not count:
+            self._selected_segment_index = -1
+            if hasattr(self, "subtitle_inspector_summary_label"):
+                self.subtitle_inspector_summary_label.setText("Selected subtitle: none")
+            if hasattr(self, "segment_selection_label"):
+                self.segment_selection_label.setText("No subtitle selected")
+            if hasattr(self, "segment_prev_btn"):
+                self.segment_prev_btn.setEnabled(False)
+            if hasattr(self, "segment_next_btn"):
+                self.segment_next_btn.setEnabled(False)
+            if hasattr(self, "rewrite_selected_segment_btn"):
+                self.rewrite_selected_segment_btn.setEnabled(False)
+            return
+
+        selected_index = self._get_effective_selected_segment_index(rows)
+        if selected_index < 0 or selected_index >= count:
+            selected_index = int(rows[0].get("segment_index", 0))
+        self._selected_segment_index = selected_index
+        if hasattr(self, "subtitle_inspector_summary_label"):
+            self.subtitle_inspector_summary_label.setText(f"Selected subtitle: Block {selected_index + 1} / {count}")
+        if hasattr(self, "segment_selection_label"):
+            self.segment_selection_label.setText(f"Block {selected_index + 1} / {count}")
+        if hasattr(self, "segment_prev_btn"):
+            self.segment_prev_btn.setEnabled(selected_index > 0)
+        if hasattr(self, "segment_next_btn"):
+            self.segment_next_btn.setEnabled(selected_index < count - 1)
+        if hasattr(self, "rewrite_selected_segment_btn"):
+            self.rewrite_selected_segment_btn.setEnabled(True)
+
+    def set_subtitle_inspector_details_visible(self, visible: bool, *, sync: bool = True):
+        card = getattr(self, "subtitle_inspector_card", None)
+        widget = getattr(self, "subtitle_inspector_details_widget", None)
+        if card is not None:
+            card.setVisible(bool(visible))
+        if widget is not None:
+            widget.setVisible(bool(visible))
+        self._sync_subtitle_inspector_shell_width(bool(visible))
+        toggle_btn = getattr(self, "subtitle_inspector_toggle_btn", None)
+        if toggle_btn is not None:
+            toggle_btn.blockSignals(True)
+            toggle_btn.setChecked(bool(visible))
+            if str(toggle_btn.objectName() or "") == "subtitleInspectorHandleBtn":
+                toggle_btn.setText("▶" if visible else "◀")
+                toggle_btn.setToolTip("Hide subtitle editor" if visible else "Show subtitle editor")
+            else:
+                toggle_btn.setText("Hide details" if visible else "Show details")
+            toggle_btn.blockSignals(False)
+        if not visible:
+            self._clear_segment_editor_rows()
+            self._segment_editor_rows = []
+            self._update_subtitle_inspector_summary()
+            return
+        self._sync_selected_segment_to_playback_position()
+        if sync:
+            self.sync_segment_editor_rows()
+
+    def show_subtitle_inspector_details(self):
+        self.set_subtitle_inspector_details_visible(True, sync=True)
+
+    def toggle_subtitle_inspector_details(self, checked: bool):
+        self.set_subtitle_inspector_details_visible(bool(checked), sync=bool(checked))
+
+    def _sync_selected_segment_to_playback_position(self):
+        if not hasattr(self, "media_player"):
+            return
+        segments = self.live_preview_segments or self.get_active_segments()
+        if not segments:
+            return
+        try:
+            position_ms = int(self.media_player.position())
+        except Exception:
+            return
+        active_index = self._find_active_segment_index(position_ms, segments)
+        if active_index >= 0:
+            self.set_selected_segment_index(active_index, sync_ui=False)
+
     def sync_segment_editor_rows(self):
         if not hasattr(self, "segment_editor_layout") or getattr(self, "_syncing_segment_editor", False):
+            return
+        if not self._is_subtitle_inspector_details_visible():
+            self._update_subtitle_inspector_summary()
             return
 
         self._syncing_segment_editor = True
@@ -4585,16 +4681,8 @@ class VideoTranslatorGUI(QMainWindow):
             self._clear_segment_editor_rows()
             self._segment_editor_rows = []
             rows = self._segment_editor_display_rows()
+            self._update_subtitle_inspector_summary(rows)
             if not rows:
-                self._selected_segment_index = -1
-                if hasattr(self, "segment_selection_label"):
-                    self.segment_selection_label.setText("No subtitle selected")
-                if hasattr(self, "segment_prev_btn"):
-                    self.segment_prev_btn.setEnabled(False)
-                if hasattr(self, "segment_next_btn"):
-                    self.segment_next_btn.setEnabled(False)
-                if hasattr(self, "rewrite_selected_segment_btn"):
-                    self.rewrite_selected_segment_btn.setEnabled(False)
                 empty_state = QFrame(self.segment_editor_container if hasattr(self, "segment_editor_container") else None)
                 empty_state.setObjectName("statusCard")
                 empty_state.setMinimumHeight(180)
@@ -4624,16 +4712,7 @@ class VideoTranslatorGUI(QMainWindow):
             if not visible_rows:
                 visible_rows = [rows[0]]
                 selected_index = int(visible_rows[0].get("segment_index", 0))
-            self._selected_segment_index = selected_index
-
-            if hasattr(self, "segment_selection_label"):
-                self.segment_selection_label.setText(f"Block {selected_index + 1} / {len(rows)}")
-            if hasattr(self, "segment_prev_btn"):
-                self.segment_prev_btn.setEnabled(selected_index > 0)
-            if hasattr(self, "segment_next_btn"):
-                self.segment_next_btn.setEnabled(selected_index < len(rows) - 1)
-            if hasattr(self, "rewrite_selected_segment_btn"):
-                self.rewrite_selected_segment_btn.setEnabled(True)
+            self._update_subtitle_inspector_summary(rows)
 
             show_original = bool(getattr(self, "show_original_subtitle_cb", None) and self.show_original_subtitle_cb.isChecked())
             for row in visible_rows:
@@ -4896,7 +4975,32 @@ class VideoTranslatorGUI(QMainWindow):
         except Exception as exc:
             self.show_error("Audio Preview Failed", "Could not preview the current audio track.", str(exc))
 
-    def toggle_blur_area_editing(self, checked: bool):
+    def _blur_effect_enabled(self) -> bool:
+        return bool(hasattr(self, "blur_area_btn") and self.blur_area_btn.isChecked())
+
+    def _blur_edit_requested(self) -> bool:
+        return bool(hasattr(self, "blur_edit_btn") and self.blur_edit_btn.isChecked())
+
+    def _sync_blur_controls(self):
+        video_view = getattr(self, "video_view", None)
+        blur_btn = getattr(self, "blur_area_btn", None)
+        blur_edit_btn = getattr(self, "blur_edit_btn", None)
+        if video_view is None or blur_btn is None:
+            return
+        has_video = bool(self.video_path_edit.text().strip()) and os.path.exists(self.video_path_edit.text().strip())
+        blur_enabled = self._blur_effect_enabled()
+        edit_requested = self._blur_edit_requested()
+        editing_allowed = (
+            blur_enabled
+            and edit_requested
+            and has_video
+            and not bool(getattr(self, "_filter_thumbnail_visible", False))
+        )
+        video_view.set_blur_edit_enabled(editing_allowed)
+        if blur_edit_btn is not None:
+            blur_edit_btn.setEnabled(has_video and blur_enabled and not bool(getattr(self, "_filter_thumbnail_visible", False)))
+
+    def toggle_blur_effect_enabled(self, checked: bool):
         if not hasattr(self, "video_view") or not hasattr(self, "blur_area_btn"):
             return
         has_video = bool(self.video_path_edit.text().strip()) and os.path.exists(self.video_path_edit.text().strip())
@@ -4907,20 +5011,52 @@ class VideoTranslatorGUI(QMainWindow):
             QMessageBox.warning(self, "Blur Area", "Please load a video before adding a blur area.")
             return
         if checked:
-            ocr_btn = getattr(self, "ocr_region_btn", None)
-            if ocr_btn and ocr_btn.isChecked():
-                ocr_btn.blockSignals(True)
-                ocr_btn.setChecked(False)
-                ocr_btn.blockSignals(False)
-                ocr_overlay = getattr(self, "ocr_region_overlay", None)
-                if ocr_overlay:
-                    ocr_overlay.set_editable(False)
-                    ocr_overlay.hide()
-        self.video_view.set_blur_edit_enabled(checked)
+            if (
+                hasattr(self, "blur_edit_btn")
+                and not self.video_view.has_blur_region()
+                and not self.blur_edit_btn.isChecked()
+            ):
+                self.blur_edit_btn.blockSignals(True)
+                self.blur_edit_btn.setChecked(True)
+                self.blur_edit_btn.blockSignals(False)
+        else:
+            blur_edit_btn = getattr(self, "blur_edit_btn", None)
+            if blur_edit_btn and blur_edit_btn.isChecked():
+                blur_edit_btn.blockSignals(True)
+                blur_edit_btn.setChecked(False)
+                blur_edit_btn.blockSignals(False)
+        self._sync_blur_controls()
         self.apply_preview_blur_region()
         self._refresh_preview_audio_controls()
         if checked:
+            self.log("[Blur Area] blur effect enabled.")
+
+    def toggle_blur_area_editing(self, checked: bool):
+        if not hasattr(self, "video_view") or not hasattr(self, "blur_edit_btn"):
+            return
+        if checked and not self._blur_effect_enabled():
+            self.blur_edit_btn.blockSignals(True)
+            self.blur_edit_btn.setChecked(False)
+            self.blur_edit_btn.blockSignals(False)
+            return
+        self._sync_blur_controls()
+        if checked:
             self.log("[Blur Area] drag inside the video preview to move or resize the region.")
+
+    def on_blur_edit_finished(self):
+        if getattr(self, "_blur_edit_finish_syncing", False):
+            return
+        blur_edit_btn = getattr(self, "blur_edit_btn", None)
+        if blur_edit_btn is None or not blur_edit_btn.isChecked():
+            return
+        self._blur_edit_finish_syncing = True
+        try:
+            blur_edit_btn.blockSignals(True)
+            blur_edit_btn.setChecked(False)
+            blur_edit_btn.blockSignals(False)
+            self._sync_blur_controls()
+        finally:
+            self._blur_edit_finish_syncing = False
 
     def toggle_ocr_region_editing(self, checked: bool):
         overlay = getattr(self, "ocr_region_overlay", None)
@@ -4931,11 +5067,10 @@ class VideoTranslatorGUI(QMainWindow):
             overlay.hide()
             overlay.set_editable(False)
             self.ocr_region_btn.setStyleSheet("QPushButton { color: #6ee7d6; font-weight: bold; font-size: 10px; padding: 0; }")
-            if hasattr(self, "video_view") and hasattr(self, "blur_area_btn") and self.blur_area_btn.isChecked():
-                self.video_view.set_blur_edit_enabled(True)
+            self._sync_blur_controls()
             return
-        blur_btn = getattr(self, "blur_area_btn", None)
-        if blur_btn and blur_btn.isChecked():
+        blur_edit_btn = getattr(self, "blur_edit_btn", None)
+        if blur_edit_btn and blur_edit_btn.isChecked():
             self.video_view.set_blur_edit_enabled(False)
         overlay.set_editable(True)
         overlay.sync_to_view()
@@ -4945,12 +5080,20 @@ class VideoTranslatorGUI(QMainWindow):
     def apply_preview_blur_region(self):
         if not hasattr(self, "media_player") or not hasattr(self, "video_view"):
             return
-        blur_enabled = bool(hasattr(self, "blur_area_btn") and self.blur_area_btn.isChecked())
+        blur_enabled = self._blur_effect_enabled()
         blur_region = self.video_view.get_blur_region_normalized() if hasattr(self.video_view, "get_blur_region_normalized") else None
         if blur_enabled and blur_region:
             self.media_player.set_blur_region(blur_region)
         else:
             self.media_player.clear_blur_region()
+
+    def set_blur_overlay_active_for_preview(self, active: bool):
+        if not hasattr(self, "video_view"):
+            return
+        if not active:
+            self.video_view.set_blur_edit_enabled(False)
+            return
+        self._sync_blur_controls()
 
     def _resolve_voice_preview_source(self, entry: dict) -> QUrl:
         preview_path = str(entry.get("preview_video_path", "")).strip()
@@ -5586,22 +5729,24 @@ class VideoTranslatorGUI(QMainWindow):
             segments = self.live_preview_segments or self.get_active_segments()
             active_index = self._find_active_segment_index(position_ms, segments)
             self.timeline.set_active_segment_index(active_index)
-            if active_index >= 0 and active_index != getattr(self, "_selected_segment_index", -1):
+            inspector_visible = self._is_subtitle_inspector_details_visible()
+            if inspector_visible and active_index >= 0 and active_index != getattr(self, "_selected_segment_index", -1):
                 self.set_selected_segment_index(active_index, sync_ui=True)
 
-            target_editor = None
-            if self.live_preview_editor_name == "translated":
-                target_editor = self.translated_text
-            elif self.live_preview_editor_name == "transcript":
-                target_editor = self.transcript_text
-            elif self.current_translated_segments:
-                target_editor = self.translated_text
-            elif self.current_segments:
-                target_editor = self.transcript_text
+            if inspector_visible:
+                target_editor = None
+                if self.live_preview_editor_name == "translated":
+                    target_editor = self.translated_text
+                elif self.live_preview_editor_name == "transcript":
+                    target_editor = self.transcript_text
+                elif self.current_translated_segments:
+                    target_editor = self.translated_text
+                elif self.current_segments:
+                    target_editor = self.transcript_text
 
-            self._set_segment_editor_highlight(active_index)
-            self._set_editor_highlight(self.translated_text, active_index if target_editor is self.translated_text else -1)
-            self._set_editor_highlight(self.transcript_text, active_index if target_editor is self.transcript_text else -1)
+                self._set_segment_editor_highlight(active_index)
+                self._set_editor_highlight(self.translated_text, active_index if target_editor is self.translated_text else -1)
+                self._set_editor_highlight(self.transcript_text, active_index if target_editor is self.transcript_text else -1)
 
             # Update live overlay text for faster feedback
             if hasattr(self, "video_view"):
@@ -5721,8 +5866,11 @@ class VideoTranslatorGUI(QMainWindow):
             self.stop_btn.setEnabled(v_ok and not voice_running)
         if hasattr(self, "blur_area_btn"):
             self.blur_area_btn.setEnabled(v_ok)
+        if hasattr(self, "blur_edit_btn"):
+            self.blur_edit_btn.setEnabled(v_ok and self._blur_effect_enabled() and not bool(getattr(self, "_filter_thumbnail_visible", False)))
         if hasattr(self, "ocr_region_btn"):
-            self.ocr_region_btn.hide()
+            self.ocr_region_btn.setEnabled(v_ok)
+        self._sync_blur_controls()
         if hasattr(self, "free_voice_combo"):
             self.free_voice_combo.setEnabled(
                 generated_mode
@@ -5801,12 +5949,12 @@ class VideoTranslatorGUI(QMainWindow):
                 self.current_segment_models = []
                 self.current_translated_segment_models = []
                 self.current_project_state = self.ensure_current_project()
+                self._allow_post_pipeline_preview_assets = False
                 self.load_project_context(self.current_project_state)
                 self.media_player.pause()
                 self.media_player.setPosition(0)
                 self.refresh_ui_state()
                 self.sync_live_subtitle_preview()
-                self.schedule_auto_frame_preview()
                 event.acceptProposedAction()
                 return
         event.ignore()
@@ -6484,7 +6632,7 @@ class VideoTranslatorGUI(QMainWindow):
     def apply_edited_translation(self, show_message=True, force_apply=True):
         result = self.subtitle_controller.apply_edited_translation(show_message=show_message, force_apply=force_apply)
         if result:
-            self.refresh_ai_keyword_highlights()
+            self.refresh_auto_keyword_highlights()
             self.sync_segment_editor_rows()
             return result
 
@@ -6535,18 +6683,10 @@ class VideoTranslatorGUI(QMainWindow):
         while idx < len(source_segments):
             segment = dict(source_segments[idx])
             group_id = str(segment.get('tts_group_id', '') or '').strip()
-            tts_text = ' '.join(str(segment.get('tts_text') or '').split()).strip()
+            tts_text = self._resolve_segment_voice_text(segment)
             if not group_id:
-                fallback_text = tts_text or ' '.join(str(segment.get('text') or '').split()).strip()
-                segment['text'] = fallback_text
-                segment['tts_text'] = fallback_text
-                grouped_segments.append(segment)
-                idx += 1
-                continue
-            if not tts_text:
-                fallback_text = ' '.join(str(segment.get('text') or '').split()).strip()
-                segment['text'] = fallback_text
-                segment['tts_text'] = fallback_text
+                segment['text'] = tts_text
+                segment['tts_text'] = str(segment.get('tts_text') or '').strip() if bool(segment.get('voice_edited')) else ''
                 grouped_segments.append(segment)
                 idx += 1
                 continue
@@ -6560,12 +6700,28 @@ class VideoTranslatorGUI(QMainWindow):
                 group_items.append(dict(candidate))
                 cursor += 1
 
+            voice_text = ""
+            voice_edited = False
+            for item in group_items:
+                if bool(item.get('voice_edited')):
+                    candidate_text = " ".join(str(item.get('tts_text') or item.get('dubbing_vi') or '').split()).strip()
+                    if candidate_text:
+                        voice_text = candidate_text
+                        voice_edited = True
+                        break
+            if not voice_text:
+                voice_text = ' '.join(
+                    ' '.join(str(item.get('text') or '').split()).strip()
+                    for item in group_items
+                ).strip()
+
             grouped_segments.append({
                 'start': float(group_items[0].get('tts_group_start', group_items[0].get('start', 0.0)) or group_items[0].get('start', 0.0)),
                 'end': float(group_items[-1].get('tts_group_end', group_items[-1].get('end', 0.0)) or group_items[-1].get('end', 0.0)),
-                'text': tts_text,
-                'tts_text': tts_text,
+                'text': voice_text,
+                'tts_text': voice_text if voice_edited else '',
                 'tts_group_id': group_id,
+                'voice_edited': voice_edited,
                 'source_text': ' '.join(
                     ' '.join(str(item.get('source_text') or item.get('text') or '').split()).strip()
                     for item in group_items
@@ -6945,9 +7101,11 @@ class VideoTranslatorGUI(QMainWindow):
         self._timeline_waveform_cache_key = None
         self._timeline_waveform_samples = []
         self._timeline_waveform_duration_s = 0.0
-        self._waveform_extracting = False
+        self._desired_timeline_waveform_request = None
         self._timeline_video_thumb_cache_key = None
         self._timeline_video_thumbnails = []
+        self._desired_timeline_thumbnail_request = None
+        self._allow_post_pipeline_preview_assets = False
         self._pending_timeline_waveform_refresh = False
         self._pending_timeline_thumbnail_refresh = False
         if hasattr(self, "transcript_text"):
@@ -7198,7 +7356,10 @@ class VideoTranslatorGUI(QMainWindow):
             self.play_btn.setToolTip(play_tip)
         if hasattr(self, "blur_area_btn"):
             blur_active = bool(self.blur_area_btn.isChecked())
-            self.blur_area_btn.setToolTip("Blur editing on" if blur_active else "Toggle blur area editing")
+            self.blur_area_btn.setToolTip("Blur effect on" if blur_active else "Turn blur effect on or off")
+        if hasattr(self, "blur_edit_btn"):
+            blur_editing = bool(self.blur_edit_btn.isChecked())
+            self.blur_edit_btn.setToolTip("Blur edit box visible" if blur_editing else "Show or hide the blur edit region")
         if hasattr(self, "preview_speed_combo"):
             target = float(getattr(self, "_preview_speed", 1.0))
             index = self.preview_speed_combo.findData(target)

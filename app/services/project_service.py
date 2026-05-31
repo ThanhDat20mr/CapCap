@@ -171,7 +171,7 @@ class ProjectService:
         src_lang: str = "auto",
         target_lang: str = "vi",
         enable_polish: bool = True,
-        optimize_subtitles: bool = True,
+        optimize_subtitles: bool = False,
         style_instruction: str = "",
     ) -> str:
         payload = {
@@ -205,6 +205,14 @@ class ProjectService:
         ducking_amount_db: float = -6.0,
     ) -> str:
         safe_voice_speed = max(0.5, min(1.30, float(voice_speed or 1.0)))
+        def _segment_voice_text(seg) -> str:
+            current = dict(seg or {})
+            subtitle_text = str(current.get("text") or "").strip()
+            if bool(current.get("voice_edited")):
+                edited_text = str(current.get("tts_text") or current.get("dubbing_vi") or "").strip()
+                if edited_text:
+                    return edited_text
+            return subtitle_text
         payload = {
             "audio_handling_mode": str(audio_handling_mode or "fast").strip().lower(),
             "voice_name": str(voice_name or "").strip(),
@@ -218,7 +226,7 @@ class ProjectService:
                 {
                     "start": round(float((seg or {}).get("start", 0.0) or 0.0), 3),
                     "end": round(float((seg or {}).get("end", 0.0) or 0.0), 3),
-                    "text": str((seg or {}).get("tts_text") or (seg or {}).get("text") or "").strip(),
+                    "text": _segment_voice_text(seg),
                     "group_id": str((seg or {}).get("tts_group_id") or "").strip(),
                 }
                 for seg in list(segments or [])

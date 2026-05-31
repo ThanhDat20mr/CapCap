@@ -1,5 +1,6 @@
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import traceback
@@ -225,6 +226,187 @@ class ResourceDownloadWorker(QThread):
             self.finished.emit(self.resource_id, details or str(exc))
 
 
+class TimelineWaveformWorker(QThread):
+    finished = Signal(object, object, float, str)
+
+    def __init__(self, request_signature, video_path, audio_path, temp_audio_path):
+        super().__init__()
+        self.request_signature = request_signature
+        self.video_path = str(video_path or "").strip()
+        self.audio_path = str(audio_path or "").strip()
+        self.temp_audio_path = str(temp_audio_path or "").strip()
+
+    def run(self):
+        try:
+            audio_path = self.audio_path if self.audio_path and os.path.exists(self.audio_path) else ""
+            if not audio_path and self.video_path and os.path.exists(self.video_path):
+                temp_audio = self.temp_audio_path
+                if temp_audio and not os.path.exists(temp_audio):
+                    os.makedirs(os.path.dirname(temp_audio), exist_ok=True)
+                    ffmpeg = os.path.join(bin_path("ffmpeg"), "ffmpeg.exe")
+                    subprocess.run(
+                        [
+                            ffmpeg,
+                            "-y",
+                            "-loglevel",
+                            "error",
+                            "-i",
+                            self.video_path,
+                            "-vn",
+                            "-acodec",
+                            "pcm_s16le",
+                            "-ar",
+                            "16000",
+                            "-ac",
+                            "1",
+                            temp_audio,
+                        ],
+                        check=True,
+                        timeout=60,
+                    )
+                if temp_audio and os.path.exists(temp_audio):
+                    audio_path = temp_audio
+
+            if not audio_path or not os.path.exists(audio_path):
+                self.finished.emit(self.request_signature, [], 0.0, "")
+                return
+
+            from audio_mixer import _require_pydub
+
+            _require_pydub()
+            from pydub import AudioSegment
+            import numpy as np
+
+            audio = AudioSegment.from_file(audio_path).set_channels(1)
+            samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
+            duration_s = max(0.0, len(audio) / 1000.0)
+
+            if not samples.size:
+                self.finished.emit(self.request_signature, [], duration_s, "")
+                return
+
+            samples = samples.astype(np.float32)
+            peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+            if peak <= 0.0:
+                self.finished.emit(self.request_signature, [], duration_s, "")
+                return
+            samples /= max(1.0, peak)
+
+            # Build a lightweight envelope: fixed number of buckets regardless of video length.
+            # This keeps the timeline readable without the FFT cost of a full spectrum view.
+            bucket_count = int(min(320, max(120, round(duration_s * 10.0))))
+            chunk_size = max(256, int(np.ceil(samples.size / max(1, bucket_count))))
+            waveform = []
+            for start in range(0, samples.size, chunk_size):
+                chunk = samples[start:start + chunk_size]
+                if not chunk.size:
+                    waveform.append(0.0)
+                    continue
+                abs_chunk = np.abs(chunk)
+                peak_value = float(np.max(abs_chunk)) if abs_chunk.size else 0.0
+                rms_value = float(np.sqrt(np.mean(np.square(chunk)))) if chunk.size else 0.0
+                value = max(peak_value, rms_value * 1.15)
+                waveform.append(min(1.0, max(0.03, value ** 0.85)))
+
+            self.finished.emit(self.request_signature, waveform, duration_s, "")
+        except Exception as exc:
+            details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+            self.finished.emit(self.request_signature, [], 0.0, details or str(exc))
+
+
+class TimelineThumbnailWorker(QThread):
+    finished = Signal(object, object, str)
+
+    def __init__(self, request_signature, video_path, duration_s, thumb_dir):
+        super().__init__()
+        self.request_signature = request_signature
+        self.video_path = str(video_path or "").strip()
+        self.duration_s = max(0.0, float(duration_s or 0.0))
+        self.thumb_dir = str(thumb_dir or "").strip()
+
+    def run(self):
+        try:
+            if not self.video_path or not os.path.exists(self.video_path) or self.duration_s <= 0.0:
+                self.finished.emit(self.request_signature, [], "")
+                return
+
+            ffmpeg_candidates = [
+                bin_path("ffmpeg", "ffmpeg.exe"),
+                bin_path("ffmpeg.exe"),
+                shutil.which("ffmpeg"),
+                shutil.which("ffmpeg.exe"),
+            ]
+            ffmpeg_path = ""
+            for candidate in ffmpeg_candidates:
+                if candidate and os.path.isfile(candidate):
+                    ffmpeg_path = candidate
+                    break
+
+            if not ffmpeg_path:
+                self.finished.emit(self.request_signature, [], "")
+                return
+
+            thumb_count = max(4, min(10, int(round(self.duration_s / 3.0)) or 6))
+            if self.duration_s <= 1.0:
+                timestamps = [0.0]
+            else:
+                timestamps = [
+                    min(self.duration_s - 0.05, max(0.0, ((idx + 0.5) * self.duration_s) / thumb_count))
+                    for idx in range(thumb_count)
+                ]
+
+            os.makedirs(self.thumb_dir, exist_ok=True)
+            digest = hashlib.md5(
+                f"{self.video_path}|{self.request_signature}".encode("utf-8", errors="replace")
+            ).hexdigest()[:16]
+
+            startupinfo = None
+            creationflags = 0
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+            thumbnails = []
+            for idx, timestamp_s in enumerate(timestamps):
+                output_path = os.path.join(self.thumb_dir, f"{digest}_{idx:02d}.jpg")
+                if not os.path.exists(output_path):
+                    cmd = [
+                        ffmpeg_path,
+                        "-y",
+                        "-ss",
+                        f"{timestamp_s:.3f}",
+                        "-i",
+                        self.video_path,
+                        "-frames:v",
+                        "1",
+                        "-q:v",
+                        "4",
+                        "-vf",
+                        "scale=180:-1:force_original_aspect_ratio=decrease",
+                        output_path,
+                    ]
+                    try:
+                        subprocess.run(
+                            cmd,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=False,
+                            timeout=20,
+                            startupinfo=startupinfo,
+                            creationflags=creationflags,
+                        )
+                    except Exception:
+                        continue
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    thumbnails.append((float(timestamp_s), output_path))
+
+            self.finished.emit(self.request_signature, thumbnails, "")
+        except Exception as exc:
+            details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+            self.finished.emit(self.request_signature, [], details or str(exc))
+
+
 class PrepareWorkflowWorker(QThread):
     finished = Signal(str, str)
     step_started = Signal(str)
@@ -242,6 +424,8 @@ class PrepareWorkflowWorker(QThread):
         whisper_model_name,
         transcription_engine="whisper",
         skip_translation=False,
+        prefetch_voice_name="",
+        prefetch_voice_speed=1.0,
     ):
         super().__init__()
         self.workspace_root = workspace_root
@@ -250,11 +434,13 @@ class PrepareWorkflowWorker(QThread):
         self.audio_handling_mode = audio_handling_mode
         self.source_language = source_language
         self.translator_ai = translator_ai
-        self.optimize_subtitles = optimize_subtitles
+        self.optimize_subtitles = False
         self.translator_style = translator_style
         self.whisper_model_name = whisper_model_name
         self.transcription_engine = transcription_engine
         self.skip_translation = skip_translation
+        self.prefetch_voice_name = prefetch_voice_name
+        self.prefetch_voice_speed = float(prefetch_voice_speed or 1.0)
 
     def run(self):
         try:
@@ -295,6 +481,8 @@ class PrepareWorkflowWorker(QThread):
                     whisper_model_name=self.whisper_model_name,
                     transcription_engine=self.transcription_engine,
                     skip_translation=self.skip_translation,
+                    prefetch_voice_name=self.prefetch_voice_name,
+                    prefetch_voice_speed=self.prefetch_voice_speed,
                     step_callback=self.step_started.emit,
                 )
                 state_path = os.path.join(project_state.project_root, "project.json")

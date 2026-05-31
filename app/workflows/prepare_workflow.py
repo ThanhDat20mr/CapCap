@@ -1,4 +1,5 @@
 import os
+import concurrent.futures
 import subprocess
 import time
 
@@ -23,7 +24,7 @@ class PrepareWorkflow:
         self.segment_regroup_service = SegmentRegroupService()
         self.engine_runtime = EngineRuntime()
 
-    def _transcribe_long_audio_chunked(self, *, audio_path: str, project_state, model_path: str, language: str):
+    def _transcribe_long_audio_chunked(self, *, audio_path: str, project_state, model_path: str, language: str, on_chunk_ready=None):
         overall_started = time.perf_counter()
         chunk_dir = self.project_service.build_path(project_state, "audio", "chunks")
         chunk_cache_dir = self.project_service.build_path(project_state, "analysis", "chunk_results")
@@ -68,6 +69,7 @@ class PrepareWorkflow:
             language=language,
             cache_dir=chunk_cache_dir,
             transcription_config=transcription_config,
+            ordered_callback=on_chunk_ready,
         )
         asr_elapsed = time.perf_counter() - asr_started
         cache_hits = sum(1 for result in chunk_results if result.get("from_cache"))
@@ -125,6 +127,12 @@ class PrepareWorkflow:
         )
         return regrouped_segments
 
+    def _should_enable_asr_translate_streaming(self, *, translator_ai: bool) -> bool:
+        if not bool(translator_ai):
+            return True
+        provider = str(os.getenv("OPENAI_PROVIDER") or "local").strip().lower()
+        return provider == "openai"
+
     def run(
         self,
         video_path: str,
@@ -139,14 +147,20 @@ class PrepareWorkflow:
         whisper_model_name: str = "ggml-medium.bin",
         transcription_engine: str = "whisper",
         skip_translation: bool = False,
+        prefetch_voice_name: str = "",
+        prefetch_voice_speed: float = 1.0,
         step_callback=None,
     ) -> str:
+        optimize_subtitles = False
         if step_callback: step_callback("prepare")
         workflow_started = time.perf_counter()
         whisper_model = os.path.join(self.workspace_root, "models", whisper_model_name)
         is_ocr = transcription_engine == "ocr"
         raw_segments = []
         segment_models = []
+        streamed_translation_executor = None
+        streamed_translation_futures = []
+        streamed_translation_enabled = False
         project_state = self.project_service.ensure_project(
             video_path,
             mode=mode,
@@ -351,12 +365,81 @@ class PrepareWorkflow:
                     )
                 elif audio_duration >= self.CHUNKED_ASR_MIN_DURATION_SECONDS or (audio_mode_key == "clean" and audio_duration >= 30.0):
                     print("[ASR] Using chunked transcription (VAD silence detection).")
+                    if (
+                        not skip_translation
+                        and self._should_enable_asr_translate_streaming(translator_ai=translator_ai)
+                    ):
+                        streamed_translation_enabled = True
+                        print(
+                            "[Prepare Workflow] ASR->Translate overlap enabled for chunked Whisper "
+                            f"(translator_ai={bool(translator_ai)}, provider={str(os.getenv('OPENAI_PROVIDER') or 'local').strip().lower()})."
+                        )
+                        from services import AsrMergeService
+                        asr_merge_service = AsrMergeService()
+                        streamed_translation_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                        pending_stream_segments = []
+                        emitted_stream_count = 0
+
+                        def _submit_stream_batch(batch_start: int, batch_segments: list[dict]) -> None:
+                            if not batch_segments:
+                                return
+                            print(
+                                "[Prepare Workflow] Queue ASR->Translate batch: "
+                                f"start={batch_start}, count={len(batch_segments)}"
+                            )
+                            future = streamed_translation_executor.submit(
+                                self.engine_runtime.translate_segments,
+                                list(batch_segments),
+                                src_lang=source_language,
+                                enable_polish=translator_ai,
+                                optimize_subtitles=optimize_subtitles,
+                                style_instruction=project_state.translator_style,
+                            )
+                            streamed_translation_futures.append((int(batch_start), future))
+
+                        def _flush_pending_stream_segments(force: bool = False) -> None:
+                            nonlocal pending_stream_segments, emitted_stream_count
+                            batch_size = 12
+                            while len(pending_stream_segments) >= batch_size or (force and pending_stream_segments):
+                                count = batch_size if len(pending_stream_segments) >= batch_size and not force else min(batch_size, len(pending_stream_segments))
+                                batch = [dict(seg) for seg in pending_stream_segments[:count]]
+                                pending_stream_segments = pending_stream_segments[count:]
+                                _submit_stream_batch(emitted_stream_count, batch)
+                                emitted_stream_count += len(batch)
+
+                        seen_chunk_results = []
+                        emitted_stable_count = 0
+
+                        def _on_chunk_ready(chunk_result: dict) -> None:
+                            nonlocal emitted_stable_count, pending_stream_segments
+                            seen_chunk_results.append(chunk_result)
+                            merged_partial = asr_merge_service.merge_chunk_results(seen_chunk_results)
+                            regrouped_partial = self.segment_regroup_service.regroup(
+                                merged_partial,
+                                max_gap_seconds=0.25,
+                                max_duration_seconds=5.0,
+                            )
+                            stable_limit = max(0, len(regrouped_partial) - 2)
+                            if stable_limit <= emitted_stable_count:
+                                return
+                            new_stable = regrouped_partial[emitted_stable_count:stable_limit]
+                            pending_stream_segments.extend([dict(seg) for seg in new_stable])
+                            emitted_stable_count = stable_limit
+                            _flush_pending_stream_segments(force=False)
+                    else:
+                        _on_chunk_ready = None
                     raw_segments = self._transcribe_long_audio_chunked(
                         audio_path=working_audio_path,
                         project_state=project_state,
                         model_path=whisper_model,
                         language=source_language,
+                        on_chunk_ready=_on_chunk_ready if streamed_translation_enabled else None,
                     )
+                    if streamed_translation_enabled:
+                        remaining_segments = raw_segments[emitted_stable_count:]
+                        if remaining_segments:
+                            pending_stream_segments.extend([dict(seg) for seg in remaining_segments])
+                        _flush_pending_stream_segments(force=True)
                 else:
                     print("[ASR] Using standard single-pass transcription for short audio.")
                     raw_segments = self.engine_runtime.transcribe_audio(
@@ -415,6 +498,48 @@ class PrepareWorkflow:
             translate_started = time.perf_counter()
             project_state.set_step_status("translate_raw", "running")
             self.project_service.save_project(project_state)
+            tts_prefetch_executor = None
+            tts_prefetch_futures = []
+            tts_prefetch_enabled = bool(
+                prefetch_voice_name
+                and mode in ("voice", "both")
+                and not is_remote_profile()
+            )
+            voice_prefetch = None
+            if tts_prefetch_enabled:
+                from workflows.voice_workflow import VoiceWorkflow
+                voice_prefetch = VoiceWorkflow(self.workspace_root)
+                tts_prefetch_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                tts_prefetch_tmp_dir = os.path.join(
+                    self.workspace_root,
+                    "temp",
+                    "projects",
+                    str(project_state.project_id or "global"),
+                    "tts",
+                )
+                print(
+                    "[Prepare Workflow] TTS cache prefetch enabled: "
+                    f"voice={prefetch_voice_name}, speed={float(prefetch_voice_speed or 1.0):.2f}, "
+                    f"tmp_dir={tts_prefetch_tmp_dir}"
+                )
+
+                def _prefetch_batch(start_idx: int, batch_segments: list[dict]) -> None:
+                    if not batch_segments:
+                        return
+                    print(
+                        "[Prepare Workflow] Queue TTS cache prefetch: "
+                        f"start={start_idx}, count={len(batch_segments)}"
+                    )
+                    future = tts_prefetch_executor.submit(
+                        voice_prefetch.prime_tts_cache,
+                        segments=list(batch_segments),
+                        tmp_dir=tts_prefetch_tmp_dir,
+                        voice_name=prefetch_voice_name,
+                        voice_speed=float(prefetch_voice_speed or 1.0),
+                        index_offset=int(start_idx),
+                    )
+                    tts_prefetch_futures.append(future)
+
             translation_signature = self.project_service.build_translation_signature(
                 [segment.to_original_subtitle_dict() for segment in segment_models],
                 src_lang=source_language,
@@ -426,18 +551,54 @@ class PrepareWorkflow:
             cached_translation_path = project_state.artifacts.get("translation_final", "")
             cached_translation_signature = str(project_state.settings.get("translation_signature", "") or "").strip()
             try:
+                streamed_translated_segments = None
+                if streamed_translation_enabled and streamed_translation_futures:
+                    try:
+                        ordered_futures = sorted(
+                            [(int(start_idx), future) for start_idx, future in list(streamed_translation_futures)],
+                            key=lambda item: item[0],
+                        )
+                        assembled = []
+                        expected_start = 0
+                        for start_idx, future in ordered_futures:
+                            batch_segments = list(future.result() or [])
+                            if tts_prefetch_enabled and batch_segments:
+                                print(
+                                    "[Prepare Workflow] Streamed translate batch ready, queue TTS prefetch: "
+                                    f"start={start_idx}, count={len(batch_segments)}"
+                                )
+                                _prefetch_batch(start_idx, batch_segments)
+                            if start_idx != expected_start:
+                                assembled = []
+                                break
+                            assembled.extend(batch_segments)
+                            expected_start = len(assembled)
+                        if len(assembled) == len(segment_models):
+                            streamed_translated_segments = assembled
+                            print(
+                                "[Prepare Workflow] Reusing streamed translation batches from chunked ASR: "
+                                f"segments={len(streamed_translated_segments)}"
+                            )
+                    except Exception as exc:
+                        print(f"[Prepare Workflow] Streaming translation overlap discarded: {exc}")
+                    finally:
+                        if streamed_translation_executor is not None:
+                            streamed_translation_executor.shutdown(wait=True)
+                            streamed_translation_executor = None
+
                 if cached_translation_signature == translation_signature and cached_translation_path and os.path.exists(cached_translation_path):
                     cached_models = self.project_service.load_segment_artifact(project_state, "translation_final")
                     if cached_models:
                         segment_models = cached_models
                         print("[Prepare Workflow] Reusing cached Vietnamese subtitles. Generate did not call AI again.")
                     else:
-                        translated_segments = self.engine_runtime.translate_segments(
+                        translated_segments = streamed_translated_segments or self.engine_runtime.translate_segments(
                             raw_segments,
                             src_lang=source_language,
                             enable_polish=translator_ai,
                             optimize_subtitles=optimize_subtitles,
                             style_instruction=project_state.translator_style,
+                            batch_callback=_prefetch_batch if tts_prefetch_enabled else None,
                         )
                         segment_models = self.segment_service.apply_translations(segment_models, translated_segments)
                         self.project_service.save_segment_artifact(
@@ -447,12 +608,13 @@ class PrepareWorkflow:
                             segment_models,
                         )
                 else:
-                    translated_segments = self.engine_runtime.translate_segments(
+                    translated_segments = streamed_translated_segments or self.engine_runtime.translate_segments(
                         raw_segments,
                         src_lang=source_language,
                         enable_polish=translator_ai,
                         optimize_subtitles=optimize_subtitles,
                         style_instruction=project_state.translator_style,
+                        batch_callback=_prefetch_batch if tts_prefetch_enabled else None,
                     )
                     segment_models = self.segment_service.apply_translations(segment_models, translated_segments)
                     self.project_service.save_segment_artifact(
@@ -471,6 +633,19 @@ class PrepareWorkflow:
                 project_state.set_step_status("refine_translation", "skipped")
                 self.project_service.save_project(project_state)
                 raise
+            finally:
+                if streamed_translation_executor is not None:
+                    streamed_translation_executor.shutdown(wait=True)
+                if tts_prefetch_executor is not None:
+                    try:
+                        for future in list(tts_prefetch_futures):
+                            future.result()
+                        print(
+                            "[Prepare Workflow] TTS cache prefetch complete: "
+                            f"batches={len(tts_prefetch_futures)}"
+                        )
+                    finally:
+                        tts_prefetch_executor.shutdown(wait=True)
             translate_elapsed = time.perf_counter() - translate_started
             print(f"[Timing] Translate/refine: {translate_elapsed:.2f}s")
 

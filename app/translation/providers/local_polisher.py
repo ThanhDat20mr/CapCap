@@ -9,6 +9,7 @@ from pathlib import Path
 from ..errors import TranslationConfigError, TranslationProviderError, TranslationValidationError
 from ..srt_utils import parse_numbered_lines, validate_texts
 from runtime_paths import join_root, models_path
+from services.gpu_stage_scheduler import GPUStageScheduler
 
 
 class LocalPolisherProvider:
@@ -216,12 +217,13 @@ class LocalPolisherProvider:
             "Return only numbered lines like '1. text'. Keep the exact line count.\n\n"
         )
         try:
-            result = self._generate_text(
-                model=model,
-                prompt=system_note + prompt,
-                temperature=self.temperature,
-                max_tokens=self._estimate_max_tokens(source_texts, translated_texts),
-            )
+            with GPUStageScheduler.stage("local-gguf"):
+                result = self._generate_text(
+                    model=model,
+                    prompt=system_note + prompt,
+                    temperature=self.temperature,
+                    max_tokens=self._estimate_max_tokens(source_texts, translated_texts),
+                )
         except Exception as exc:
             raise TranslationProviderError(f"Local GGUF inference failed: {exc}") from exc
 
@@ -230,14 +232,28 @@ class LocalPolisherProvider:
         if not validate_texts(lines, len(source_texts)):
             expected = len(source_texts)
             actual = len(lines)
-            if actual > expected and actual - expected <= 2:
+            if actual >= expected:
                 lines = lines[:expected]
-            elif actual < expected and expected - actual <= 2:
-                lines.extend([""] * (expected - actual))
+            else:
+                fallback_tail = []
+                for idx in range(actual, expected):
+                    fallback_text = " ".join(str(source_texts[idx] or "").split()).strip()
+                    fallback_tail.append(fallback_text or "...")
+                lines.extend(fallback_tail)
             if not validate_texts(lines, expected):
-                raise TranslationValidationError(
-                    f"Local translator returned {actual} lines but expected {expected}."
-                )
+                repaired = [(line or "").strip() for line in lines[:expected]]
+                while len(repaired) < expected:
+                    fallback_index = len(repaired)
+                    fallback_text = " ".join(str(source_texts[fallback_index] or "").split()).strip()
+                    repaired.append(fallback_text or "...")
+                lines = repaired
+        quality_error = self._validate_translation_quality(
+            source_texts=source_texts,
+            translated_texts=lines,
+            target_lang=target_lang,
+        )
+        if quality_error:
+            raise TranslationValidationError(quality_error)
         return lines, [], f"local-gguf ({os.path.basename(self.model_path)})"
 
     def _build_prompt(self, source_texts, translated_texts, src_lang, target_lang, style_instruction) -> str:
@@ -460,70 +476,6 @@ class LocalPolisherProvider:
             return [compact]
         return chunks
 
-    def select_keyword_highlights_batch(
-        self,
-        *,
-        texts: list[str],
-        target_lang: str = "vi",
-        max_keywords: int = 2,
-    ) -> list[list[str]]:
-        if not self.is_configured():
-            raise TranslationConfigError(
-                "Local translator is not configured. Set LOCAL_TRANSLATOR_MODEL_PATH to a valid .gguf file."
-            )
-        cleaned_texts = [" ".join(str(text or "").replace("\n", " ").split()).strip() for text in (texts or [])]
-        if not cleaned_texts:
-            return []
-
-        try:
-            model = self._get_model()
-        except Exception as exc:
-            raise TranslationConfigError(str(exc)) from exc
-
-        numbered_lines = "\n".join(f"{idx + 1}. {text}" for idx, text in enumerate(cleaned_texts))
-        prompt = (
-            f"Select up to {max_keywords} short keyword phrases from each {target_lang} subtitle line for visual highlighting. "
-            "Keep the exact original wording from the line. Do not rewrite or translate. "
-            "Prefer names, numbers, products, strong nouns, and emotionally important phrases. "
-            "Return only numbered lines. Use ' || ' between phrases on the same line. "
-            "If a line should not highlight anything, still return the numbered line with nothing after the dot.\n\n"
-            f"{numbered_lines}"
-        )
-
-        try:
-            result = self._generate_text(
-                model=model,
-                prompt=prompt,
-                temperature=0.0,
-                max_tokens=min(512, self.max_tokens),
-            )
-        except Exception as exc:
-            raise TranslationProviderError(f"Local GGUF keyword highlight failed: {exc}") from exc
-
-        output = self._extract_text(result)
-        parsed_lines = self._parse_numbered_output(output)
-        if len(parsed_lines) != len(cleaned_texts):
-            raise TranslationValidationError(
-                f"Local keyword highlight returned {len(parsed_lines)} lines but expected {len(cleaned_texts)}."
-            )
-
-        results: list[list[str]] = []
-        for raw_line in parsed_lines:
-            parts = [" ".join(part.split()) for part in str(raw_line or "").split("||")]
-            deduped: list[str] = []
-            seen = set()
-            for part in parts:
-                normalized = part.strip(" ,;|-")
-                key = normalized.lower()
-                if not normalized or key in seen:
-                    continue
-                seen.add(key)
-                deduped.append(normalized)
-                if len(deduped) >= max_keywords:
-                    break
-            results.append(deduped)
-        return results
-
     def _estimate_max_tokens(self, source_texts: list[str], translated_texts: list[str] | None) -> int:
         total_chars = sum(len(str(item or "")) for item in source_texts)
         if translated_texts:
@@ -557,12 +509,74 @@ class LocalPolisherProvider:
         return False
 
     def _parse_numbered_output(self, raw: str) -> list[str]:
-        items: list[str] = []
-        for line in str(raw or "").splitlines():
-            match = re.match(r"^\s*\d+\.\s*(.*?)\s*$", line)
-            if match:
-                items.append(match.group(1).strip())
-        return items
+        return parse_numbered_lines(str(raw or ""))
+
+    def _validate_translation_quality(
+        self,
+        *,
+        source_texts: list[str],
+        translated_texts: list[str],
+        target_lang: str,
+    ) -> str:
+        if str(target_lang or "").strip().lower() != "vi":
+            return ""
+        suspicious = []
+        for idx, (source, translated) in enumerate(zip(source_texts, translated_texts), start=1):
+            reason = self._classify_suspicious_translation(source_text=source, translated_text=translated)
+            if reason:
+                suspicious.append((idx, reason))
+        threshold = max(2, (len(translated_texts) + 3) // 4)
+        if len(suspicious) >= threshold:
+            sample = ", ".join(f"{idx}:{reason}" for idx, reason in suspicious[:4])
+            return (
+                "Local translator output quality check failed "
+                f"({len(suspicious)}/{len(translated_texts)} suspicious lines; {sample})."
+            )
+        return ""
+
+    def _classify_suspicious_translation(self, *, source_text: str, translated_text: str) -> str:
+        source = " ".join(str(source_text or "").split()).strip()
+        translated = " ".join(str(translated_text or "").split()).strip()
+        if not translated:
+            return "empty"
+        if re.match(r"^\d+\.\s*", translated):
+            return "nested-numbering"
+        source_has_cjk = bool(re.search(r"[\u3400-\u9fff]", source))
+        translated_cjk_count = len(re.findall(r"[\u3400-\u9fff]", translated))
+        if source_has_cjk and translated_cjk_count >= 4:
+            return "contains-cjk"
+
+        normalized_source = re.sub(r"\W+", "", source).lower()
+        normalized_translated = re.sub(r"\W+", "", translated).lower()
+        if (
+            source_has_cjk
+            and normalized_source
+            and normalized_source == normalized_translated
+        ):
+            return "unchanged-source"
+
+        if source_has_cjk and self._looks_like_pinyin_transliteration(translated):
+            return "pinyin-like"
+        return ""
+
+    def _looks_like_pinyin_transliteration(self, text: str) -> bool:
+        if re.search(r"[\u3400-\u9fff]", text):
+            return False
+        tokens = re.findall(r"[A-Za-zÀ-ỹĐđ]+", str(text or ""))
+        if len(tokens) < 4:
+            return False
+        lowered = [token.lower() for token in tokens]
+        vietnamese_markers = set("ăâđêôơư")
+        if any(ch in vietnamese_markers for ch in "".join(lowered)):
+            return False
+        pinyin_markers = 0
+        for token in lowered:
+            if re.search(r"(zh|sh|ch|x|q)", token):
+                pinyin_markers += 1
+            elif re.search(r"(ang|eng|ong|iao|ian|uan|uai|uei|uo)$", token):
+                pinyin_markers += 1
+        avg_len = sum(len(token) for token in lowered) / max(1, len(lowered))
+        return pinyin_markers >= 2 and avg_len <= 6.0
 
     def _safe_int(self, raw_value: str, fallback: int) -> int:
         try:

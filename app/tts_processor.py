@@ -81,6 +81,26 @@ def _sanitize_filename(name: str) -> str:
     return name[:120] if len(name) > 120 else name
 
 
+def _validate_generated_wav(wav_path: str) -> None:
+    if not wav_path or not os.path.exists(wav_path):
+        raise RuntimeError("Generated WAV file is missing.")
+    if os.path.getsize(wav_path) <= 44:
+        raise RuntimeError("Generated WAV file is empty.")
+    try:
+        with wave.open(wav_path, "rb") as wav_file:
+            channels = int(wav_file.getnchannels() or 0)
+            frame_rate = int(wav_file.getframerate() or 0)
+            frame_count = int(wav_file.getnframes() or 0)
+        if channels <= 0:
+            raise RuntimeError("Generated WAV file has no audio channels.")
+        if frame_rate <= 0 or frame_count <= 0:
+            raise RuntimeError("Generated WAV file has no valid audio frames.")
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Generated WAV file is invalid: {exc}") from exc
+
+
 def _voice_provider_and_id(voice: str) -> tuple[str, str]:
     raw = (voice or "").strip()
     if ":" in raw:
@@ -179,25 +199,19 @@ def piper_tts_to_wav_16k_mono(
     os.makedirs(tmp_dir, exist_ok=True)
 
     # Normalize text
-    if on_progress:
-        on_progress(f"Normalizing Vietnamese text...")
     normalized_text = normalize_text_for_tts(text, provider="piper")
 
     # Load Piper voice
     voice = _get_cached_piper_voice(model_path=model_path, on_progress=on_progress)
 
     # Configure synthesis
-    if on_progress:
-        on_progress(f"Synthesizing speech (speed: {speed}x)...")
     from piper.config import SynthesisConfig
     syn_config = SynthesisConfig(length_scale=1.0 / speed)
 
     # Synthesize to WAV
     with wave.open(wav_path, "wb") as wav_file:
         voice.synthesize_wav(normalized_text, wav_file, syn_config=syn_config)
-
-    if on_progress:
-        on_progress(f"✓ Synthesis complete: {os.path.basename(wav_path)}")
+    _validate_generated_wav(wav_path)
     
     return wav_path
 

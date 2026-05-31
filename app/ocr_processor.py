@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 
 import cv2
@@ -12,6 +13,12 @@ _OCR_ENGINE_LOCK = None
 MAX_CROP_WIDTH = 960
 EMPTY_TOLERANCE = 2
 EXACT_HASH_THRESHOLD = 0.5
+_OCR_HANDLE_RE = re.compile(r"@\s*[A-Za-z0-9_\-\u3400-\u9fff]{1,24}")
+_OCR_NOISE_RE = re.compile(r"^[A-Za-z0-9@#&*_\-+=/\\|~`'.:;!?()\[\]{}<>]{1,16}$")
+_OCR_WATERMARK_PATTERNS = [
+    re.compile(r"[\u3400-\u9fff]{1,6}漫(?:剧|居|刷)"),
+    re.compile(r"专店"),
+]
 
 
 def _get_lock():
@@ -50,13 +57,17 @@ def _load_ocr_engine():
 
         import sys
         if not models_dir or not os.path.isdir(models_dir):
-            meipass = getattr(sys, '_MEIPASS', '') or ''
+            meipass = getattr(sys, "_MEIPASS", "") or ""
             if meipass:
-                bundled = os.path.join(meipass, 'rapidocr', 'models')
+                bundled = os.path.join(meipass, "rapidocr", "models")
                 if os.path.isdir(bundled):
                     models_dir = bundled
 
-        required_models = ["ch_PP-OCRv4_det_mobile.onnx", "ch_PP-OCRv4_rec_mobile.onnx", "ch_ppocr_mobile_v2.0_cls_mobile.onnx"]
+        required_models = [
+            "ch_PP-OCRv4_det_mobile.onnx",
+            "ch_PP-OCRv4_rec_mobile.onnx",
+            "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+        ]
         missing = [m for m in required_models if not models_dir or not os.path.isfile(os.path.join(models_dir, m))]
         if missing:
             raise RuntimeError(
@@ -129,6 +140,37 @@ def _hamming_distance(h1, h2):
     return float(np.sum(np.abs(h1.astype(np.float32) - h2.astype(np.float32))))
 
 
+def _contains_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u3400-\u9fff]", str(text or "")))
+
+
+def _sanitize_ocr_line(text: str) -> str:
+    cleaned = " ".join(str(text or "").replace("\n", " ").split()).strip()
+    if not cleaned:
+        return ""
+    cleaned = _OCR_HANDLE_RE.sub(" ", cleaned)
+    for pattern in _OCR_WATERMARK_PATTERNS:
+        cleaned = pattern.sub(" ", cleaned)
+    cleaned = " ".join(cleaned.split()).strip(" -_.,;:!?|/\\[]{}()<>'\"`~")
+    if not cleaned:
+        return ""
+
+    visible = [ch for ch in cleaned if not ch.isspace()]
+    if not visible:
+        return ""
+    ascii_visible = [ch for ch in visible if ord(ch) < 128]
+
+    if _OCR_NOISE_RE.fullmatch(cleaned):
+        return ""
+    if len(cleaned) <= 2 and not _contains_cjk(cleaned):
+        return ""
+    if ascii_visible and len(ascii_visible) / max(1, len(visible)) >= 0.85:
+        compact_ascii = "".join(ascii_visible)
+        if len(compact_ascii) <= 16:
+            return ""
+    return cleaned
+
+
 def ocr_frame(engine, image):
     h, w = image.shape[:2]
     if w > MAX_CROP_WIDTH:
@@ -137,7 +179,11 @@ def ocr_frame(engine, image):
         new_h = int(h * scale)
         image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     result = engine(image, use_cls=False, text_score=0.6, box_thresh=0.5)
-    texts = [t.strip() for t in (result.txts or []) if t and t.strip()]
+    texts = []
+    for raw_text in (result.txts or []):
+        cleaned = _sanitize_ocr_line(raw_text)
+        if cleaned:
+            texts.append(cleaned)
     return texts
 
 
@@ -196,7 +242,6 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
         ocr_count = 0
         skip_count = 0
         step = 0
-        consecutive_skip = 0
 
         while True:
             frame_idx = step * frame_step
@@ -301,14 +346,21 @@ def _merge_adjacent(segments, max_gap=0.5):
         return []
     merged = []
     current = dict(segments[0])
+    current["text"] = _sanitize_ocr_line(current.get("text", ""))
     for seg in segments[1:]:
+        seg = dict(seg)
+        seg["text"] = _sanitize_ocr_line(seg.get("text", ""))
+        if not seg["text"]:
+            continue
         gap = seg["start"] - current["end"]
         if gap <= max_gap and _texts_similar(seg["text"].split(), current["text"].split()):
             current["end"] = seg["end"]
         else:
-            merged.append(current)
+            if current.get("text"):
+                merged.append(current)
             current = dict(seg)
-    merged.append(current)
+    if current.get("text"):
+        merged.append(current)
     return merged
 
 

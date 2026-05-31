@@ -101,6 +101,7 @@ class AsrMergeService:
         cache_dir: str,
         model_path: str,
         language: str,
+        on_item_done=None,
     ) -> None:
         worker_count = self._recommended_worker_count(len(pending_items))
         if worker_count <= 1:
@@ -122,6 +123,8 @@ class AsrMergeService:
                 item["segments"] = list(segments or [])
                 if cache_dir:
                     self._save_cached_segments(cache_dir, item["cache_key"], item["segments"])
+                if on_item_done is not None:
+                    on_item_done(item)
 
     def _transcribe_chunks_sequential(
         self,
@@ -131,6 +134,7 @@ class AsrMergeService:
         model_path: str,
         language: str,
         cache_dir: str,
+        on_item_done=None,
     ) -> None:
         reusable_model = None
         try:
@@ -156,6 +160,8 @@ class AsrMergeService:
             item["segments"] = list(segments or [])
             if cache_dir:
                 self._save_cached_segments(cache_dir, item["cache_key"], item["segments"])
+            if on_item_done is not None:
+                on_item_done(item)
 
     def transcribe_chunks(
         self,
@@ -166,11 +172,12 @@ class AsrMergeService:
         language: str,
         cache_dir: str = "",
         transcription_config: dict | None = None,
+        ordered_callback=None,
     ) -> list[dict]:
         results = []
         config_payload = dict(transcription_config or {})
         pending_items: list[dict] = []
-        for chunk in chunks:
+        for index, chunk in enumerate(chunks):
             cache_key = self._cache_key(
                 chunk=chunk,
                 model_path=model_path,
@@ -184,13 +191,30 @@ class AsrMergeService:
                 "segments": list(cached_segments or []),
                 "cache_key": cache_key,
                 "from_cache": from_cache,
+                "_index": index,
+                "_ready": from_cache,
             }
             results.append(result)
             if not from_cache:
                 pending_items.append(result)
 
+        next_emit_index = 0
+
+        def _drain_ready() -> None:
+            nonlocal next_emit_index
+            if ordered_callback is None:
+                return
+            while next_emit_index < len(results) and results[next_emit_index].get("_ready"):
+                ordered_callback(results[next_emit_index])
+                next_emit_index += 1
+
+        _drain_ready()
+
         if pending_items:
             used_parallel = False
+            def _on_item_done(item: dict) -> None:
+                item["_ready"] = True
+                _drain_ready()
             try:
                 from whisper_processor import _detect_faster_whisper_runtime
                 runtime = _detect_faster_whisper_runtime()
@@ -201,6 +225,7 @@ class AsrMergeService:
                         model_path=model_path,
                         language=language,
                         cache_dir=cache_dir,
+                        on_item_done=_on_item_done,
                     )
                     used_parallel = True
                 elif len(pending_items) > 1:
@@ -209,6 +234,7 @@ class AsrMergeService:
                         cache_dir=cache_dir,
                         model_path=model_path,
                         language=language,
+                        on_item_done=_on_item_done,
                     )
                     used_parallel = True
             except Exception as exc:
@@ -220,7 +246,12 @@ class AsrMergeService:
                     model_path=model_path,
                     language=language,
                     cache_dir=cache_dir,
+                    on_item_done=_on_item_done,
                 )
+        _drain_ready()
+        for result in results:
+            result.pop("_index", None)
+            result.pop("_ready", None)
         return results
 
     def merge_chunk_results(self, chunk_results: list[dict]) -> list[dict]:

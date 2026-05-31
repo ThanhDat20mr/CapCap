@@ -289,21 +289,14 @@ def build_voice_track_from_srt_segments(
                         clip = clip.fade_out(duration=extend_ms)
                         clip = clip + AudioSegment.silent(duration=extend_ms, frame_rate=16000)
                         gap_ms = 0
-                        print(f"[BuildTrack] Segment {idx + 1}: overlap ({next_gap}ms gap + {overlap_ms}ms cross)")
                 if gap_ms > 0:
                     fade_ms = min(gap_ms, 50)
                     clip = clip.fade_out(duration=fade_ms)
                     silent_ms = gap_ms - fade_ms
                     if silent_ms > 0:
                         clip = clip + AudioSegment.silent(duration=silent_ms, frame_rate=16000)
-                    print(f"[BuildTrack] Segment {idx + 1}: fade_tail({fade_ms}ms)" + (f" + silence({silent_ms}ms)" if silent_ms > 0 else ""))
 
         final_clip_len = len(clip)
-        print(f"[BuildTrack] Seg {idx + 1}: slot=[{start_ms}..{end_ms}]ms({max_len}ms) "
-              f"clip={clip_len}ms -> {final_clip_len}ms "
-              f"pos={start_ms}ms slot_end={start_ms + final_clip_len}ms"
-              + (" (overflows)" if clip_len > max_len else ""))
-
         base = base.overlay(clip, position=max(0, start_ms))
 
     os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)

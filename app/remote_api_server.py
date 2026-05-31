@@ -169,7 +169,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             segments,
             src_lang=str(payload.get("src_lang", "auto") or "auto"),
             enable_polish=bool(payload.get("enable_polish", True)),
-            optimize_subtitles=bool(payload.get("optimize_subtitles", True)),
+            optimize_subtitles=False,
             style_instruction=str(payload.get("style_instruction", "") or ""),
         )
         return {"ok": True, "segments": list(result or [])}
@@ -180,7 +180,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             srt_text,
             src_lang=str(payload.get("src_lang", "auto") or "auto"),
             enable_polish=bool(payload.get("enable_polish", True)),
-            optimize_subtitles=bool(payload.get("optimize_subtitles", True)),
+            optimize_subtitles=False,
             style_instruction=str(payload.get("style_instruction", "") or ""),
         )
         return {"ok": True, "srt_text": result}
@@ -247,7 +247,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             mode=str(payload.get("mode", "subtitle") or "subtitle"),
             audio_handling_mode=str(payload.get("audio_handling_mode", "fast") or "fast"),
             translator_ai=bool(payload.get("translator_ai", True)),
-            optimize_subtitles=bool(payload.get("optimize_subtitles", False)),
+            optimize_subtitles=False,
             translator_style=str(payload.get("translator_style", "") or ""),
             whisper_model_name=str(payload.get("whisper_model_name", "base") or "base"),
         )

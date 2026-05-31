@@ -117,7 +117,7 @@ class VoiceWorkflow:
         manifest_segments = dict(manifest.get("segments", {}) or {})
         manifest_by_cache_key = dict(manifest.get("by_cache_key", {}) or {})
         for idx, (seg, wav_path) in enumerate(zip(list(segments or []), list(wavs or []))):
-            text = str((seg or {}).get("tts_text") or (seg or {}).get("text") or "").strip()
+            text = self._segment_tts_text(seg)
             if not text or not wav_path or not os.path.exists(wav_path):
                 continue
             cache_key = segment_cache_key(
@@ -143,6 +143,15 @@ class VoiceWorkflow:
 
     def _voice_provider(self, voice_name: str) -> str:
         return voice_provider(voice_name)
+
+    def _segment_tts_text(self, seg: dict) -> str:
+        current = dict(seg or {})
+        subtitle_text = str(current.get("text") or "").strip()
+        if bool(current.get("voice_edited")):
+            edited_text = str(current.get("tts_text") or current.get("dubbing_vi") or "").strip()
+            if edited_text:
+                return edited_text
+        return subtitle_text
 
     def _provider_native_speed(self, *, provider: str, requested_speed: float) -> float:
         return provider_native_speed(provider=provider, requested_speed=requested_speed)
@@ -447,7 +456,7 @@ class VoiceWorkflow:
         metrics["action_taken"] = action_taken
         seg["_tts_metrics"] = metrics
         seg["subtitle_vi"] = (seg.get("subtitle_vi") or seg.get("text") or "").strip()
-        seg["dubbing_vi"] = (seg.get("tts_text") or "").strip()
+        seg["dubbing_vi"] = self._segment_tts_text(seg)
         seg["tts_duration"] = metrics["tts_duration"]
         seg["ratio"] = metrics["ratio"]
         seg["attempt_count"] = metrics["attempt_count"]
@@ -688,83 +697,39 @@ class VoiceWorkflow:
         style_instruction: str = "",
     ):
         prepared = []
-        adjusted_count = 0
-        for idx, seg in enumerate(list(segments or [])):
+        for seg in list(segments or []):
             current = dict(seg or {})
-            source_text = (current.get("source_text") or current.get("text") or "").strip()
             subtitle_text = (current.get("text") or "").strip()
-            existing_tts_text = (current.get("tts_text") or current.get("dubbing_vi") or "").strip()
             voice_edited = bool(current.get("voice_edited"))
+            spoken_text = self._segment_tts_text(current)
             duration_sec = max(0.0, float(current.get("end", 0.0)) - float(current.get("start", 0.0)))
-            speech_cost = self._estimate_speech_cost(source_text)
+            speech_cost = self._estimate_speech_cost(subtitle_text)
             max_words_vi = self._max_words_vi(duration_sec, speech_cost)
-            if existing_tts_text:
-                planned_text = existing_tts_text
-            else:
-                planned_text = self._plan_initial_dubbing_text(
-                    source_text=source_text,
-                    subtitle_text=subtitle_text,
-                    duration_sec=duration_sec,
-                    speech_cost=speech_cost,
-                    max_words_vi=max_words_vi,
-                    enabled=bool(ai_rewrite_dubbing),
-                    source_language=source_language,
-                    style_instruction=style_instruction,
-                )
             original_words = self._count_words(subtitle_text)
-            if existing_tts_text:
-                tts_text = existing_tts_text
-                validation_action = "manual_voice" if voice_edited else "accept"
-            else:
-                tts_text, validation_action = self._validate_initial_dubbing_text(
-                    source_text=source_text,
-                    subtitle_text=subtitle_text,
-                    dubbing_text=planned_text,
-                    duration_sec=duration_sec,
-                    max_words_vi=max_words_vi,
-                    speech_cost=speech_cost,
-                    voice_provider=voice_provider,
-                )
-            spoken_words = self._count_spoken_words(planned_text, voice_provider=voice_provider)
-            if voice_edited:
-                action_taken = "manual_voice"
-            elif duration_sec < 0.8:
-                action_taken = "keyword_only"
-            elif validation_action != "accept":
-                action_taken = validation_action
-            else:
-                action_taken = "translate_for_dubbing" if ai_rewrite_dubbing else "accept"
-            if tts_text != subtitle_text:
-                adjusted_count += 1
-            current["tts_text"] = tts_text
-            current["dubbing_vi"] = tts_text
+            spoken_words = self._count_spoken_words(spoken_text, voice_provider=voice_provider)
+            action_taken = "manual_voice" if voice_edited else "accept"
+            current["tts_text"] = spoken_text if voice_edited and spoken_text != subtitle_text else ""
+            current["dubbing_vi"] = spoken_text
             current["subtitle_vi"] = subtitle_text
             current["voice_edited"] = voice_edited
-            final_spoken_words = self._count_spoken_words(tts_text, voice_provider=voice_provider)
+            final_spoken_words = spoken_words
             current["_tts_metrics"] = {
                 "duration_sec": round(duration_sec, 3),
                 "speech_cost": speech_cost,
                 "max_words_vi": max_words_vi,
                 "original_words": original_words,
                 "spoken_words": spoken_words,
-                "tts_words": self._count_words(tts_text),
+                "tts_words": self._count_words(spoken_text),
                 "tts_spoken_words": final_spoken_words,
                 "retry_cap": self._retry_cap_for_segment(duration_sec=duration_sec, speech_cost=speech_cost),
                 "action_taken": action_taken,
-                "trimmed": bool(tts_text != subtitle_text),
+                "trimmed": bool(voice_edited and spoken_text != subtitle_text),
                 "subtitle_vi": subtitle_text,
-                "dubbing_vi": tts_text,
+                "dubbing_vi": spoken_text,
                 "voice_edited": voice_edited,
             }
             prepared.append(current)
-            print(
-                f"[Voice Workflow] Segment {idx + 1}: "
-                f"dur={duration_sec:.2f}s cost={speech_cost} budget={max_words_vi} "
-                f"words={original_words}->{self._count_words(tts_text)} "
-                f"spoken={spoken_words}->{final_spoken_words}"
-                + (" trimmed" if tts_text != source_text else "")
-            )
-        print(f"[Voice Workflow] Prepared TTS text: adjusted={adjusted_count}/{len(prepared)}")
+        print(f"[Voice Workflow] Prepared TTS text: adjusted=0/{len(prepared)}")
         return prepared
 
     def _probe_wav_duration_seconds(self, wav_path: str) -> float:
@@ -775,12 +740,30 @@ class VoiceWorkflow:
             frame_count = wav_file.getnframes()
         return max(0.0, float(frame_count) / float(frame_rate))
 
+    def _write_silence_wav(self, wav_path: str, duration_seconds: float) -> str:
+        duration = max(0.2, float(duration_seconds or 0.0))
+        sample_rate = 16000
+        frame_count = max(1, int(round(duration * sample_rate)))
+        os.makedirs(os.path.dirname(wav_path) or ".", exist_ok=True)
+        with wave.open(wav_path, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(b"\x00\x00" * frame_count)
+        return wav_path
+
     def _log_segment_fit_metrics(self, *, segments, wavs):
         clipped = 0
+        total = 0
+        min_ratio = None
+        max_ratio = None
         for idx, (seg, wav_path) in enumerate(zip(list(segments or []), list(wavs or []))):
             target_duration = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
             actual_duration = self._probe_wav_duration_seconds(wav_path)
             ratio = (actual_duration / target_duration) if target_duration > 0 else 0.0
+            total += 1
+            min_ratio = ratio if min_ratio is None else min(min_ratio, ratio)
+            max_ratio = ratio if max_ratio is None else max(max_ratio, ratio)
             if ratio > 1.05:
                 clipped += 1
             self._finalize_segment_result(
@@ -790,11 +773,10 @@ class VoiceWorkflow:
                 attempt_count=int((seg.get("attempt_count") or (seg.get("_tts_metrics") or {}).get("attempt_count") or 1)),
                 action_taken=str((seg.get("action_taken") or (seg.get("_tts_metrics") or {}).get("action_taken") or "accept")),
             )
-            print(
-                f"[Voice Fit] Segment {idx + 1}: "
-                f"target={target_duration:.2f}s actual={actual_duration:.2f}s ratio={ratio:.3f}"
-            )
-        print(f"[Voice Fit] Over target (>1.05): {clipped}/{len(list(wavs or []))}")
+        print(
+            f"[Voice Fit] Summary: segments={total}, over_target={clipped}/{total}, "
+            f"min_ratio={(min_ratio or 0.0):.3f}, max_ratio={(max_ratio or 0.0):.3f}"
+        )
 
     def _measure_segment_ratios(self, *, segments, wavs):
         ratios = []
@@ -1244,6 +1226,10 @@ class VoiceWorkflow:
         polished_wavs = list(wavs or [])
         segments = list(segments or [])
         total_shift_s = 0.0
+        overlap_count = 0
+        stretch_count = 0
+        silence_count = 0
+        no_action_count = 0
 
         for idx, wav_path in enumerate(polished_wavs):
             if not wav_path or not os.path.exists(wav_path):
@@ -1267,7 +1253,7 @@ class VoiceWorkflow:
 
             gap_ms = int((target_d - actual_d) * 1000)
             if gap_ms <= 20:
-                print(f"[Voice Deficit] Segment {idx + 1}: gap={gap_ms}ms → overlap (build_voice_track)")
+                overlap_count += 1
                 continue
 
             mode_key = (sync_mode or "off").strip().lower()
@@ -1283,19 +1269,23 @@ class VoiceWorkflow:
                 seg["action_taken"] = "deficit_stretch"
                 new_actual = self._probe_wav_duration_seconds(polished_wavs[idx])
                 gap_ms = max(0, int((target_d - new_actual) * 1000))
-                print(f"[Voice Deficit] Segment {idx + 1}: ratio={ratio:.3f} → deficit_stretch (gap_after={gap_ms}ms)")
+                stretch_count += 1
                 if gap_ms <= 20:
                     continue
             elif ratio >= 0.85:
-                print(f"[Voice Deficit] Segment {idx + 1}: ratio={ratio:.3f} gap={gap_ms}ms → no action (silence+fade)")
+                no_action_count += 1
                 continue
 
             if gap_ms > 0 and ratio < 0.85:
-                print(f"[Voice Deficit] Segment {idx + 1}: ratio={ratio:.3f} gap={gap_ms}ms → silence+fade")
+                silence_count += 1
                 continue
 
-        if total_shift_s > 0:
-            print(f"[Voice Deficit] Total timeline shift: +{total_shift_s:.2f}s")
+        print(
+            "[Voice Deficit] Summary: "
+            f"overlap={overlap_count}, stretch={stretch_count}, "
+            f"silence_fade={silence_count}, no_action={no_action_count}, "
+            f"timeline_shift={total_shift_s:.2f}s"
+        )
         return segments, polished_wavs
 
     def _fit_segment_wavs_to_timeline(self, *, segments, wavs, tmp_dir: str, sync_mode: str):
@@ -1319,7 +1309,17 @@ class VoiceWorkflow:
             synced_wavs.append(fitted_path)
         return synced_wavs
 
-    def _synthesize_segment_wavs(self, *, segments, tmp_dir: str, voice_name: str, provider_speed: float = 1.0, voice_provider: str = '', on_progress: callable = None):
+    def _synthesize_segment_wavs(
+        self,
+        *,
+        segments,
+        tmp_dir: str,
+        voice_name: str,
+        provider_speed: float = 1.0,
+        voice_provider: str = '',
+        on_progress: callable = None,
+        index_offset: int = 0,
+    ):
         segments = list(segments or [])
         manifest = self._load_manifest(tmp_dir)
         manifest_segments = dict(manifest.get("segments", {}) or {})
@@ -1329,13 +1329,14 @@ class VoiceWorkflow:
         cache_hits = 0
 
         for idx, seg in enumerate(segments):
-            txt = (seg.get("tts_text") or seg.get("text") or "").strip()
+            global_idx = int(index_offset) + idx
+            txt = self._segment_tts_text(seg)
             if not txt:
                 wavs[idx] = ""
                 continue
-            seg_wav = os.path.join(tmp_dir, f"seg_{idx:04d}_base.wav")
+            seg_wav = os.path.join(tmp_dir, f"seg_{global_idx:04d}_base.wav")
             cache_key = self._segment_cache_key(text=txt, voice_name=voice_name, provider_speed=provider_speed)
-            cache_entry = manifest_segments.get(str(idx), {})
+            cache_entry = manifest_segments.get(str(global_idx), {})
             cached_wav = str(cache_entry.get("wav_path", "")).strip()
             cached_key = str(cache_entry.get("cache_key", "")).strip()
             if not (cached_key == cache_key and cached_wav and os.path.exists(cached_wav)):
@@ -1344,19 +1345,20 @@ class VoiceWorkflow:
                 cached_key = str(cache_entry.get("cache_key", "")).strip()
             if cached_key == cache_key and cached_wav and os.path.exists(cached_wav):
                 wavs[idx] = cached_wav
-                manifest_segments[str(idx)] = {
+                manifest_segments[str(global_idx)] = {
                     "cache_key": cache_key,
                     "wav_path": cached_wav,
                     "text": txt,
                     "voice_name": voice_name,
                     "provider_speed": provider_speed,
                 }
-                manifest_by_cache_key[cache_key] = dict(manifest_segments[str(idx)])
+                manifest_by_cache_key[cache_key] = dict(manifest_segments[str(global_idx)])
                 cache_hits += 1
                 continue
             pending_jobs.append(
                 {
                     "idx": idx,
+                    "global_idx": global_idx,
                     "text": txt,
                     "wav_path": seg_wav,
                     "cache_key": cache_key,
@@ -1376,14 +1378,14 @@ class VoiceWorkflow:
                         tmp_dir=tmp_dir,
                         on_progress=on_progress,
                     )
-                    manifest_segments[str(pending_jobs[0]["idx"])] = {
+                    manifest_segments[str(pending_jobs[0]["global_idx"])] = {
                         "cache_key": str(pending_jobs[0]["cache_key"]),
                         "wav_path": str(pending_jobs[0]["wav_path"]),
                         "text": str(pending_jobs[0]["text"]),
                         "voice_name": voice_name,
                         "provider_speed": provider_speed,
                     }
-                    manifest_by_cache_key[str(pending_jobs[0]["cache_key"])] = dict(manifest_segments[str(pending_jobs[0]["idx"])])
+                    manifest_by_cache_key[str(pending_jobs[0]["cache_key"])] = dict(manifest_segments[str(pending_jobs[0]["global_idx"])])
                     wavs[int(pending_jobs[0]["idx"])] = str(pending_jobs[0]["wav_path"])
                     pending_jobs = pending_jobs[1:]
                     cache_hits += 1
@@ -1426,25 +1428,29 @@ class VoiceWorkflow:
                     try:
                         future.result()
                         completed_count += 1
-                        if on_progress:
-                            on_progress(f"✓ Synthesized {completed_count}/{len(pending_jobs)} segments")
                     except Exception as exc:
                         preview = " ".join(txt.split())
                         if len(preview) > 120:
                             preview = preview[:117] + "..."
                         if on_progress:
-                            on_progress(f"✗ Error at segment {idx + 1}: {preview[:50]}...")
-                        raise RuntimeError(
-                            f"TTS failed at subtitle segment {idx + 1}: \"{preview}\". {exc}"
-                        ) from exc
-                    manifest_segments[str(idx)] = {
+                            on_progress(f"[TTS Warning] Segment {idx + 1} failed, using silence placeholder.")
+                        target_duration = max(
+                            0.2,
+                            float(segments[idx].get("end", 0.0)) - float(segments[idx].get("start", 0.0)),
+                        )
+                        self._write_silence_wav(seg_wav, target_duration)
+                        print(
+                            f"[Voice Workflow] TTS failed at subtitle segment {idx + 1}: "
+                            f"\"{preview}\". Using silence placeholder. Error: {exc}"
+                        )
+                    manifest_segments[str(job["global_idx"])] = {
                         "cache_key": str(job["cache_key"]),
                         "wav_path": seg_wav,
                         "text": txt,
                         "voice_name": voice_name,
                         "provider_speed": provider_speed,
                     }
-                    manifest_by_cache_key[str(job["cache_key"])] = dict(manifest_segments[str(idx)])
+                    manifest_by_cache_key[str(job["cache_key"])] = dict(manifest_segments[str(job["global_idx"])])
                     wavs[idx] = seg_wav
         else:
             print(f"[Voice Workflow] TTS synth jobs: pending=0, cache_hits={cache_hits}, workers=0, native_speed={provider_speed:.2f}")
@@ -1453,6 +1459,45 @@ class VoiceWorkflow:
         manifest["by_cache_key"] = manifest_by_cache_key
         self._save_manifest(tmp_dir, manifest)
         return wavs
+
+    def prime_tts_cache(
+        self,
+        *,
+        segments,
+        tmp_dir: str,
+        voice_name: str,
+        voice_speed: float = 1.0,
+        index_offset: int = 0,
+        on_progress: callable = None,
+    ) -> list[str]:
+        os.makedirs(tmp_dir, exist_ok=True)
+        safe_voice_speed = self._clamp_requested_speed(float(voice_speed))
+        voice_provider = self._voice_provider(voice_name)
+        prepared_segments = self._prepare_segments_for_tts(
+            segments,
+            voice_provider=voice_provider,
+            ai_rewrite_dubbing=False,
+            source_language="auto",
+            style_instruction="",
+        )
+        print(
+            "[Voice Workflow] Priming TTS cache: "
+            f"segments={len(prepared_segments)}, voice={voice_name}, provider={voice_provider}, "
+            f"index_offset={int(index_offset)}"
+        )
+        provider_speed = self._provider_native_speed(
+            provider=voice_provider,
+            requested_speed=safe_voice_speed,
+        )
+        return self._synthesize_segment_wavs(
+            segments=prepared_segments,
+            tmp_dir=tmp_dir,
+            voice_name=voice_name,
+            provider_speed=provider_speed,
+            voice_provider=voice_provider,
+            on_progress=on_progress,
+            index_offset=index_offset,
+        )
 
     def run(
         self,
