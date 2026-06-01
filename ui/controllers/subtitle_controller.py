@@ -2,7 +2,7 @@ import os
 
 from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QTextEdit, QVBoxLayout
 
-from workers import RewriteTranslationWorker, TranscriptionWorker, TranslationWorker
+from worker_adapters import RewriteTranslationWorker, TranscriptionWorker, TranslationWorker
 from translation import TranslationOrchestrator
 
 

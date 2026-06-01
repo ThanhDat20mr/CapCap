@@ -2,7 +2,7 @@ import os
 import sys
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
-from workers import PrepareWorkflowWorker
+from worker_adapters import PrepareWorkflowWorker
 
 # Robust import for the progress widget
 try:

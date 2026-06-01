@@ -73,7 +73,7 @@ from views import build_main_window_ui
 from widgets.progress_dialog import BackgroundableProgressDialog
 from runtime_paths import app_path, asset_path, models_path, workspace_root
 from runtime_profile import is_remote_profile
-from workers import (
+from worker_adapters import (
     ExtractionWorker,
     ResourceDownloadWorker,
     SegmentAudioPreviewWorker,

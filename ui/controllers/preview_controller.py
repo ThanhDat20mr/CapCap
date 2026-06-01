@@ -9,7 +9,7 @@ from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from runtime_paths import bin_path
-from workers import ExactFramePreviewWorker, FinalExportWorker, PreviewMuxWorker, QuickPreviewWorker
+from worker_adapters import ExactFramePreviewWorker, FinalExportWorker, PreviewMuxWorker, QuickPreviewWorker
 
 
 class PreviewController:
