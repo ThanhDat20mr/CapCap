@@ -3,10 +3,9 @@ import os
 import json
 import time
 
-from PySide6.QtCore import Qt, QSize, QTimer
-from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QApplication,
     QDialog,
     QFileDialog,
     QFrame,
@@ -15,7 +14,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )

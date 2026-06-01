@@ -4,9 +4,8 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect, QPushButton, QProgressDialog
 )
 import time
-from PySide6.QtCore import Qt, QTimer, Property, QRect
-from PySide6.QtGui import QColor, QFont, QPainter, QLinearGradient, QBrush, QPen
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
 
 
 class BackgroundableProgressDialog(QProgressDialog):

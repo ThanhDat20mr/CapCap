@@ -2,7 +2,7 @@ import os
 
 from PySide6 import QtCore
 from PySide6.QtCore import QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,

@@ -2,7 +2,7 @@ import os
 import time
 import requests
 
-from ..errors import TranslationConfigError, TranslationProviderError, TranslationValidationError
+from ..errors import TranslationConfigError, TranslationProviderError
 from ..srt_utils import parse_numbered_lines, validate_texts
 
 class AIPolisherProvider:

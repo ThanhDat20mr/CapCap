@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 import os
 
-from core.models import coerce_segments
 from services.segment_service import SegmentService
 
 

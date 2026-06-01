@@ -1,5 +1,5 @@
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import QGraphicsItem
 
 

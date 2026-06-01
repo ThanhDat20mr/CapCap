@@ -1,23 +1,19 @@
 import sys
 import os
 import re
-import time
 import json
 import copy
 import hashlib
 import shutil
-import subprocess
 import threading
-import webbrowser
 from PySide6.QtWidgets import (
-    QProgressDialog,QApplication, QMainWindow, QWidget, QVBoxLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QLineEdit,
-                             QFileDialog, QCheckBox, QTextEdit, QComboBox,
-                             QGroupBox, QSlider, QFrame, QProgressBar, QMessageBox,
-                             QScrollArea, QGridLayout,
-                             QSpinBox, QColorDialog, QDoubleSpinBox, QTabWidget, QDialog, QSizePolicy, QInputDialog,
-                             QRadioButton)
-from PySide6.QtCore import Qt, QUrl, QTimer, QSettings, QSize, QEvent
+                             QFileDialog, QTextEdit, QComboBox,
+                             QFrame, QProgressBar, QMessageBox,
+                             QScrollArea,
+                             QColorDialog, QTabWidget, QDialog, QSizePolicy, QInputDialog)
+from PySide6.QtCore import Qt, QUrl, QTimer, QSettings, QEvent
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPixmap, QTextCursor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
@@ -74,16 +70,13 @@ from utils.media_utils import (
 )
 from utils.settings_utils import load_user_settings as load_user_settings_impl, save_user_settings as save_user_settings_impl
 from views import build_main_window_ui
-from widgets import TimelineWidget, VideoView
 from widgets.progress_dialog import BackgroundableProgressDialog
-from runtime_paths import app_path, asset_path, bin_path, models_path, temp_path, workspace_root
+from runtime_paths import app_path, asset_path, models_path, workspace_root
 from runtime_profile import is_remote_profile
 from workers import (
     ExtractionWorker,
     ResourceDownloadWorker,
     SegmentAudioPreviewWorker,
-    TimelineThumbnailWorker,
-    TimelineWaveformWorker,
     VoiceSamplePreviewWorker,
     VocalSeparationWorker,
     VoiceOverWorker,

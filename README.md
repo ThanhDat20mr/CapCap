@@ -174,15 +174,8 @@ pip install -r requirements-local.txt
 python ui/gui.py
 ```
 
-### Remote Client
-```bash
-pip install -r requirements-remote.txt
-python ui/gui_remote.py
-```
-
 ### Remote Server
 ```bash
-pip install -r requirements-server.txt
 python app/remote_api_server.py
 ```
 
@@ -209,7 +202,6 @@ Performance notes:
 CapCap/
 ├── ui/
 │   ├── gui.py                    # Main app entry point
-│   ├── gui_remote.py             # Remote client entry point
 │   ├── main_window.py            # Main window, controllers, signal wiring
 │   ├── controllers/              # Pipeline, preview, subtitle controllers
 │   ├── views/                    # UI layout builders
@@ -244,8 +236,7 @@ CapCap/
 │   ├── cuda12_fw/                # CUDA runtime DLLs (optional GPU accel)
 │   └── UVR-MDX-NET-Inst_HQ_3.onnx  # Vocal separation model
 ├── .env                          # Environment configuration
-├── .env_example                  # Example environment config
-└── test_vocal_separation.py      # Test script for vocal separation
+└── .env_example                  # Example environment config
 ```
 
 ## CUDA / GPU

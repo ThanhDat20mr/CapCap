@@ -7,7 +7,6 @@ import threading
 import time
 import wave
 
-import requests
 from dotenv import load_dotenv
 from runtime_paths import app_path, bin_path, bundle_root, models_path, temp_path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

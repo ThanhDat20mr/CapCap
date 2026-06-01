@@ -1,7 +1,6 @@
 import os
 import shutil
 import subprocess
-import sys
 import threading
 import re
 from pathlib import Path

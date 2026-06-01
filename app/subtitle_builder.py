@@ -1,5 +1,3 @@
-import os
-
 from core.models import coerce_segments
 
 def format_timestamp(seconds):
