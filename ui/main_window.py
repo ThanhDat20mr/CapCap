@@ -598,7 +598,6 @@ class VideoTranslatorGUI(QMainWindow):
         self._pending_video_filter_preview = False
         self._filter_thumbnail_visible = False
         self._filter_preview_blur_was_checked = False
-        self._filter_preview_blur_edit_was_checked = False
         self._filter_preview_ocr_was_editable = False
         self._suspend_ocr_overlay = False
         self._ocr_overlay_visible = True
@@ -2723,6 +2722,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.apply_segments_to_timeline()
             self.set_selected_segment_index(0, sync_ui=True)
         self._update_ocr_overlay()
+        self._restore_project_blur_state(state)
 
     def _enable_post_pipeline_preview_assets(self, *, refresh: bool = True):
         self._allow_post_pipeline_preview_assets = True
@@ -2894,16 +2894,11 @@ class VideoTranslatorGUI(QMainWindow):
         self._filter_preview_blur_was_checked = bool(
             hasattr(self, "blur_area_btn") and self.blur_area_btn.isChecked()
         )
-        self._filter_preview_blur_edit_was_checked = bool(
-            hasattr(self, "blur_edit_btn") and self.blur_edit_btn.isChecked()
-        )
         overlay = getattr(self, "ocr_region_overlay", None)
         self._filter_preview_ocr_was_editable = bool(getattr(overlay, "_editable", False)) if overlay is not None else False
 
         if hasattr(self, "blur_area_btn"):
             self.blur_area_btn.setEnabled(False)
-        if hasattr(self, "blur_edit_btn"):
-            self.blur_edit_btn.setEnabled(False)
         if hasattr(self, "video_view"):
             self.video_view.set_blur_edit_enabled(False)
         if overlay is not None:
@@ -2922,8 +2917,6 @@ class VideoTranslatorGUI(QMainWindow):
         self._suspend_ocr_overlay = False
         if hasattr(self, "blur_area_btn"):
             self.blur_area_btn.setEnabled(True)
-        if hasattr(self, "blur_edit_btn"):
-            self.blur_edit_btn.setEnabled(True)
         self._sync_blur_controls()
 
         overlay = getattr(self, "ocr_region_overlay", None)
@@ -4972,30 +4965,30 @@ class VideoTranslatorGUI(QMainWindow):
     def _blur_effect_enabled(self) -> bool:
         return bool(hasattr(self, "blur_area_btn") and self.blur_area_btn.isChecked())
 
-    def _blur_edit_requested(self) -> bool:
-        return bool(hasattr(self, "blur_edit_btn") and self.blur_edit_btn.isChecked())
-
     def _sync_blur_controls(self):
         video_view = getattr(self, "video_view", None)
         blur_btn = getattr(self, "blur_area_btn", None)
         blur_add_btn = getattr(self, "blur_add_btn", None)
-        blur_edit_btn = getattr(self, "blur_edit_btn", None)
         if video_view is None or blur_btn is None:
             return
         has_video = bool(self.video_path_edit.text().strip()) and os.path.exists(self.video_path_edit.text().strip())
         blur_enabled = self._blur_effect_enabled()
-        edit_requested = self._blur_edit_requested()
+        is_playing = False
+        media_player = getattr(self, "media_player", None)
+        if media_player is not None:
+            try:
+                is_playing = bool(media_player.is_playing())
+            except Exception:
+                is_playing = False
         editing_allowed = (
             blur_enabled
-            and edit_requested
             and has_video
+            and not is_playing
             and not bool(getattr(self, "_filter_thumbnail_visible", False))
         )
         video_view.set_blur_edit_enabled(editing_allowed)
         if blur_add_btn is not None:
-            blur_add_btn.setEnabled(has_video and blur_enabled and not bool(getattr(self, "_filter_thumbnail_visible", False)))
-        if blur_edit_btn is not None:
-            blur_edit_btn.setEnabled(has_video and blur_enabled and not bool(getattr(self, "_filter_thumbnail_visible", False)))
+            blur_add_btn.setEnabled(has_video and blur_enabled and not is_playing and not bool(getattr(self, "_filter_thumbnail_visible", False)))
 
     def toggle_blur_effect_enabled(self, checked: bool):
         if not hasattr(self, "video_view") or not hasattr(self, "blur_area_btn"):
@@ -5007,27 +5000,15 @@ class VideoTranslatorGUI(QMainWindow):
             self.blur_area_btn.blockSignals(False)
             QMessageBox.warning(self, "Blur Area", "Please load a video before adding a blur area.")
             return
-        if checked:
-            if (
-                hasattr(self, "blur_edit_btn")
-                and not self.blur_edit_btn.isChecked()
-            ):
-                self.blur_edit_btn.blockSignals(True)
-                self.blur_edit_btn.setChecked(True)
-                self.blur_edit_btn.blockSignals(False)
-        else:
-            blur_edit_btn = getattr(self, "blur_edit_btn", None)
-            if blur_edit_btn and blur_edit_btn.isChecked():
-                blur_edit_btn.blockSignals(True)
-                blur_edit_btn.setChecked(False)
-                blur_edit_btn.blockSignals(False)
         self._sync_blur_controls()
-        if checked and self._blur_edit_requested():
+        if checked:
             self._blur_region_preview_dirty = True
             if hasattr(self, "media_player"):
                 self.media_player.clear_blur_region()
         else:
-            self.apply_preview_blur_region()
+            if hasattr(self, "media_player"):
+                self.media_player.clear_blur_region()
+        self.persist_project_blur_state()
         self._refresh_preview_audio_controls()
         if checked:
             self.log("[Blur Area] blur effect enabled.")
@@ -5043,36 +5024,21 @@ class VideoTranslatorGUI(QMainWindow):
             self.blur_area_btn.blockSignals(True)
             self.blur_area_btn.setChecked(True)
             self.blur_area_btn.blockSignals(False)
-        if hasattr(self, "blur_edit_btn") and not self.blur_edit_btn.isChecked():
-            self.blur_edit_btn.blockSignals(True)
-            self.blur_edit_btn.setChecked(True)
-            self.blur_edit_btn.blockSignals(False)
         if hasattr(self.video_view, "add_blur_region"):
             self.video_view.add_blur_region()
         self._sync_blur_controls()
         self._blur_region_preview_dirty = True
-
-    def toggle_blur_area_editing(self, checked: bool):
-        if not hasattr(self, "video_view") or not hasattr(self, "blur_edit_btn"):
-            return
-        if checked and not self._blur_effect_enabled():
-            self.blur_edit_btn.blockSignals(True)
-            self.blur_edit_btn.setChecked(False)
-            self.blur_edit_btn.blockSignals(False)
-            return
-        self._sync_blur_controls()
-        if not checked and getattr(self, "_blur_region_preview_dirty", False):
-            self.apply_preview_blur_region()
-        if checked:
-            self.log("[Blur Area] drag inside the video preview to move or resize the region.")
+        if hasattr(self, "media_player"):
+            self.media_player.clear_blur_region()
+        self.persist_project_blur_state()
 
     def on_blur_edit_finished(self):
         if getattr(self, "_blur_edit_finish_syncing", False):
             return
-        blur_edit_btn = getattr(self, "blur_edit_btn", None)
-        if blur_edit_btn is None or not blur_edit_btn.isChecked():
+        if not self._blur_effect_enabled():
             return
         self._blur_region_preview_dirty = True
+        self.persist_project_blur_state()
 
     def toggle_ocr_region_editing(self, checked: bool):
         overlay = getattr(self, "ocr_region_overlay", None)
@@ -5085,8 +5051,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.ocr_region_btn.setStyleSheet("QPushButton { color: #6ee7d6; font-weight: bold; font-size: 10px; padding: 0; }")
             self._sync_blur_controls()
             return
-        blur_edit_btn = getattr(self, "blur_edit_btn", None)
-        if blur_edit_btn and blur_edit_btn.isChecked():
+        if self._blur_effect_enabled():
             self.video_view.set_blur_edit_enabled(False)
         overlay.set_editable(True)
         overlay.sync_to_view()
@@ -5094,29 +5059,94 @@ class VideoTranslatorGUI(QMainWindow):
         self.log("[OCR Region] drag inside the video preview to move or resize the OCR crop.")
 
     def on_preview_blur_region_changed(self):
-        if self._blur_edit_requested():
+        if self._blur_effect_enabled():
             self._blur_region_preview_dirty = True
             return
         self.apply_preview_blur_region()
+        self.persist_project_blur_state()
 
-    def apply_preview_blur_region(self):
+    def apply_preview_blur_region(self, *, regions=None, force: bool = False):
         if not hasattr(self, "media_player") or not hasattr(self, "video_view"):
             return
         self._blur_region_preview_dirty = False
         blur_enabled = self._blur_effect_enabled()
-        blur_region = self.video_view.get_blur_region_normalized() if hasattr(self.video_view, "get_blur_region_normalized") else None
-        if blur_enabled and blur_region:
+        blur_region = regions if regions is not None else (
+            self.video_view.get_blur_region_normalized() if hasattr(self.video_view, "get_blur_region_normalized") else None
+        )
+        is_playing = False
+        try:
+            is_playing = bool(self.media_player.is_playing())
+        except Exception:
+            is_playing = False
+        if blur_enabled and blur_region and (force or is_playing):
             self.media_player.set_blur_region(blur_region)
         else:
             self.media_player.clear_blur_region()
 
-    def set_blur_overlay_active_for_preview(self, active: bool):
-        if not hasattr(self, "video_view"):
+    def _current_blur_regions_payload(self):
+        if not hasattr(self, "video_view") or not hasattr(self.video_view, "get_blur_region_normalized"):
+            return []
+        raw_regions = self.video_view.get_blur_region_normalized()
+        if isinstance(raw_regions, dict):
+            raw_regions = [raw_regions]
+        if not isinstance(raw_regions, list):
+            return []
+        regions = []
+        for region in raw_regions:
+            if not isinstance(region, dict):
+                continue
+            try:
+                x = max(0.0, min(1.0, float(region.get("x", 0.0))))
+                y = max(0.0, min(1.0, float(region.get("y", 0.0))))
+                width = max(0.0, min(1.0 - x, float(region.get("width", 0.0))))
+                height = max(0.0, min(1.0 - y, float(region.get("height", 0.0))))
+            except (TypeError, ValueError):
+                continue
+            if width > 0.0 and height > 0.0:
+                regions.append(
+                    {
+                        "x": round(x, 6),
+                        "y": round(y, 6),
+                        "width": round(width, 6),
+                        "height": round(height, 6),
+                    }
+                )
+        return regions
+
+    def persist_project_blur_state(self, *, regions=None, enabled=None):
+        state = getattr(self, "current_project_state", None)
+        if not state:
             return
-        if not active:
-            self.video_view.set_blur_edit_enabled(False)
+        if regions is None:
+            regions = self._current_blur_regions_payload()
+        if enabled is None:
+            enabled = self._blur_effect_enabled()
+        blur_state = {
+            "enabled": bool(enabled),
+            "regions": list(regions or []),
+        }
+        if state.settings.get("blur_state") == blur_state:
             return
+        state.set_setting("blur_state", blur_state)
+        self.project_service.save_project(state)
+
+    def _restore_project_blur_state(self, state):
+        blur_state = dict(getattr(state, "settings", {}).get("blur_state") or {})
+        enabled = bool(blur_state.get("enabled", False))
+        regions = blur_state.get("regions", [])
+        if hasattr(self, "video_view") and hasattr(self.video_view, "set_blur_regions_normalized"):
+            self.video_view.set_blur_regions_normalized(regions)
+        if hasattr(self, "blur_area_btn"):
+            self.blur_area_btn.blockSignals(True)
+            self.blur_area_btn.setChecked(enabled)
+            self.blur_area_btn.blockSignals(False)
         self._sync_blur_controls()
+        if enabled:
+            self._blur_region_preview_dirty = True
+            if hasattr(self, "media_player"):
+                self.media_player.clear_blur_region()
+        else:
+            self.apply_preview_blur_region()
 
     def _resolve_voice_preview_source(self, entry: dict) -> QUrl:
         preview_path = str(entry.get("preview_video_path", "")).strip()
@@ -5891,8 +5921,6 @@ class VideoTranslatorGUI(QMainWindow):
             self.blur_area_btn.setEnabled(v_ok)
         if hasattr(self, "blur_add_btn"):
             self.blur_add_btn.setEnabled(v_ok and self._blur_effect_enabled() and not bool(getattr(self, "_filter_thumbnail_visible", False)))
-        if hasattr(self, "blur_edit_btn"):
-            self.blur_edit_btn.setEnabled(v_ok and self._blur_effect_enabled() and not bool(getattr(self, "_filter_thumbnail_visible", False)))
         if hasattr(self, "ocr_region_btn"):
             self.ocr_region_btn.setEnabled(v_ok)
         self._sync_blur_controls()
@@ -7382,9 +7410,6 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "blur_area_btn"):
             blur_active = bool(self.blur_area_btn.isChecked())
             self.blur_area_btn.setToolTip("Blur effect on" if blur_active else "Turn blur effect on or off")
-        if hasattr(self, "blur_edit_btn"):
-            blur_editing = bool(self.blur_edit_btn.isChecked())
-            self.blur_edit_btn.setToolTip("Blur edit box visible" if blur_editing else "Show or hide the blur edit region")
         if hasattr(self, "preview_speed_combo"):
             target = float(getattr(self, "_preview_speed", 1.0))
             index = self.preview_speed_combo.findData(target)

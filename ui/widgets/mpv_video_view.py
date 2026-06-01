@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 
 class _SubtitleOverlayWidget(QWidget):
@@ -135,9 +135,11 @@ class _BlurRegionOverlayWindow(QWidget):
     ]
 
     def __init__(self, on_region_changed=None, on_edit_finished=None):
-        super().__init__(None, Qt.FramelessWindowHint | Qt.Tool)
+        super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(Qt.NoFocus)
         self.setMouseTracking(True)
         self._regions: list[QRectF] = []
         self._active_index = -1
@@ -150,6 +152,9 @@ class _BlurRegionOverlayWindow(QWidget):
         self._target_view = None
         self._on_region_changed = on_region_changed
         self._on_edit_finished = on_edit_finished
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         self.hide()
 
     def attach_to_view(self, view: QWidget):
@@ -171,12 +176,12 @@ class _BlurRegionOverlayWindow(QWidget):
         self.update()
 
     def clear_region(self):
-        self.hide()
         self._drag_mode = ""
         self._drag_index = -1
         self._active_index = -1
         self._regions = []
         self._target_view = None
+        self.hide()
         self.update()
 
     def has_region(self) -> bool:
@@ -198,6 +203,31 @@ class _BlurRegionOverlayWindow(QWidget):
         self.sync_to_view()
         self.update()
 
+    def set_regions(self, regions):
+        next_regions = []
+        raw_regions = regions
+        if isinstance(raw_regions, dict):
+            raw_regions = [raw_regions]
+        if isinstance(raw_regions, list):
+            for region in raw_regions:
+                if not isinstance(region, dict):
+                    continue
+                try:
+                    x = max(0.0, min(1.0, float(region.get("x", 0.0))))
+                    y = max(0.0, min(1.0, float(region.get("y", 0.0))))
+                    width = max(0.0, min(1.0 - x, float(region.get("width", 0.0))))
+                    height = max(0.0, min(1.0 - y, float(region.get("height", 0.0))))
+                except (TypeError, ValueError):
+                    continue
+                if width > 0.0 and height > 0.0:
+                    next_regions.append(QRectF(x, y, width, height))
+        self._regions = next_regions
+        self._active_index = len(self._regions) - 1
+        self._drag_index = -1
+        self._drag_mode = ""
+        self.sync_to_view()
+        self.update()
+
     def sync_to_view(self):
         if (
             not self._target_view
@@ -212,6 +242,31 @@ class _BlurRegionOverlayWindow(QWidget):
         self.show()
         self.raise_()
         self.update()
+
+    def _queue_sync_to_view(self):
+        if not (self._editable and self._regions and self._target_view and self._target_view.isVisible()):
+            return
+        QTimer.singleShot(0, self.sync_to_view)
+        QTimer.singleShot(120, self.sync_to_view)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._queue_sync_to_view()
+
+    def event(self, event):
+        if event.type() in (QEvent.WindowDeactivate, QEvent.ActivationChange, QEvent.FocusOut):
+            self._queue_sync_to_view()
+            return True
+        return super().event(event)
+
+    def eventFilter(self, watched, event):
+        if event.type() in (
+            QEvent.ApplicationActivate,
+            QEvent.WindowActivate,
+            QEvent.ActivationChange,
+        ):
+            self._queue_sync_to_view()
+        return super().eventFilter(watched, event)
 
     def region_rect(self, index: int | None = None) -> QRectF:
         if index is None:
@@ -458,28 +513,28 @@ class MpvVideoView(QWidget):
         )
         self.ratio_badge.hide()
         self.video_surface.show()
-        self.video_surface.lower()
-        self.subtitle_item.raise_()
-        self.ratio_badge.raise_()
+        self._sync_preview_stack()
         self.video_surface.winId()
 
 
+    def _sync_preview_stack(self):
+        self.video_surface.lower()
+        self.subtitle_item.raise_()
+        self.ratio_badge.raise_()
 
     def set_video_dimensions(self, width: int, height: int):
         self.video_source_width = max(0, int(width or 0))
         self.video_source_height = max(0, int(height or 0))
         content_rect = self.get_video_content_rect().toRect()
         self.video_surface.setGeometry(content_rect)
-        self.video_surface.lower()
-        self.subtitle_item.raise_()
+        self._sync_preview_stack()
         self._update_ratio_badge()
         self.reposition_subtitle()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.video_surface.setGeometry(self.get_video_content_rect().toRect())
-        self.video_surface.lower()
-        self.subtitle_item.raise_()
+        self._sync_preview_stack()
         self.reposition_subtitle()
         self._update_ratio_badge()
         self.blur_overlay.sync_to_view()
@@ -492,8 +547,7 @@ class MpvVideoView(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.video_surface.show()
-        self.video_surface.lower()
-        self.subtitle_item.raise_()
+        self._sync_preview_stack()
         self._update_ratio_badge()
         self.blur_overlay.sync_to_view()
 
@@ -504,8 +558,7 @@ class MpvVideoView(QWidget):
     def set_preview_aspect_ratio(self, aspect_key: str):
         self.preview_aspect_key = str(aspect_key or "source").strip().lower() or "source"
         self.video_surface.setGeometry(self.get_video_content_rect().toRect())
-        self.video_surface.lower()
-        self.subtitle_item.raise_()
+        self._sync_preview_stack()
         self._update_ratio_badge()
         self.reposition_subtitle()
         self.blur_overlay.sync_to_view()
@@ -514,8 +567,7 @@ class MpvVideoView(QWidget):
     def set_preview_scale_mode(self, scale_mode: str):
         self.preview_scale_mode = str(scale_mode or "fit").strip().lower() or "fit"
         self.video_surface.setGeometry(self.get_video_content_rect().toRect())
-        self.video_surface.lower()
-        self.subtitle_item.raise_()
+        self._sync_preview_stack()
         self._update_ratio_badge()
         self.reposition_subtitle()
         self.blur_overlay.sync_to_view()
@@ -525,8 +577,7 @@ class MpvVideoView(QWidget):
         self.preview_fill_focus_x = max(0.0, min(1.0, float(focus_x)))
         self.preview_fill_focus_y = max(0.0, min(1.0, float(focus_y)))
         self.video_surface.setGeometry(self.get_video_content_rect().toRect())
-        self.video_surface.lower()
-        self.subtitle_item.raise_()
+        self._sync_preview_stack()
         self._update_ratio_badge()
         self.reposition_subtitle()
         self.blur_overlay.sync_to_view()
@@ -755,6 +806,9 @@ class MpvVideoView(QWidget):
     def add_blur_region(self):
         self.blur_overlay.attach_to_view(self)
         self.blur_overlay.add_region()
+
+    def set_blur_regions_normalized(self, regions):
+        self.blur_overlay.set_regions(regions)
 
     def clear_blur_region(self):
         self.blur_overlay.clear_region()

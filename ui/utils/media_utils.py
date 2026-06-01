@@ -49,6 +49,10 @@ def toggle_play(gui):
 
         if gui.media_player.is_playing():
             gui.media_player.pause()
+            if hasattr(gui, "media_player"):
+                gui.media_player.clear_blur_region()
+            if hasattr(gui, "_sync_blur_controls"):
+                gui._sync_blur_controls()
             gui.timeline.set_playing(False)
             if (
                 has_active_video_filters
@@ -84,8 +88,15 @@ def toggle_play(gui):
                 gui.set_subtitle_inspector_details_visible(False, sync=False)
             if hasattr(gui, "hide_filter_thumbnail_preview"):
                 gui.hide_filter_thumbnail_preview()
-            if hasattr(gui, "set_blur_overlay_active_for_preview"):
-                gui.set_blur_overlay_active_for_preview(False)
+            if hasattr(gui, "apply_preview_blur_region"):
+                gui.apply_preview_blur_region(force=True)
+            if (
+                hasattr(gui, "video_view")
+                and hasattr(gui.video_view, "set_blur_edit_enabled")
+                and hasattr(gui, "_blur_effect_enabled")
+                and gui._blur_effect_enabled()
+            ):
+                gui.video_view.set_blur_edit_enabled(False)
             gui.media_player.play()
             gui.timeline.set_playing(True)
         if hasattr(gui, "_refresh_preview_audio_controls"):
@@ -103,6 +114,10 @@ def stop_video(gui):
     if hasattr(gui, "audio_preview_player"):
         gui.audio_preview_player.stop()
     gui.media_player.stop()
+    if hasattr(gui, "media_player"):
+        gui.media_player.clear_blur_region()
+    if hasattr(gui, "_sync_blur_controls"):
+        gui._sync_blur_controls()
     gui.timeline.set_playing(False)
     gui.schedule_seek_frame_preview()
     if hasattr(gui, "_refresh_preview_audio_controls"):

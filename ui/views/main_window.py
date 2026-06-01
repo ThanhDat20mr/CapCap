@@ -184,7 +184,6 @@ def _connect_ui_signals(gui):
     gui.use_existing_audio_radio.toggled.connect(gui.on_audio_source_mode_changed)
     gui.blur_area_btn.toggled.connect(gui.toggle_blur_effect_enabled)
     gui.blur_add_btn.clicked.connect(gui.add_blur_region)
-    gui.blur_edit_btn.toggled.connect(gui.toggle_blur_area_editing)
     gui.ocr_region_btn.clicked.connect(gui.toggle_ocr_overlay_visibility)
     if hasattr(gui, "video_view") and hasattr(gui.video_view, "framingChanged"):
         gui.video_view.framingChanged.connect(gui.on_preview_framing_changed)
