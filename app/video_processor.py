@@ -68,28 +68,50 @@ def _escape_path_for_filter(path):
 
 
 def _build_blur_filter_chain(blur_region, video_width, video_height):
-    if not isinstance(blur_region, dict):
+    raw_regions = blur_region
+    if isinstance(raw_regions, dict):
+        raw_regions = [raw_regions]
+    if not isinstance(raw_regions, list):
         return ""
-    try:
-        x_norm = float(blur_region.get("x", 0.0))
-        y_norm = float(blur_region.get("y", 0.0))
-        w_norm = float(blur_region.get("width", 0.0))
-        h_norm = float(blur_region.get("height", 0.0))
-    except (TypeError, ValueError):
+    if video_width <= 0 or video_height <= 0:
         return ""
 
-    if w_norm <= 0 or h_norm <= 0 or video_width <= 0 or video_height <= 0:
+    regions = []
+    for region in raw_regions:
+        if not isinstance(region, dict):
+            continue
+        try:
+            x_norm = float(region.get("x", 0.0))
+            y_norm = float(region.get("y", 0.0))
+            w_norm = float(region.get("width", 0.0))
+            h_norm = float(region.get("height", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if w_norm <= 0 or h_norm <= 0:
+            continue
+
+        x = max(0, min(video_width - 2, int(round(x_norm * video_width))))
+        y = max(0, min(video_height - 2, int(round(y_norm * video_height))))
+        w = max(2, min(video_width - x, int(round(w_norm * video_width))))
+        h = max(2, min(video_height - y, int(round(h_norm * video_height))))
+        min_dimension = min(w, h)
+        luma_radius = max(1, min(20, int(min_dimension // 2)))
+        chroma_radius = max(0, min(20, int(min_dimension // 4)))
+        regions.append((x, y, w, h, luma_radius, chroma_radius))
+    if not regions:
         return ""
 
-    x = max(0, min(video_width - 2, int(round(x_norm * video_width))))
-    y = max(0, min(video_height - 2, int(round(y_norm * video_height))))
-    w = max(16, min(video_width - x, int(round(w_norm * video_width))))
-    h = max(16, min(video_height - y, int(round(h_norm * video_height))))
-    return (
-        f"split[main][tmp];"
-        f"[tmp]crop=w={w}:h={h}:x={x}:y={y},boxblur=20:3[blur];"
-        f"[main][blur]overlay={x}:{y}"
-    )
+    crop_parts = []
+    overlay_parts = []
+    for index, (x, y, w, h, luma_radius, chroma_radius) in enumerate(regions):
+        crop_parts.append(
+            f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},boxblur={luma_radius}:3:{chroma_radius}:3[blur{index}]"
+        )
+        base_label = "main" if index == 0 else f"b{index - 1}"
+        output_label = "" if index == len(regions) - 1 else f"[b{index}]"
+        overlay_parts.append(f"[{base_label}][blur{index}]overlay={x}:{y}{output_label}")
+    split_outputs = "[main]" + "".join(f"[tmp{i}]" for i in range(len(regions)))
+    return f"split={len(regions) + 1}{split_outputs};" + ";".join(crop_parts + overlay_parts)
 
 
 def _build_canvas_filter_chain(target_width=None, target_height=None, scale_mode: str = "fit", focus_x: float = 0.5, focus_y: float = 0.5):

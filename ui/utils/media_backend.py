@@ -290,22 +290,44 @@ class MpvMediaPlayerBackend(QObject):
             pass
 
     def _build_blur_filter(self):
-        blur = self._blur_region or {}
-        if not blur:
+        raw_regions = self._blur_region or []
+        if isinstance(raw_regions, dict):
+            raw_regions = [raw_regions]
+        if not isinstance(raw_regions, list) or not raw_regions:
             return ""
         video_width = int(self.video_view.video_source_width or 0)
         video_height = int(self.video_view.video_source_height or 0)
         if video_width <= 0 or video_height <= 0:
             return ""
-        x = max(0, min(video_width - 2, int(round(float(blur.get("x", 0.0)) * video_width))))
-        y = max(0, min(video_height - 2, int(round(float(blur.get("y", 0.0)) * video_height))))
-        w = max(16, min(video_width - x, int(round(float(blur.get("width", 0.0)) * video_width))))
-        h = max(16, min(video_height - y, int(round(float(blur.get("height", 0.0)) * video_height))))
-        return (
-            "lavfi=[split[main][tmp];"
-            f"[tmp]crop=w={w}:h={h}:x={x}:y={y},boxblur=20:3[blur];"
-            f"[main][blur]overlay={x}:{y}]"
-        )
+        regions = []
+        for blur in raw_regions:
+            if not isinstance(blur, dict):
+                continue
+            try:
+                x = max(0, min(video_width - 2, int(round(float(blur.get("x", 0.0)) * video_width))))
+                y = max(0, min(video_height - 2, int(round(float(blur.get("y", 0.0)) * video_height))))
+                w = max(2, min(video_width - x, int(round(float(blur.get("width", 0.0)) * video_width))))
+                h = max(2, min(video_height - y, int(round(float(blur.get("height", 0.0)) * video_height))))
+            except (TypeError, ValueError):
+                continue
+            min_dimension = min(w, h)
+            luma_radius = max(1, min(20, int(min_dimension // 2)))
+            chroma_radius = max(0, min(20, int(min_dimension // 4)))
+            regions.append((x, y, w, h, luma_radius, chroma_radius))
+        if not regions:
+            return ""
+
+        crop_parts = []
+        overlay_parts = []
+        for index, (x, y, w, h, luma_radius, chroma_radius) in enumerate(regions):
+            crop_parts.append(
+                f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},boxblur={luma_radius}:3:{chroma_radius}:3[blur{index}]"
+            )
+            base_label = "main" if index == 0 else f"b{index - 1}"
+            output_label = "" if index == len(regions) - 1 else f"[b{index}]"
+            overlay_parts.append(f"[{base_label}][blur{index}]overlay={x}:{y}{output_label}")
+        split_outputs = "[main]" + "".join(f"[tmp{i}]" for i in range(len(regions)))
+        return "lavfi=[" + f"split={len(regions) + 1}{split_outputs};" + ";".join(crop_parts + overlay_parts) + "]"
 
     def _apply_blur_filter(self):
         try:
@@ -324,7 +346,10 @@ class MpvMediaPlayerBackend(QObject):
                 pass
 
     def set_blur_region(self, blur_region=None):
-        self._blur_region = dict(blur_region or {}) if blur_region else None
+        if isinstance(blur_region, list):
+            self._blur_region = [dict(region) for region in blur_region if isinstance(region, dict)]
+        else:
+            self._blur_region = dict(blur_region or {}) if blur_region else None
         self._apply_blur_filter()
 
     def clear_blur_region(self):

@@ -123,16 +123,25 @@ class _SubtitleOverlayWidget(QWidget):
 
 class _BlurRegionOverlayWindow(QWidget):
     HANDLE_SIZE = 12
-    MIN_WIDTH = 32
-    MIN_HEIGHT = 10
+    MIN_WIDTH = HANDLE_SIZE * 2
+    MIN_HEIGHT = HANDLE_SIZE * 2
+    CLOSE_SIZE = 16
+    COLORS = [
+        QColor(110, 231, 214),
+        QColor(255, 193, 94),
+        QColor(117, 181, 255),
+        QColor(255, 124, 168),
+        QColor(174, 235, 104),
+    ]
 
     def __init__(self, on_region_changed=None, on_edit_finished=None):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setMouseTracking(True)
-        self._normalized_rect = QRectF(0.25, 0.2, 0.5, 0.22)
-        self._has_region = False
+        self._regions: list[QRectF] = []
+        self._active_index = -1
+        self._drag_index = -1
         self._drag_mode = ""
         self._drag_offset = QPointF()
         self._rect_on_press = QRectF()
@@ -152,8 +161,8 @@ class _BlurRegionOverlayWindow(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, not self._editable)
         self.setCursor(Qt.OpenHandCursor if self._editable else Qt.ArrowCursor)
         if self._editable:
-            if not self._has_region:
-                self._has_region = True
+            if not self._regions:
+                self.add_region(emit_change=False)
                 if callable(self._on_region_changed):
                     self._on_region_changed()
             self.sync_to_view()
@@ -164,18 +173,36 @@ class _BlurRegionOverlayWindow(QWidget):
     def clear_region(self):
         self.hide()
         self._drag_mode = ""
-        self._has_region = False
+        self._drag_index = -1
+        self._active_index = -1
+        self._regions = []
         self._target_view = None
         self.update()
 
     def has_region(self) -> bool:
-        return self._has_region
+        return bool(self._regions)
+
+    def add_region(self, emit_change: bool = True):
+        index = len(self._regions)
+        offset = (index % len(self.COLORS)) * 0.055
+        rect = QRectF(
+            min(0.72, 0.25 + offset),
+            min(0.72, 0.2 + offset),
+            0.32,
+            0.18,
+        )
+        self._regions.append(rect)
+        self._active_index = len(self._regions) - 1
+        if emit_change and callable(self._on_region_changed):
+            self._on_region_changed()
+        self.sync_to_view()
+        self.update()
 
     def sync_to_view(self):
         if (
             not self._target_view
             or not self._target_view.isVisible()
-            or not self._has_region
+            or not self._regions
             or not self._editable
         ):
             self.hide()
@@ -186,18 +213,27 @@ class _BlurRegionOverlayWindow(QWidget):
         self.raise_()
         self.update()
 
-    def region_rect(self) -> QRectF:
+    def region_rect(self, index: int | None = None) -> QRectF:
+        if index is None:
+            index = self._active_index
+        if index < 0 or index >= len(self._regions):
+            return QRectF()
         content_rect = self._target_view.get_video_content_rect() if self._target_view else QRectF(0, 0, float(self.width()), float(self.height()))
         width = max(1.0, float(content_rect.width()))
         height = max(1.0, float(content_rect.height()))
+        normalized_rect = self._regions[index]
         return QRectF(
-            content_rect.x() + self._normalized_rect.x() * width,
-            content_rect.y() + self._normalized_rect.y() * height,
-            self._normalized_rect.width() * width,
-            self._normalized_rect.height() * height,
+            content_rect.x() + normalized_rect.x() * width,
+            content_rect.y() + normalized_rect.y() * height,
+            normalized_rect.width() * width,
+            normalized_rect.height() * height,
         )
 
-    def _set_region_rect(self, rect: QRectF):
+    def _set_region_rect(self, rect: QRectF, index: int | None = None):
+        if index is None:
+            index = self._active_index
+        if index < 0 or index >= len(self._regions):
+            return
         content_rect = self._target_view.get_video_content_rect() if self._target_view else QRectF(0, 0, float(self.width()), float(self.height()))
         width = max(1.0, float(content_rect.width()))
         height = max(1.0, float(content_rect.height()))
@@ -213,7 +249,7 @@ class _BlurRegionOverlayWindow(QWidget):
         if bounded.bottom() > content_rect.bottom():
             bounded.moveBottom(content_rect.bottom())
 
-        self._normalized_rect = QRectF(
+        self._regions[index] = QRectF(
             max(0.0, (bounded.x() - content_rect.x()) / width),
             max(0.0, (bounded.y() - content_rect.y()) / height),
             min(1.0, bounded.width() / width),
@@ -237,24 +273,44 @@ class _BlurRegionOverlayWindow(QWidget):
             for key, point in points.items()
         }
 
-    def _hit_test(self, pos: QPointF) -> str:
-        rect = self.region_rect()
-        if rect.width() <= 0 or rect.height() <= 0:
-            return ""
-        for handle_name, handle_rect in self._handle_rects(rect).items():
-            if handle_rect.contains(pos):
-                return handle_name
-        if rect.contains(pos):
-            return "move"
-        return ""
+    def _close_rect(self, rect: QRectF) -> QRectF:
+        size = float(self.CLOSE_SIZE)
+        return QRectF(rect.right() - size + 2, rect.top() - 2, size, size)
+
+    def _hit_test(self, pos: QPointF) -> tuple[int, str]:
+        for index in range(len(self._regions) - 1, -1, -1):
+            rect = self.region_rect(index)
+            if rect.width() <= 0 or rect.height() <= 0:
+                continue
+            if self._close_rect(rect).contains(pos):
+                return index, "close"
+            for handle_name, handle_rect in self._handle_rects(rect).items():
+                if handle_rect.contains(pos):
+                    return index, handle_name
+            if rect.contains(pos):
+                return index, "move"
+        return -1, ""
 
     def mousePressEvent(self, event):
         if not self._editable or event.button() != Qt.LeftButton:
             event.ignore()
             return
         pos = QPointF(event.position())
-        self._drag_mode = self._hit_test(pos)
-        self._rect_on_press = QRectF(self.region_rect())
+        hit_index, hit_mode = self._hit_test(pos)
+        if hit_mode == "close":
+            self._regions.pop(hit_index)
+            self._active_index = min(hit_index, len(self._regions) - 1)
+            if callable(self._on_region_changed):
+                self._on_region_changed()
+            if callable(self._on_edit_finished):
+                self._on_edit_finished()
+            self.sync_to_view()
+            event.accept()
+            return
+        self._drag_index = hit_index
+        self._active_index = hit_index
+        self._drag_mode = hit_mode
+        self._rect_on_press = QRectF(self.region_rect(hit_index))
         self._press_pos = QPointF(pos)
         if self._drag_mode == "move":
             self._drag_offset = pos - self._rect_on_press.topLeft()
@@ -270,7 +326,9 @@ class _BlurRegionOverlayWindow(QWidget):
             return
 
         if not self._drag_mode:
-            hit = self._hit_test(pos)
+            hit_index, hit = self._hit_test(pos)
+            if hit_index >= 0:
+                self._active_index = hit_index
             if hit == "move":
                 self.setCursor(Qt.OpenHandCursor)
             elif hit:
@@ -303,12 +361,13 @@ class _BlurRegionOverlayWindow(QWidget):
                     rect.setTop(rect.bottom() - self.MIN_HEIGHT)
                 else:
                     rect.setBottom(rect.top() + self.MIN_HEIGHT)
-        self._set_region_rect(rect)
+        self._set_region_rect(rect, self._drag_index)
         event.accept()
 
     def mouseReleaseEvent(self, event):
         finished_drag = bool(self._drag_mode)
         self._drag_mode = ""
+        self._drag_index = -1
         if self._editable:
             self.setCursor(Qt.OpenHandCursor)
         if finished_drag and callable(self._on_edit_finished):
@@ -320,27 +379,40 @@ class _BlurRegionOverlayWindow(QWidget):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = self.region_rect()
-        if rect.width() <= 0 or rect.height() <= 0:
-            return
+        for index, _region in enumerate(self._regions):
+            rect = self.region_rect(index)
+            if rect.width() <= 0 or rect.height() <= 0:
+                continue
+            color = self.COLORS[index % len(self.COLORS)]
+            overlay_path = QPainterPath()
+            overlay_path.addRoundedRect(rect, 12, 12)
+            painter.fillPath(overlay_path, QColor(color.red(), color.green(), color.blue(), 62))
+            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 235), 2))
+            painter.drawRoundedRect(rect, 12, 12)
 
-        overlay_path = QPainterPath()
-        overlay_path.addRoundedRect(rect, 12, 12)
-        painter.fillPath(overlay_path, QColor(225, 240, 255, 78))
-        painter.setPen(QPen(QColor(110, 231, 214, 220), 2))
-        painter.drawRoundedRect(rect, 12, 12)
-
-        if self._editable:
-            painter.setBrush(QColor(110, 231, 214, 235))
-            painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
-            for handle_rect in self._handle_rects(rect).values():
-                painter.drawEllipse(handle_rect)
-        painter.setPen(QColor(110, 231, 214, 200))
-        font = painter.font()
-        font.setPixelSize(11)
-        painter.setFont(font)
-        painter.drawText(int(rect.left() + 10), int(rect.top() + 18), "BLUR")
-
+            if self._editable:
+                painter.setBrush(QColor(color.red(), color.green(), color.blue(), 235))
+                painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
+                for handle_rect in self._handle_rects(rect).values():
+                    painter.drawEllipse(handle_rect)
+                close_rect = self._close_rect(rect)
+                painter.setBrush(QColor(12, 24, 38, 230))
+                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 235), 1))
+                painter.drawEllipse(close_rect)
+                painter.setPen(QPen(QColor(255, 255, 255, 235), 1.5))
+                pad = 5
+                painter.drawLine(
+                    close_rect.left() + pad,
+                    close_rect.top() + pad,
+                    close_rect.right() - pad,
+                    close_rect.bottom() - pad,
+                )
+                painter.drawLine(
+                    close_rect.right() - pad,
+                    close_rect.top() + pad,
+                    close_rect.left() + pad,
+                    close_rect.bottom() - pad,
+                )
 
 class MpvVideoView(QWidget):
     """Hosts an MPV video surface and overlays."""
@@ -680,6 +752,10 @@ class MpvVideoView(QWidget):
             self.blur_overlay.hide()
             self.blur_overlay.set_editable(False)
 
+    def add_blur_region(self):
+        self.blur_overlay.attach_to_view(self)
+        self.blur_overlay.add_region()
+
     def clear_blur_region(self):
         self.blur_overlay.clear_region()
         self.blurRegionChanged.emit()
@@ -690,13 +766,18 @@ class MpvVideoView(QWidget):
     def get_mpv_target_winid(self) -> int:
         return int(self.video_surface.winId())
 
-    def get_blur_region_normalized(self) -> dict | None:
+    def get_blur_region_normalized(self) -> dict | list[dict] | None:
         if not self.blur_overlay.has_region():
             return None
-        rect = self.blur_overlay._normalized_rect
-        return {
-            "x": round(float(rect.x()), 6),
-            "y": round(float(rect.y()), 6),
-            "width": round(float(rect.width()), 6),
-            "height": round(float(rect.height()), 6),
-        }
+        regions = [
+            {
+                "x": round(float(rect.x()), 6),
+                "y": round(float(rect.y()), 6),
+                "width": round(float(rect.width()), 6),
+                "height": round(float(rect.height()), 6),
+            }
+            for rect in self.blur_overlay._regions
+        ]
+        if len(regions) == 1:
+            return regions[0]
+        return regions
