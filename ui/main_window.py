@@ -169,9 +169,7 @@ class VideoTranslatorGUI(QMainWindow):
         self.logo_path = asset_path("capcap.png")
         if os.path.exists(self.logo_path):
             self.setWindowIcon(QIcon(self.logo_path))
-        self.setWindowFlag(Qt.WindowCloseButtonHint, True)
-        self.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
-        self.setWindowFlag(Qt.WindowMaximizeButtonHint, False)
+        self.setWindowFlag(Qt.FramelessWindowHint)
         
         # Maximize and prevent resizing
         self.setWindowState(Qt.WindowMaximized)

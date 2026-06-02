@@ -251,21 +251,13 @@ class _BlurRegionOverlayWindow(QWidget):
 
     def hideEvent(self, event):
         super().hideEvent(event)
-        self._queue_sync_to_view()
-
-    def event(self, event):
-        if event.type() in (QEvent.WindowDeactivate, QEvent.ActivationChange, QEvent.FocusOut):
-            self._queue_sync_to_view()
-            return True
-        return super().event(event)
 
     def eventFilter(self, watched, event):
-        if event.type() in (
-            QEvent.ApplicationActivate,
-            QEvent.WindowActivate,
-            QEvent.ActivationChange,
-        ):
-            self._queue_sync_to_view()
+        if event.type() == QEvent.WindowDeactivate:
+            self.hide()
+        elif event.type() == QEvent.WindowActivate:
+            if self._editable and self._regions:
+                self._queue_sync_to_view()
         return super().eventFilter(watched, event)
 
     def region_rect(self, index: int | None = None) -> QRectF:
@@ -499,6 +491,7 @@ class MpvVideoView(QWidget):
             on_region_changed=self.blurRegionChanged.emit,
             on_edit_finished=self.blurEditFinished.emit,
         )
+        self._blur_event_filter_installed = False
         self.ratio_badge = QLabel(self)
         self.ratio_badge.setObjectName("previewRatioBadge")
         self.ratio_badge.setAlignment(Qt.AlignCenter)
@@ -546,6 +539,11 @@ class MpvVideoView(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if not self._blur_event_filter_installed:
+            self._blur_event_filter_installed = True
+            _win = self.window()
+            if _win:
+                _win.installEventFilter(self.blur_overlay)
         self.video_surface.show()
         self._sync_preview_stack()
         self._update_ratio_badge()
