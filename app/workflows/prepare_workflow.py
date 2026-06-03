@@ -154,8 +154,12 @@ class PrepareWorkflow:
         optimize_subtitles = False
         if step_callback: step_callback("prepare")
         workflow_started = time.perf_counter()
-        whisper_model = os.path.join(self.workspace_root, "models", whisper_model_name)
         is_ocr = transcription_engine == "ocr"
+        is_sensevoice = transcription_engine == "sensevoice"
+        sensevoice_model_dir = ""
+        if is_sensevoice:
+            sensevoice_model_dir = os.path.join(self.workspace_root, "models", "sensevoice")
+        whisper_model = os.path.join(self.workspace_root, "models", whisper_model_name) if not is_sensevoice else ""
         raw_segments = []
         segment_models = []
         streamed_translation_executor = None
@@ -169,8 +173,12 @@ class PrepareWorkflow:
             input_language=source_language,
             target_language=target_language,
         )
-        project_state.set_setting("whisper_model", whisper_model)
+        if is_sensevoice:
+            project_state.set_setting("sensevoice_model", sensevoice_model_dir)
+        else:
+            project_state.set_setting("whisper_model", whisper_model)
         project_state.set_setting("audio_handling_mode", audio_handling_mode)
+        project_state.set_setting("transcription_engine", transcription_engine)
         self.project_service.save_project(project_state)
 
         if is_ocr:
@@ -321,7 +329,8 @@ class PrepareWorkflow:
                 project_state.set_step_status("separate_audio", "skipped")
                 self.project_service.save_project(project_state)
 
-            print("\n--- Step 2: Transcribing audio (Whisper) ---")
+            engine_name = "SenseVoice" if is_sensevoice else "Whisper"
+            print(f"\n--- Step 2: Transcribing audio ({engine_name}) ---")
             if step_callback: step_callback("transcription")
             transcribe_started = time.perf_counter()
             project_state.set_step_status("transcribe", "running")
@@ -350,13 +359,24 @@ class PrepareWorkflow:
                 if not raw_segments and segment_models:
                     raw_segments = [segment.to_original_subtitle_dict() for segment in segment_models]
                 if has_imported_transcript:
-                    print("[Prepare Workflow] Using imported transcript segments. Skipping transcription.")
+                    print(f"[Prepare Workflow] Using imported transcript segments. Skipping transcription.")
                 else:
-                    print("[Prepare Workflow] Reusing cached Whisper transcript. Generate did not transcribe again.")
+                    print(f"[Prepare Workflow] Reusing cached {engine_name} transcript. Generate did not transcribe again.")
             else:
                 audio_duration = self.chunking_service.probe_wav_duration(working_audio_path)
                 print(f"[ASR] Working audio duration: {audio_duration:.2f}s")
-                if is_remote_profile():
+                if is_sensevoice:
+                    print("[ASR] Using SenseVoice single-pass transcription with Silero VAD.")
+                    try:
+                        import sherpa_onnx
+                    except ImportError:
+                        raise RuntimeError("sherpa-onnx is not installed. Run: pip install sherpa-onnx")
+                    raw_segments = self.engine_runtime.transcribe_audio_sensevoice(
+                        working_audio_path,
+                        sensevoice_model_dir,
+                        language=source_language,
+                    )
+                elif is_remote_profile():
                     print("[ASR] Remote API mode: using single-pass transcription and sending full working audio to the PC server.")
                     raw_segments = self.engine_runtime.transcribe_audio(
                         working_audio_path,

@@ -9,6 +9,7 @@ class EngineRuntime:
         "ffmpeg": ("engines.ffmpeg_adapter", "FFmpegAdapter"),
         "whisper": ("engines.whisper_adapter", "WhisperAdapter"),
         "ocr": ("engines.ocr_adapter", "OcrAdapter"),
+        "sensevoice": ("engines.sensevoice_adapter", "SenseVoiceAdapter"),
         "translator": ("engines.translator_adapter", "TranslatorAdapter"),
         "demucs": ("engines.demucs_adapter", "DemucsAdapter"),
         "preview": ("engines.preview_adapter", "PreviewAdapter"),
@@ -73,6 +74,10 @@ class EngineRuntime:
     def ocr(self):
         return self._adapter("ocr")
 
+    @property
+    def sensevoice(self):
+        return self._adapter("sensevoice")
+
     def extract_audio(self, video_path: str, audio_output_path: str) -> bool:
         return self.ffmpeg.extract_audio(video_path, audio_output_path)
 
@@ -84,6 +89,9 @@ class EngineRuntime:
 
     def transcribe_video_ocr(self, video_path: str, *, region: str = "bottom", **kwargs):
         return self.ocr.transcribe(video_path, region=region)
+
+    def transcribe_audio_sensevoice(self, audio_path: str, model_path: str, *, language: str = "auto"):
+        return self.sensevoice.transcribe(audio_path, model_path, language=language)
 
     def translate_srt(
         self,

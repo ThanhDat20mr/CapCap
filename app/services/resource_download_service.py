@@ -275,6 +275,14 @@ class ResourceDownloadService:
                 "target_dir": join_root("bin", "cuda12_fw"),
                 "description": "CUDA 12 runtime + ONNX GPU provider. Required for GPU acceleration on Whisper, OCR, and local AI.",
             },
+            {
+                "id": "sensevoice:model",
+                "name": "SenseVoice ASR Model (Sherpa-ONNX)",
+                "kind": "sensevoice",
+                "status": "installed" if self.is_resource_installed("sensevoice:model") else "missing",
+                "target_dir": models_path("sensevoice"),
+                "description": "Multilingual SenseVoice model for CPU-based speech recognition. ~50MB download.",
+            },
         ]
 
         piper_entries = self._piper_voice_entries()
@@ -305,6 +313,8 @@ class ResourceDownloadService:
             except Exception:
                 ort_ok = False
             return cuda_ok and ort_ok
+        if resource_id == "sensevoice:model":
+            return os.path.isfile(os.path.join(models_path("sensevoice"), "model.int8.onnx"))
         if resource_id.startswith("whisper:"):
             model_name = resource_id.split(":", 1)[1].strip().lower()
             for model_dir in self._whisper_cache_dirs(model_name):
@@ -347,6 +357,29 @@ class ResourceDownloadService:
             load_whisper_model(model_name)
             if progress_cb:
                 progress_cb(100, f"Whisper {model_name} is ready.")
+            return
+
+        if resource_id == "sensevoice:model":
+            sensevoice_repo = os.getenv("SENSEVOICE_MODEL_REPO", "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17").strip()
+            target_dir = models_path("sensevoice")
+            os.makedirs(target_dir, exist_ok=True)
+            if progress_cb:
+                progress_cb(-1, "Downloading SenseVoice model from Hugging Face...")
+            try:
+                from huggingface_hub import hf_hub_download
+                for fname in ("model.int8.onnx", "tokens.txt"):
+                    hf_hub_download(
+                        repo_id=sensevoice_repo,
+                        filename=fname,
+                        local_dir=target_dir,
+                        local_dir_use_symlinks=False,
+                    )
+            except Exception as exc:
+                if progress_cb:
+                    progress_cb(0, f"Download failed: {exc}")
+                raise
+            if progress_cb:
+                progress_cb(100, "SenseVoice model downloaded.")
             return
 
         print("[DEBUG] importing huggingface_hub...")

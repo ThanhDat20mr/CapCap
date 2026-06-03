@@ -62,6 +62,7 @@ def _build_collapsible_section(title: str, start_expanded: bool = True):
     def _toggle_section(checked: bool):
         toggle_btn.setText(("▼ " if checked else "▶ ") + title)
         content.setVisible(checked)
+        content.setMaximumHeight(16777215 if checked else 0)
 
     toggle_btn.toggled.connect(_toggle_section)
     wrapper_layout.addWidget(toggle_btn)
@@ -404,41 +405,8 @@ def build_start_group(gui, left_layout):
     language_pair_layout.addWidget(gui.skip_translation_cb)
     language_layout.addWidget(language_pair_card)
 
-    language_ai_card, language_ai_layout = _section_card()
-    language_ai_title = QLabel("AI Polish")
-    language_ai_title.setObjectName("sectionTitle")
-    language_ai_layout.addWidget(language_ai_title)
-    gui.translator_ai_cb = QCheckBox("Make subtitles easier to read with AI")
-    gui.translator_ai_cb.setChecked(True)
-    language_ai_layout.addWidget(gui.translator_ai_cb)
-    gui.translator_ai_hint_label = QLabel("Keeps the meaning, then lightly cleans up the subtitle so it reads better on screen.", gui)
-    gui.translator_ai_hint_label.setObjectName("helperLabel")
-    gui.translator_ai_hint_label.setWordWrap(True)
-    gui.translator_ai_hint_label.hide()
-    gui.translator_style_label = QLabel("Extra tone/style (optional):")
-    gui.translator_style_label.setObjectName("helperLabel")
-    gui.translator_style_edit = QLineEdit()
-    gui.translator_style_edit.setPlaceholderText("e.g. natural, funny, more formal")
-    language_ai_layout.addWidget(gui.translator_style_label)
-    language_ai_layout.addWidget(gui.translator_style_edit)
-    language_layout.addWidget(language_ai_card)
- 
-    # Logic to show/hide style field based on AI checkbox
-    def toggle_style_field(checked):
-        gui.translator_style_label.setVisible(checked)
-        gui.translator_style_edit.setVisible(checked)
- 
-    gui.translator_ai_cb.toggled.connect(toggle_style_field)
-    toggle_style_field(gui.translator_ai_cb.isChecked())
-
     def toggle_translation_fields(checked):
         gui.lang_target_combo.setEnabled(not checked)
-        gui.translator_ai_cb.setEnabled(not checked)
-        if checked:
-            gui.translator_style_label.setVisible(False)
-            gui.translator_style_edit.setVisible(False)
-        else:
-            toggle_style_field(gui.translator_ai_cb.isChecked())
 
     gui.skip_translation_cb.toggled.connect(toggle_translation_fields)
 

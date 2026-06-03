@@ -12,7 +12,7 @@
 - **CPU-first** — works on any Windows PC without GPU
 - **GPU-accelerated** — plug in NVIDIA GPU, install driver only, get 3-5x faster
 - Three output modes: `subtitle only`, `voice only`, `subtitle + voice`
-- Speech-to-text: `faster-whisper` (CPU or GPU) or `RapidOCR` (video subtitle)
+- Speech-to-text: `faster-whisper` (CPU/GPU), `SenseVoice` (CPU, multilingual), or `RapidOCR` (video subtitle)
 - OCR subtitle region editor with separate show/hide control
 - AI translation — 3 providers:
   - **Local GGUF** (default, offline, CPU/GPU, `.gguf` model)
@@ -32,15 +32,39 @@
 
 ## Quick Start
 
-1. Open Settings (More → Settings)
-2. Default provider is **Local (GGUF)** — works offline with a `.gguf` model
-3. For Local provider, choose:
-   - **Normal Quality AI Model** — lighter, faster, lower hardware requirement
-   - **High Quality AI Model** — better output quality, needs a better GPU or runs slower on CPU
-4. Optionally switch to:
+1. Open the launcher — select **CPU** or **GPU (Recommended)** mode
+2. GPU mode: Whisper + local AI models use GPU acceleration
+3. CPU mode: SenseVoice (CPU-only ASR) + Google Translate by default
+4. Open Settings (More → Settings)
+5. Default translator provider is **Google Translate** (free, no key)
+6. Optionally switch to:
    - **OpenAI** — get [free API key](https://aistudio.google.com/apikey), paste it
    - **Ollama** — install [Ollama](https://ollama.com), run `ollama pull qwen2.5:7b`
-5. Save → Load video → click **Generate**
+   - **Local (GGUF)** — only available in GPU mode (needs good GPU)
+7. Save → Load video → click **Generate**
+
+## Launcher
+
+On startup, CapCap shows a launcher with:
+- **GPU detection** — auto-detects NVIDIA GPU name using `nvidia-smi`. Shows "CPU only" if no GPU found.
+- **CPU / GPU toggle** — segmented switch to choose processing mode. GPU button disabled if no GPU detected.
+- **Recent Projects** — grid of recently opened videos with thumbnails.
+- **+ New Project** — open any video (up to 2 hours). Shows warning if video is too long.
+- **Split Video** — cut a long video (>2h) into segments using stream copy (no re-encode). Choose segment duration, outputs saved alongside original.
+
+### Video Duration Limit
+Videos over 2 hours are blocked from opening. Use the **Split Video** button to cut long videos into 2-hour segments first, then open individual parts.
+
+1. Open the launcher — select **CPU** or **GPU (Recommended)** mode
+2. GPU mode: Whisper + local AI models use GPU acceleration
+3. CPU mode: SenseVoice (CPU-only ASR) + Google Translate by default
+4. Open Settings (More → Settings)
+5. Default translator provider is **Google Translate** (free, no key)
+6. Optionally switch to:
+   - **OpenAI** — get [free API key](https://aistudio.google.com/apikey), paste it
+   - **Ollama** — install [Ollama](https://ollama.com), run `ollama pull qwen2.5:7b`
+   - **Local (GGUF)** — only available in GPU mode (needs good GPU)
+7. Save → Load video → click **Generate**
 
 If you use OCR mode, open **Settings → Manage Resources** and download **OCR Engine (RapidOCR PP-OCRv4)** first.
 
@@ -51,6 +75,7 @@ No key? Google translate fallback works for free (slower, lower quality).
 | Component | CPU | GPU (NVIDIA) |
 |---|---|---|
 | faster-whisper | ✅ Works (~30s/10s audio) | ✅ 5x faster (~6s) |
+| SenseVoice (CPU) | ✅ Works (~8s/10s audio) | ✅ Same |
 | RapidOCR | ✅ Works | ✅ Supported |
 | Vocal separation (ONNX) | ✅ Works (~9s) | CPU only |
 | Piper TTS | ✅ Works | CPU only |
@@ -115,7 +140,7 @@ Behavior note:
 | UI | PySide6 |
 | Video preview | libmpv / Qt Multimedia |
 | Workers | QThread |
-| Speech-to-text | faster-whisper (CT2, CUDA/CPU) |
+| Speech-to-text | faster-whisper (CT2, CUDA/CPU), SenseVoice (sherpa-onnx, CPU) |
 | Vocal separation | ONNX Runtime + UVR MDX-NET model |
 | Audio post-process | FFmpeg (afftdn denoise, loudnorm) |
 | Translation | OpenAI API / Ollama / llama-cpp-python (GGUF) |
@@ -149,7 +174,10 @@ requirements-local.txt:
 | `LOCAL_TRANSLATOR_MODEL_PATH` | `models/ai/Hy-MT2...` | GGUF model path (local provider) |
 | `OCR_SUBTITLE_REGION` | `bottom` | OCR crop preset: `bottom` or `top` |
 | `OCR_SUBTITLE_RECT` | (empty) | Explicit normalized OCR crop rectangle from preview editor |
+| `TRANSCRIPTION_ENGINE` | `whisper` | ASR engine: `whisper`, `sensevoice`, or `ocr` |
+| `CAPCAP_DEVICE` | `cuda` | Processing mode set by launcher: `cuda` or `cpu` |
 | `CAPCAP_WHISPER_DEVICE` | (auto-detect) | Force `cpu` to avoid CUDA conflicts |
+| `TRANSLATOR_STYLE` | (empty) | Translation style hint: e.g. `natural`, `funny`, `formal` |
 | `CAPCAP_QUIET` | `false` | Set `true` to suppress server logs |
 | `CAPCAP_RUNTIME_PROFILE` | `local` | `local` or `remote` |
 | `CAPCAP_REMOTE_API_URL` | `http://127.0.0.1:8765` | Remote API address (remote mode) |
@@ -227,14 +255,20 @@ CapCap/
 │   │       └── local_polisher.py   # Local GGUF provider + output validation
 │   ├── ocr_processor.py          # RapidOCR subtitle extraction + OCR cleanup
 │   ├── whisper_processor.py      # Whisper ASR with CUDA/CPU fallback
+│   ├── sensevoice_processor.py   # SenseVoice ASR (sherpa-onnx, CPU, multilingual)
+│   ├── vad_processor.py          # Silero VAD speech segmentation
 │   ├── vocal_processor.py        # ONNX Runtime vocal separation
 │   ├── audio_mixer.py            # Voice track builder + time-stretch
-│   └── services/                 # Engine runtime, project, chunking, scheduler, etc.
+│   ├── engines/                  # Engine adapters (whisper, sensevoice, OCR, TTS, etc.)
+│   │   ├── sensevoice_adapter.py # SenseVoice ASR adapter
+│   │   └── ...
 ├── bin/
 │   ├── ffmpeg/                   # Bundled FFmpeg
 │   ├── mpv/                      # Bundled libmpv
 │   ├── cuda12_fw/                # CUDA runtime DLLs (optional GPU accel)
 │   └── UVR-MDX-NET-Inst_HQ_3.onnx  # Vocal separation model
+├── models/
+│   └── sensevoice/                # SenseVoice ONNX model + tokens
 ├── .env                          # Environment configuration
 └── .env_example                  # Example environment config
 ```

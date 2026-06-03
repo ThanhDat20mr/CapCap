@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
                              QFileDialog, QTextEdit, QComboBox,
                              QFrame, QProgressBar, QMessageBox,
                              QScrollArea,
-                             QColorDialog, QTabWidget, QDialog, QSizePolicy, QInputDialog)
+                             QColorDialog, QTabWidget, QDialog, QSizePolicy, QInputDialog, QLayout)
 from PySide6.QtCore import Qt, QUrl, QTimer, QSettings, QEvent
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPixmap, QTextCursor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -1538,7 +1538,7 @@ class VideoTranslatorGUI(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Manage Resources")
         dialog.setModal(True)
-        dialog.resize(760, 620)
+        dialog.resize(760, 550)
         dialog.setStyleSheet(
             """
             QDialog { background-color: #0f1724; }
@@ -1586,49 +1586,96 @@ class VideoTranslatorGUI(QMainWindow):
         scroll.setWidget(content)
 
         dialog._resource_rows = {}
-        groups = [
-            ("AI Models", "ai"),
-            ("Whisper Models", "whisper"),
-            ("GPU Runtime", "cuda"),
-            ("Local Voices", "voice"),
-        ]
+        from PySide6.QtWidgets import QToolButton
+
         resources = self._resource_service().list_resources()
-        for group_title, group_kind in groups:
-            items = [item for item in resources if item.get("kind") == group_kind]
-            if not items:
-                continue
-            group_label = QLabel(group_title, dialog)
-            group_label.setObjectName("resourceTitle")
-            group_label.setStyleSheet("color: #f8fbff; background-color: transparent;")
-            content_layout.addWidget(group_label)
-            for item in items:
-                card = QFrame(dialog)
-                card.setObjectName("resourceCard")
-                card_layout = QHBoxLayout(card)
-                card_layout.setContentsMargins(12, 12, 12, 12)
-                card_layout.setSpacing(12)
 
-                text_layout = QVBoxLayout()
-                name_label = QLabel(str(item.get("name", item.get("id", "Resource"))), dialog)
-                name_label.setStyleSheet("color: #f8fbff; font-weight: 700; background-color: transparent;")
-                status_label = QLabel("", dialog)
-                status_label.setObjectName("resourceHint")
-                status_label.setStyleSheet("color: #9fb3ca; background-color: transparent;")
-                status_label.setWordWrap(True)
-                text_layout.addWidget(name_label)
-                text_layout.addWidget(status_label)
-                card_layout.addLayout(text_layout, 1)
+        cpu_items = [r for r in resources if r.get("kind") == "sensevoice"]
+        gpu_kinds = {"ai", "whisper", "cuda"}
+        gpu_items = [r for r in resources if r.get("kind") in gpu_kinds]
+        voice_items = [r for r in resources if r.get("kind") == "voice"]
 
-                button = QPushButton("Download", dialog)
-                button.clicked.connect(lambda _checked=False, rid=item["id"], dlg=dialog: self._start_resource_download(dlg, rid))
-                card_layout.addWidget(button)
+        def _add_card(item, target_layout):
+            card = QFrame(dialog)
+            card.setObjectName("resourceCard")
+            card_layout = QHBoxLayout(card)
+            card_layout.setContentsMargins(8, 8, 8, 8)
+            card_layout.setSpacing(8)
 
-                content_layout.addWidget(card)
-                dialog._resource_rows[item["id"]] = {
-                    "item": item,
-                    "status_label": status_label,
-                    "button": button,
-                }
+            text_layout = QVBoxLayout()
+            name_label = QLabel(str(item.get("name", item.get("id", "Resource"))), dialog)
+            name_label.setStyleSheet("color: #f8fbff; font-weight: 700; background-color: transparent;")
+            status_label = QLabel("", dialog)
+            status_label.setObjectName("resourceHint")
+            status_label.setStyleSheet("color: #9fb3ca; background-color: transparent;")
+            status_label.setWordWrap(True)
+            text_layout.addWidget(name_label)
+            text_layout.addWidget(status_label)
+            card_layout.addLayout(text_layout, 1)
+
+            button = QPushButton("Download", dialog)
+            button.clicked.connect(lambda _checked=False, rid=item["id"], dlg=dialog: self._start_resource_download(dlg, rid))
+            card_layout.addWidget(button)
+
+            target_layout.addWidget(card)
+            dialog._resource_rows[item["id"]] = {
+                "item": item,
+                "status_label": status_label,
+                "button": button,
+            }
+
+        def _make_section(title, expanded):
+            wrapper = QFrame()
+            wrapper.setObjectName("statusCard")
+            wrapper.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            wrapper_layout = QVBoxLayout(wrapper)
+            wrapper_layout.setContentsMargins(8, 2, 8, 2)
+            wrapper_layout.setSpacing(0)
+
+            btn = QToolButton()
+            btn.setText(("▼ " if expanded else "▶ ") + title)
+            btn.setCheckable(True)
+            btn.setChecked(expanded)
+            btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            btn.setStyleSheet("QToolButton { text-align: left; font-weight: 700; color: #8ad7ff; border: none; padding: 2px 4px; margin: 0; }")
+
+            content = QWidget()
+            content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            content_layout = QVBoxLayout(content)
+            content_layout.setContentsMargins(0, 0, 0, 4)
+            content_layout.setSpacing(2)
+            content.setVisible(expanded)
+            if not expanded:
+                content.setMaximumHeight(0)
+
+            btn.toggled.connect(lambda c: (
+                btn.setText(("▼ " if c else "▶ ") + title),
+                content.setVisible(c),
+                content.setMaximumHeight(16777215 if c else 0),
+            ))
+            wrapper_layout.addWidget(btn)
+            wrapper_layout.addWidget(content)
+            return wrapper, content_layout
+
+        if cpu_items:
+            cpu_card, cpu_layout = _make_section("CPU Resource", expanded=True)
+            for item in cpu_items:
+                _add_card(item, cpu_layout)
+            content_layout.addWidget(cpu_card)
+
+        if gpu_items:
+            cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
+            print(f"[ResourceMgr] CAPCAP_DEVICE={os.getenv('CAPCAP_DEVICE')}, cpu_mode={cpu_mode}")
+            if not cpu_mode:
+                gpu_card, gpu_layout = _make_section("GPU Resource", expanded=False)
+                for item in gpu_items:
+                    _add_card(item, gpu_layout)
+                content_layout.addWidget(gpu_card)
+
+        for item in voice_items:
+            _add_card(item, content_layout)
+
+        content_layout.addStretch()
 
         dialog._resource_footer = QLabel("Select a resource to download.", dialog)
         dialog._resource_footer.setObjectName("resourceHint")
@@ -6270,8 +6317,10 @@ class VideoTranslatorGUI(QMainWindow):
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
+        layout.setSizeConstraint(QLayout.SetFixedSize)
 
         remote_mode = is_remote_profile()
+        cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
         LocalPolisherProvider = self._local_polisher_provider_cls() if not remote_mode else None
         # Transcription Engine Section
         engine_title = QLabel("Subtitle source")
@@ -6279,9 +6328,13 @@ class VideoTranslatorGUI(QMainWindow):
         layout.addWidget(engine_title)
 
         engine_combo = QComboBox(dialog)
-        engine_combo.addItem("Audio (Whisper)", "whisper")
+        if not cpu_mode:
+            engine_combo.addItem("Audio (Whisper)", "whisper")
+        engine_combo.addItem("Audio (SenseVoice)", "sensevoice")
         engine_combo.addItem("Video (OCR)", "ocr")
         current_engine = (os.getenv("TRANSCRIPTION_ENGINE") or "whisper").strip().lower()
+        if cpu_mode and current_engine == "whisper":
+            current_engine = "sensevoice"
         idx = engine_combo.findData(current_engine)
         if idx >= 0:
             engine_combo.setCurrentIndex(idx)
@@ -6303,15 +6356,16 @@ class VideoTranslatorGUI(QMainWindow):
         layout.addWidget(region_combo)
 
         # Whisper Section
+        is_whisper = current_engine == "whisper"
         whisper_title = QLabel("Whisper model")
         whisper_title.setObjectName("statusHeadline")
-        whisper_title.setVisible(current_engine != "ocr")
+        whisper_title.setVisible(is_whisper)
         layout.addWidget(whisper_title)
         
         whisper_combo = QComboBox(dialog)
         whisper_combo.addItem("Medium (Accurate)", "medium")
         whisper_combo.setCurrentIndex(0)
-        whisper_combo.setVisible(current_engine != "ocr")
+        whisper_combo.setVisible(is_whisper)
         layout.addWidget(whisper_combo)
 
         divider = QFrame()
@@ -6374,16 +6428,20 @@ class VideoTranslatorGUI(QMainWindow):
         layout.addWidget(ai_title)
 
         provider_layout = QHBoxLayout()
-        provider_label = QLabel("Provider:")
+        provider_label = QLabel("Translator Provider:")
         provider_label.setVisible(not remote_mode)
         provider_layout.addWidget(provider_label)
         provider_combo = QComboBox(dialog)
+        provider_combo.addItem("Google Translate (free, no key)", "google")
         provider_combo.addItem("OpenAI (Google AI Studio)", "openai")
         provider_combo.addItem("Ollama (Local)", "ollama")
-        provider_combo.addItem("Local (GGUF)", "local")
-        current_provider = (os.getenv("OPENAI_PROVIDER") or "local").strip().lower()
-        if current_provider not in {"openai", "ollama", "local"}:
+        if not cpu_mode:
+            provider_combo.addItem("Local (GGUF)", "local")
+        current_provider = (os.getenv("OPENAI_PROVIDER") or "google").strip().lower()
+        if current_provider not in {"google", "openai", "ollama", "local"}:
             current_provider = "local"
+        if cpu_mode and current_provider == "local":
+            current_provider = "google"
         idx = provider_combo.findData(current_provider)
         if idx >= 0:
             provider_combo.setCurrentIndex(idx)
@@ -6408,8 +6466,8 @@ class VideoTranslatorGUI(QMainWindow):
             local_model_combo.setCurrentIndex(idx)
         local_model_layout.addWidget(local_model_label)
         local_model_layout.addWidget(local_model_combo)
-        local_model_label.setVisible(not remote_mode)
-        local_model_combo.setVisible(not remote_mode)
+        local_model_label.setVisible(not remote_mode and not cpu_mode)
+        local_model_combo.setVisible(not remote_mode and not cpu_mode)
         layout.addLayout(local_model_layout)
 
         key_section_widget = QWidget(dialog)
@@ -6450,6 +6508,16 @@ class VideoTranslatorGUI(QMainWindow):
         provider_hint.setVisible(not remote_mode)
         layout.addWidget(provider_hint)
 
+        style_label = QLabel("Translation style (optional):")
+        style_label.setObjectName("helperLabel")
+        style_edit = QLineEdit(dialog)
+        style_edit.setPlaceholderText("e.g. natural, funny, more formal")
+        style_edit.setText(os.getenv("TRANSLATOR_STYLE", ""))
+        style_label.setVisible(not remote_mode)
+        style_edit.setVisible(not remote_mode)
+        layout.addWidget(style_label)
+        layout.addWidget(style_edit)
+
         local_model_note = QLabel(
             "Normal Quality uses Hy-MT2 and the current lightweight prompt. "
             "High Quality uses Gemma 4 and the older richer prompt. "
@@ -6457,22 +6525,36 @@ class VideoTranslatorGUI(QMainWindow):
         )
         local_model_note.setObjectName("helperLabel")
         local_model_note.setWordWrap(True)
-        local_model_note.setVisible(not remote_mode)
+        local_model_note.setVisible(not remote_mode and not cpu_mode)
         layout.addWidget(local_model_note)
+
+        def _toggle_visible(widget, visible):
+            widget.setVisible(visible)
 
         def update_provider_fields():
             p = provider_combo.currentData()
+            is_ai = p != "google"
             is_openai = p == "openai"
             is_local = p == "local"
-            key_section_widget.setVisible(is_openai)
-            local_model_label.setVisible(not remote_mode and is_local)
-            local_model_combo.setVisible(not remote_mode and is_local)
-            local_model_note.setVisible(not remote_mode and is_local)
-            base_url_label.setVisible(not remote_mode and not is_local)
-            base_url_edit.setVisible(not remote_mode and not is_local)
-            test_btn.setVisible(not remote_mode and not is_local)
-            test_status.setVisible(not remote_mode and not is_local)
-            if is_openai:
+            is_google = p == "google"
+            _toggle_visible(style_label, not remote_mode and is_ai)
+            _toggle_visible(style_edit, not remote_mode and is_ai)
+            _toggle_visible(key_section_widget, is_openai)
+            _toggle_visible(local_model_label, not remote_mode and is_local and not cpu_mode)
+            _toggle_visible(local_model_combo, not remote_mode and is_local and not cpu_mode)
+            _toggle_visible(local_model_note, not remote_mode and is_local and not cpu_mode)
+            _toggle_visible(base_url_label, not remote_mode and not is_local and is_ai)
+            _toggle_visible(base_url_edit, not remote_mode and not is_local and is_ai)
+            _toggle_visible(test_btn, not remote_mode and not is_local and is_ai)
+            _toggle_visible(test_status, not remote_mode and not is_local and is_ai)
+            _toggle_visible(model_label, not remote_mode and is_ai)
+            _toggle_visible(model_edit, not remote_mode and is_ai)
+            if is_google:
+                provider_hint.setText("Free Google web translate, no API key needed. Lower quality than AI translation.")
+                key_edit.clear()
+                model_edit.clear()
+                base_url_edit.clear()
+            elif is_openai:
                 model_label.setText("AI Model:")
                 base_url_edit.setText("https://generativelanguage.googleapis.com/v1beta/openai/")
                 provider_hint.setText("Get an API key at https://aistudio.google.com/apikey")
@@ -6496,6 +6578,8 @@ class VideoTranslatorGUI(QMainWindow):
                     model_edit.setText("models/ai/Hy-MT2-1.8B-Q4_K_M.gguf")
                     provider_hint.setText("Download Hy-MT2 GGUF from Manage Resources. Normal Quality is the default lighter model.")
             model_edit.setReadOnly(is_local)
+            dialog.layout().invalidate()
+            dialog.adjustSize()
 
         local_model_combo.currentIndexChanged.connect(update_provider_fields)
 
@@ -6529,11 +6613,15 @@ class VideoTranslatorGUI(QMainWindow):
         update_provider_fields()
 
         def update_engine_fields():
-            is_ocr = engine_combo.currentData() == "ocr"
-            whisper_title.setVisible(not is_ocr)
-            whisper_combo.setVisible(not is_ocr)
-            region_label.setVisible(is_ocr)
-            region_combo.setVisible(is_ocr)
+            engine_val = engine_combo.currentData()
+            is_ocr = engine_val == "ocr"
+            is_whisper = engine_val == "whisper"
+            _toggle_visible(whisper_title, is_whisper)
+            _toggle_visible(whisper_combo, is_whisper)
+            _toggle_visible(region_label, is_ocr)
+            _toggle_visible(region_combo, is_ocr)
+            dialog.layout().invalidate()
+            dialog.adjustSize()
 
         engine_combo.currentIndexChanged.connect(update_engine_fields)
 

@@ -14,3 +14,4 @@ librosa
 llama-cpp-python
 rapidocr
 opencv-python-headless
+sherpa-onnx

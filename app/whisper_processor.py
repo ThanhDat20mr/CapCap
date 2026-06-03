@@ -152,12 +152,13 @@ def _faster_whisper_cache_dir():
 
 def _detect_faster_whisper_runtime() -> dict:
     forced_device = str(os.environ.get("CAPCAP_WHISPER_DEVICE", "") or "").strip().lower()
+    cpu_mode = os.environ.get("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
     runtime = {
         "device": "cpu",
         "compute_type": "int8",
         "label": "CPU / int8",
     }
-    if forced_device == "cpu":
+    if forced_device == "cpu" or cpu_mode:
         return runtime
     _ensure_openmp_runtime_compat()
     _ensure_cuda_runtime_on_path()

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -64,12 +65,39 @@ def _ffmpeg_path():
     return os.path.join(bin_path(), "ffmpeg", "ffmpeg.exe")
 
 
+def _get_video_duration(video_path: str) -> float:
+    try:
+        import subprocess
+        ffprobe = _ffmpeg_path().replace("ffmpeg.exe", "ffprobe.exe")
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            return float(result.stdout.strip() or 0)
+    except Exception:
+        pass
+    return 0.0
+
+
+MSG_STYLE = """
+    QMessageBox { background-color: #0f1724; }
+    QLabel { color: #d7e3f4; }
+    QPushButton { background-color: #22344d; color: #f8fbff; border: 1px solid #34506f;
+        border-radius: 8px; padding: 6px 16px; font-weight: 600; }
+    QPushButton:hover { background-color: #29405d; }
+"""
+
+
 class ProjectCard(QFrame):
     def __init__(self, video_path: str, thumbnail_cache_dir: str, parent=None):
         super().__init__(parent)
         self.video_path = video_path
+        self._orig_pixmap = None
         self.setObjectName("statusCard")
-        self.setFixedSize(220, 180)
+        self.setMinimumSize(180, 160)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet("ProjectCard:hover { border: 2px solid #4ecdc4; }")
 
@@ -78,19 +106,10 @@ class ProjectCard(QFrame):
         layout.setSpacing(6)
 
         self.thumb_label = QLabel()
-        self.thumb_label.setFixedSize(204, 115)
+        self.thumb_label.setMinimumSize(160, 120)
         self.thumb_label.setAlignment(Qt.AlignCenter)
         self.thumb_label.setStyleSheet("background-color: #0d1220; border-radius: 6px;")
-
-        thumb_path = os.path.join(thumbnail_cache_dir, _thumbnail_name(video_path))
-        if not os.path.exists(thumb_path):
-            thumb_path = _extract_thumbnail(video_path, thumb_path)
-        if os.path.exists(thumb_path):
-            pixmap = QPixmap(thumb_path)
-            if not pixmap.isNull():
-                self.thumb_label.setPixmap(pixmap.scaled(204, 115, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        else:
-            self.thumb_label.setText("No Preview")
+        self.thumb_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         layout.addWidget(self.thumb_label)
 
@@ -99,6 +118,29 @@ class ProjectCard(QFrame):
         self.name_label.setMaximumHeight(36)
         self.name_label.setStyleSheet("color: #e0e0e0; font-size: 11px; font-weight: 600;")
         layout.addWidget(self.name_label)
+
+        self._load_thumb(thumbnail_cache_dir)
+
+    def _load_thumb(self, cache_dir):
+        thumb_path = os.path.join(cache_dir, _thumbnail_name(self.video_path))
+        if not os.path.exists(thumb_path):
+            thumb_path = _extract_thumbnail(self.video_path, thumb_path)
+        if os.path.exists(thumb_path):
+            self._orig_pixmap = QPixmap(thumb_path)
+            self._update_thumb()
+        else:
+            self.thumb_label.setText("No Preview")
+
+    def _update_thumb(self):
+        if self._orig_pixmap is None or self._orig_pixmap.isNull():
+            return
+        w = self.thumb_label.width()
+        if w > 0:
+            self.thumb_label.setPixmap(self._orig_pixmap.scaled(w, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_thumb()
 
     def mousePressEvent(self, event):
         self.window().selected_video = self.video_path
@@ -131,10 +173,11 @@ class LauncherWindow(QDialog):
     def __init__(self):
         super().__init__()
         self.selected_video = ""
+        self.selected_device = "cuda"
         self._thumbnail_dir = os.path.join(os.path.dirname(__file__), "..", "..", "temp", "launcher_thumbs")
 
         self.setWindowTitle("CapCap - Video Translator")
-        self.setMinimumSize(720, 480)
+        self.setMinimumSize(840, 540)
         self.setStyleSheet("""
             QDialog {
                 background-color: #0a101e;
@@ -148,7 +191,7 @@ class LauncherWindow(QDialog):
         """)
 
         self._build_ui()
-        self._load_recent()
+        QTimer.singleShot(0, self._load_recent)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -164,6 +207,63 @@ class LauncherWindow(QDialog):
         header_text = QVBoxLayout()
         header_text.addWidget(title)
         header_text.addWidget(subtitle)
+
+        gpu_info = self._detect_gpu()
+        has_gpu = not gpu_info.startswith("CPU")
+        self.selected_device = "cuda" if has_gpu else "cpu"
+
+        gpu_label = QLabel(gpu_info)
+        gpu_label.setStyleSheet("font-size: 11px; color: #5a7a9a;")
+        header_text.addWidget(gpu_label)
+
+        device_row = QHBoxLayout()
+        device_row.setSpacing(0)
+        self.cpu_btn = QPushButton("CPU")
+        self.cpu_btn.setCheckable(True)
+        self.cpu_btn.setChecked(not has_gpu)
+        self.cpu_btn.setEnabled(True)
+        self.gpu_btn = QPushButton("GPU (Recommended)" if has_gpu else "GPU (N/A)")
+        self.gpu_btn.setCheckable(True)
+        self.gpu_btn.setChecked(has_gpu)
+        self.gpu_btn.setEnabled(has_gpu)
+
+        btn_style = """
+            QPushButton {
+                color: #8ea3bb; border: 1px solid #2f4868; padding: 3px 10px;
+                font-size: 11px; font-weight: 600; border-radius: 0;
+                background-color: transparent;
+            }
+            QPushButton:checked {
+                background-color: #1a3a5c; color: #8ad7ff; border-color: #4ecdc4;
+            }
+            QPushButton:disabled {
+                color: #445566; border-color: #1e3045;
+            }
+        """
+        self.cpu_btn.setStyleSheet(btn_style + "QPushButton { border-top-left-radius: 6px; border-bottom-left-radius: 6px; }")
+        self.gpu_btn.setStyleSheet(btn_style + "QPushButton { border-top-right-radius: 6px; border-bottom-right-radius: 6px; }")
+
+        def _select_cpu(checked):
+            if checked:
+                self.gpu_btn.setChecked(False)
+                self.selected_device = "cpu"
+            elif not self.gpu_btn.isChecked():
+                self.cpu_btn.setChecked(True)
+
+        def _select_gpu(checked):
+            if checked:
+                self.cpu_btn.setChecked(False)
+                self.selected_device = "cuda"
+            elif not self.cpu_btn.isChecked():
+                self.gpu_btn.setChecked(True)
+
+        self.cpu_btn.clicked.connect(_select_cpu)
+        self.gpu_btn.clicked.connect(_select_gpu)
+
+        device_row.addWidget(self.cpu_btn)
+        device_row.addWidget(self.gpu_btn)
+        device_row.addStretch()
+        header_text.addLayout(device_row)
         header.addLayout(header_text, 1)
 
         self.new_btn = QPushButton("+ New Project")
@@ -184,6 +284,25 @@ class LauncherWindow(QDialog):
         """)
         self.new_btn.clicked.connect(self._on_new_project)
         header.addWidget(self.new_btn)
+
+        self.split_btn = QPushButton("Split Video")
+        self.split_btn.setMinimumHeight(44)
+        self.split_btn.setMinimumWidth(120)
+        self.split_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #22344d;
+                color: #8ad7ff;
+                font-weight: 600;
+                font-size: 13px;
+                border-radius: 8px;
+                border: 1px solid #34506f;
+            }
+            QPushButton:hover {
+                background-color: #29405d;
+            }
+        """)
+        self.split_btn.clicked.connect(self._on_split_video)
+        header.addWidget(self.split_btn)
         root.addLayout(header)
 
         self.section_label = QLabel("Recent Projects")
@@ -220,6 +339,23 @@ class LauncherWindow(QDialog):
         if not self.selected_video or not os.path.exists(self.selected_video):
             super().accept()
             return
+
+        duration = _get_video_duration(self.selected_video)
+        MAX_DURATION = 7200
+        if duration > MAX_DURATION:
+            h = int(duration // 3600)
+            m = int((duration % 3600) // 60)
+            from PySide6.QtWidgets import QMessageBox
+            reply = QMessageBox.warning(
+                self, "Video Too Long",
+                f"This video is {h}h {m}m long.\nCapCap works best with videos under 2 hours.\n\n"
+                "Use 'Split Video' to cut it into 2-hour segments first.",
+                QMessageBox.Ok,
+            )
+            reply.setStyleSheet(MSG_STYLE)
+            return
+
+        LauncherWindow._selected_device = self.selected_device
         self.loading_label.show()
         self.new_btn.setEnabled(False)
         self._extraction_done = False
@@ -243,7 +379,32 @@ class LauncherWindow(QDialog):
     def _finish_accept(self):
         self.loading_label.hide()
         self.new_btn.setEnabled(True)
+        self._save_device_env()
         super().accept()
+
+    @staticmethod
+    def _save_device_env():
+        device = getattr(LauncherWindow, "_selected_device", "cuda")
+        print(f"[Launcher] Saving CAPCAP_DEVICE={device}")
+        os.environ["CAPCAP_DEVICE"] = device
+        env_path = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
+        try:
+            lines = []
+            if os.path.exists(env_path):
+                with open(env_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            found = False
+            for i, line in enumerate(lines):
+                if line.startswith("CAPCAP_DEVICE="):
+                    lines[i] = f"CAPCAP_DEVICE={device}\n"
+                    found = True
+                    break
+            if not found:
+                lines.append(f"CAPCAP_DEVICE={device}\n")
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+        except Exception as e:
+            print(f"[Launcher] Failed to write .env: {e}")
 
     def _load_recent(self):
         projects = _load_recent_projects()
@@ -263,11 +424,16 @@ class LauncherWindow(QDialog):
             return
         self.empty_label.hide()
 
-        columns = max(1, (self.grid_widget.width() - 24) // 232)
+        columns = min(3, max(1, (self.grid_widget.width() - 24) // 242))
         for i, proj in enumerate(existing):
             card = ProjectCard(proj["video_path"], self._thumbnail_dir, self)
             row, col = divmod(i, max(1, columns))
             self.grid.addWidget(card, row, col)
+            self.grid.setColumnStretch(col, 1)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._load_recent)
 
     def _on_new_project(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -277,6 +443,102 @@ class LauncherWindow(QDialog):
         if path:
             self.selected_video = path
             self.accept()
+
+    def _on_split_video(self):
+        from PySide6.QtWidgets import QMessageBox, QProgressDialog, QInputDialog
+        from PySide6.QtCore import QThread, Signal
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Long Video to Split", "",
+            "Video Files (*.mp4 *.mkv *.avi *.mov *.webm);;All Files (*)"
+        )
+        if not path:
+            return
+
+        duration = _get_video_duration(path)
+        if duration <= 7200:
+            mb = QMessageBox(QMessageBox.Information, "No Split Needed",
+                "This video is under 2 hours. You can open it directly with '+ New Project'.",
+                QMessageBox.Ok, self)
+            mb.setStyleSheet(MSG_STYLE)
+            mb.exec()
+            return
+
+        h = int(duration // 3600)
+        m = int((duration % 3600) // 60)
+
+        seg_minutes, ok = QInputDialog.getInt(
+            self, "Segment Duration",
+            f"Video is {h}h {m}m.\nSplit into segments of how many minutes?",
+            120, 10, 1440, 10,
+        )
+        if not ok:
+            return
+
+        seg_seconds = seg_minutes * 60
+        base, ext = os.path.splitext(path)
+        out_pattern = f"{base}_part%03d{ext}"
+
+        reply = QMessageBox(QMessageBox.Question, "Confirm Split",
+            f"Split into {seg_minutes}-minute segments using stream copy (no re-encode, fast).\n\n"
+            f"Output: {out_pattern}\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No, self)
+        reply.setStyleSheet(MSG_STYLE)
+        if reply.exec() != QMessageBox.Yes:
+            return
+
+        progress = QProgressDialog("Splitting video...", None, 0, 0, self)
+        progress.setWindowTitle("Split Video")
+        progress.setModal(True)
+        progress.setCancelButton(None)
+        progress.show()
+
+        import subprocess
+        import threading
+
+        def _do_split():
+            try:
+                subprocess.run(
+                    [_ffmpeg_path(), "-y", "-i", path, "-c", "copy",
+                     "-f", "segment", "-segment_time", str(seg_seconds),
+                     "-reset_timestamps", "1", out_pattern],
+                    capture_output=True, timeout=3600,
+                )
+                progress.accept()
+            except Exception as e:
+                progress.accept()
+                print(f"[Split] Error: {e}")
+
+        threading.Thread(target=_do_split, daemon=True).start()
+        progress.exec()
+
+        mb = QMessageBox(QMessageBox.Information, "Done",
+            f"Video split into {seg_minutes}-minute segments.\nSaved alongside the original file.",
+            QMessageBox.Ok, self)
+        mb.setStyleSheet(MSG_STYLE)
+        mb.exec()
+
+    @staticmethod
+    def _detect_gpu():
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                gpu_name = result.stdout.strip().split("\n")[0].strip()
+                return f"GPU: {gpu_name}"
+        except Exception:
+            pass
+        try:
+            import torch
+            if torch.cuda.is_available():
+                name = torch.cuda.get_device_name(0)
+                vram = torch.cuda.get_device_properties(0).total_mem // (1024 ** 3)
+                return f"GPU: {name} ({vram}GB)"
+        except Exception:
+            pass
+        return "CPU only"
 
     @staticmethod
     def add_recent(settings_or_none, video_path: str):
