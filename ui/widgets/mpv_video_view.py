@@ -150,15 +150,17 @@ class _BlurRegionOverlayWindow(QWidget):
         self._press_pos = QPointF()
         self._editable = False
         self._target_view = None
+        self._main_window = None
+        self._suspended = False
         self._on_region_changed = on_region_changed
         self._on_edit_finished = on_edit_finished
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
         self.hide()
 
     def attach_to_view(self, view: QWidget):
         self._target_view = view
+        if view and view.window():
+            self._main_window = view.window()
+            self._main_window.installEventFilter(self)
         self.sync_to_view()
 
     def set_editable(self, editable: bool):
@@ -181,6 +183,8 @@ class _BlurRegionOverlayWindow(QWidget):
         self._active_index = -1
         self._regions = []
         self._target_view = None
+        self._main_window = None
+        self._suspended = False
         self.hide()
         self.update()
 
@@ -230,7 +234,8 @@ class _BlurRegionOverlayWindow(QWidget):
 
     def sync_to_view(self):
         if (
-            not self._target_view
+            self._suspended
+            or not self._target_view
             or not self._target_view.isVisible()
             or not self._regions
             or not self._editable
@@ -253,11 +258,14 @@ class _BlurRegionOverlayWindow(QWidget):
         super().hideEvent(event)
 
     def eventFilter(self, watched, event):
-        if event.type() == QEvent.WindowDeactivate:
-            self.hide()
-        elif event.type() == QEvent.WindowActivate:
-            if self._editable and self._regions:
-                self._queue_sync_to_view()
+        if watched is self._main_window:
+            if event.type() == QEvent.WindowDeactivate:
+                self._suspended = True
+                self.hide()
+            elif event.type() == QEvent.WindowActivate:
+                self._suspended = False
+                if self._editable and self._regions:
+                    self._queue_sync_to_view()
         return super().eventFilter(watched, event)
 
     def region_rect(self, index: int | None = None) -> QRectF:

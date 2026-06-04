@@ -182,8 +182,24 @@ class PrepareWorkflow:
         self.project_service.save_project(project_state)
 
         if is_ocr:
-            print("--- Step 1: Skipped (OCR reads directly from video) ---")
-            print("\n--- Step 2: Extracting subtitles via OCR ---")
+            print("--- Step 1: Extracting background audio ---")
+            if step_callback: step_callback("extract_audio")
+            project_state.set_step_status("extract_audio", "running")
+            self.project_service.save_project(project_state)
+
+            audio_output_path = self.project_service.build_path(project_state, "source", "extracted_audio.wav")
+            os.makedirs(os.path.dirname(audio_output_path), exist_ok=True)
+            ffmpeg_bin = os.path.join(bin_path(), "ffmpeg", "ffmpeg.exe")
+            subprocess.run(
+                [ffmpeg_bin, "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le",
+                 "-ar", "16000", "-ac", "1", audio_output_path],
+                capture_output=True,
+            )
+            project_state.set_artifact("extracted_audio", audio_output_path)
+            project_state.set_step_status("extract_audio", "completed")
+            self.project_service.save_project(project_state)
+
+            print("--- Step 2: Extracting subtitles via OCR ---")
             if step_callback: step_callback("transcription")
             transcribe_started = time.perf_counter()
             project_state.set_step_status("extract_audio", "skipped")

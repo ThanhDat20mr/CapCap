@@ -12,7 +12,7 @@ _OCR_ENGINE_LOCK = None
 
 MAX_CROP_WIDTH = 960
 EMPTY_TOLERANCE = 2
-EXACT_HASH_THRESHOLD = 0.5
+EXACT_HASH_THRESHOLD = 5.0
 _OCR_HANDLE_RE = re.compile(r"@\s*[A-Za-z0-9_\-\u3400-\u9fff]{1,24}")
 _OCR_NOISE_RE = re.compile(r"^[A-Za-z0-9@#&*_\-+=/\\|~`'.:;!?()\[\]{}<>]{1,16}$")
 _OCR_WATERMARK_PATTERNS = [
@@ -171,6 +171,17 @@ def _sanitize_ocr_line(text: str) -> str:
     return cleaned
 
 
+def _is_blank_region(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    lap = cv2.Laplacian(gray, cv2.CV_64F)
+    if float(lap.var()) < 30.0:
+        return True
+    bright_ratio = float(np.sum(gray > 180)) / gray.size
+    if bright_ratio > 0.002:
+        return False
+    return True
+
+
 def ocr_frame(engine, image):
     h, w = image.shape[:2]
     if w > MAX_CROP_WIDTH:
@@ -211,13 +222,13 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
         except Exception:
             duration = 60
         if duration <= 180:
-            fps = 2.0
-        elif duration <= 360:
             fps = 1.5
-        elif duration <= 600:
+        elif duration <= 360:
             fps = 1.0
-        else:
+        elif duration <= 600:
             fps = 0.75
+        else:
+            fps = 0.5
         print(f"[OCR] Video duration: {duration:.0f}s, auto fps: {fps}")
 
     frame_interval = 1.0 / fps
@@ -256,6 +267,9 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
             if prev_hash is not None and _hamming_distance(cur_hash, prev_hash) < EXACT_HASH_THRESHOLD:
                 skip_count += 1
                 texts = list(prev_texts) if prev_texts else []
+            elif _is_blank_region(cropped):
+                skip_count += 1
+                texts = []
             else:
                 texts = ocr_frame(ocr_engine, cropped)
                 ocr_count += 1
@@ -321,24 +335,66 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
             })
 
     merged = _merge_adjacent(segments)
+    merged = _dedup_identical(merged)
     print(f"[OCR] Extracted {len(merged)} subtitle segments from {total_steps} frames (OCR: {ocr_count}, skip: {skip_count})")
     return merged
 
 
+def _dedup_identical(segments):
+    if len(segments) < 2:
+        return segments
+    result = [segments[0]]
+    for seg in segments[1:]:
+        prev = result[-1]
+        gap = seg["start"] - prev["end"]
+        prev_dur = prev["end"] - prev["start"]
+        seg_dur = seg["end"] - seg["start"]
+        both_short = prev_dur < 1.0 and seg_dur < 1.0 and len(prev["text"]) <= 3 and len(seg["text"]) <= 5
+        same_text = seg["text"] == prev["text"]
+        similar = not same_text and gap < 0.5 and _texts_similar(
+            seg["text"].split(), prev["text"].split()
+        )
+        should_merge = (same_text or similar or (both_short and gap < 0.3)) and gap < 2.0
+        if should_merge:
+            prev["end"] = max(prev["end"], seg["end"])
+            if both_short and not same_text:
+                prev["text"] = _sanitize_ocr_line(prev["text"] + seg["text"])
+            elif not same_text and len(seg["text"]) > len(prev["text"]):
+                prev["text"] = seg["text"]
+        else:
+            result.append(seg)
+    return result
+
+
 def _texts_similar(a, b):
-    if len(a) != len(b):
+    if not a or not b:
         return False
-    for x, y in zip(a, b):
-        if x == y:
-            continue
-        if len(x) < 2 or len(y) < 2:
-            return False
-        shorter, longer = (x, y) if len(x) <= len(y) else (y, x)
-        if shorter not in longer and longer not in shorter:
-            common = sum(c1 == c2 for c1, c2 in zip(x, y))
-            if common / max(len(x), len(y)) < 0.8:
-                return False
-    return True
+    a_set = set(a)
+    b_set = set(b)
+    overlap = len(a_set & b_set)
+    min_len = min(len(a_set), len(b_set))
+    if min_len > 0 and overlap / min_len >= 0.75:
+        return True
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    if not shorter:
+        return False
+    matched = 0
+    for sw in shorter:
+        for lw in longer:
+            if sw == lw:
+                matched += 1
+                break
+            if len(sw) < 2 or len(lw) < 2:
+                continue
+            sw_short, lw_long = (sw, lw) if len(sw) <= len(lw) else (lw, sw)
+            if sw_short in lw_long:
+                matched += 1
+                break
+            common = sum(c1 == c2 for c1, c2 in zip(sw, lw))
+            if common / max(len(sw), len(lw)) >= 0.8:
+                matched += 1
+                break
+    return matched / len(shorter) >= 0.7
 
 
 def _merge_adjacent(segments, max_gap=0.5):

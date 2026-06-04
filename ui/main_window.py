@@ -85,6 +85,7 @@ from worker_adapters import (
 # Import our backend modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'app'))
 from video_processor import get_video_dimensions
+from workflows.voice_workflow import predict_speed_ratios
 
 
 class _BootstrapMediaBackend:
@@ -5638,6 +5639,8 @@ class VideoTranslatorGUI(QMainWindow):
 
     def apply_segments_to_timeline(self):
         segs = self.get_active_segments()
+        if segs:
+            predict_speed_ratios(segs)
         self.timeline.set_segments(segs if segs else [])
         self.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
         self.video_view.subtitle_item.hide()

@@ -21,6 +21,45 @@ segment_cache_key = _vpu.segment_cache_key
 voice_provider = _vpu.voice_provider
 
 
+def predict_speed_ratios(segments):
+    if not segments:
+        return segments
+    try:
+        from tts_processor import normalize_text_for_tts as _norm
+    except Exception:
+        _norm = lambda t, **kw: t
+    for seg in (segments or []):
+        if seg.get("pre_speed_ratio") is not None:
+            continue
+        raw_text = " ".join(str(seg.get("dubbing_vi") or seg.get("text") or "").replace("\n", " ").split()).strip()
+        if not raw_text:
+            seg["pre_speed_ratio"] = 1.0
+            continue
+        text = _norm(raw_text, provider="piper") or raw_text
+        duration_sec = max(0.1, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
+        words = len([t for t in re.split(r"\s+", text) if t])
+        speech_cost = 0
+        value = text
+        if re.search(r"\d", value):
+            speech_cost += 2
+        if re.search(r"\b(19|20)\d{2}\b", value):
+            speech_cost += 2
+        if re.search(r"[A-Za-z]+\d+|\d+[A-Za-z]+", value):
+            speech_cost += 2
+        if re.search(r"[A-Z]", value) or re.search(r"[A-Za-z]{4,}", value) or re.search(r"[@#%&+/=_-]", value):
+            speech_cost += 2
+        if len(re.findall(r"[,;:]", value)) >= 2:
+            speech_cost += 1
+        token_list = [t for t in re.split(r"\s+", value) if t]
+        long_tokens = [t for t in token_list if len(re.sub(r"[^\w]", "", t, flags=re.UNICODE)) >= 7]
+        if len(long_tokens) >= 2:
+            speech_cost += 1
+        wps = 4.0 if speech_cost >= 3 else 4.5
+        max_words = max(1, int(duration_sec * wps))
+        seg["pre_speed_ratio"] = round(words / max(1, max_words), 3) if max_words > 0 else 1.0
+    return segments
+
+
 class VoiceWorkflow:
     MAX_TTS_WORKERS = 6
     PIPER_TTS_WORKERS = 1
@@ -781,6 +820,13 @@ class VoiceWorkflow:
             actual_duration = self._probe_wav_duration_seconds(wav_path) if wav_path and os.path.exists(wav_path) else 0.0
             ratios.append((actual_duration / target_duration) if target_duration > 0 else 0.0)
         return ratios
+
+    def _save_pre_speed_ratios(self, *, segments, wavs):
+        for seg, wav_path in zip(list(segments or []), list(wavs or [])):
+            target_duration = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
+            actual_duration = self._probe_wav_duration_seconds(wav_path) if wav_path and os.path.exists(wav_path) else 0.0
+            pre_ratio = (actual_duration / target_duration) if target_duration > 0 else 1.0
+            seg["pre_speed_ratio"] = round(pre_ratio, 3)
 
     def _retry_overlong_segments(
         self,
@@ -1570,6 +1616,7 @@ class VoiceWorkflow:
             voice_name=voice_name,
             provider_speed=provider_speed,
         )
+        self._save_pre_speed_ratios(segments=segments, wavs=wavs)
         wavs = self._apply_safe_timing_polish(
             segments=segments,
             wavs=wavs,
