@@ -278,14 +278,18 @@ class LocalPolisherProvider:
             joined = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(source_texts))
             prompt = (
                 f"Translate these {len(source_texts)} subtitle lines from {src_lang} to {target_lang}. "
-                f"Note that you should only output the translated result without any additional explanation. "
+                f"Make each line short, natural spoken language for a short video voiceover. "
+                f"Avoid long sentences — split or compress if a line has too many words for its duration. "
+                f"Output only the translated result without any additional explanation. "
                 f"Keep the exact line count ({len(source_texts)} lines) and the numbering format (1. text):\n\n{joined}"
             )
         else:
             joined = "\n".join(f"{i + 1}. {s} ||| {t}" for i, (s, t) in enumerate(zip(source_texts, translated_texts)))
             prompt = (
                 f"Rewrite these {len(source_texts)} subtitle translations from {src_lang} to {target_lang}. "
-                f"Note that you should only output the rewritten result without any additional explanation. "
+                f"Make each line short, natural spoken language for a short video voiceover. "
+                f"Avoid long sentences — split or compress if a line has too many words for its duration. "
+                f"Output only the rewritten result without any additional explanation. "
                 f"Keep the exact line count ({len(source_texts)} lines) and the numbering format:\n\n{joined}"
             )
         if style_instruction:
@@ -542,7 +546,10 @@ class LocalPolisherProvider:
             return "nested-numbering"
         source_has_cjk = bool(re.search(r"[\u3400-\u9fff]", source))
         translated_cjk_count = len(re.findall(r"[\u3400-\u9fff]", translated))
-        if source_has_cjk and translated_cjk_count >= 4:
+        translated_len = max(1, len(re.sub(r"\s+", "", translated)))
+        if source_has_cjk and translated_cjk_count >= 10:
+            return "contains-cjk"
+        if source_has_cjk and translated_len > 0 and translated_cjk_count / translated_len > 0.4:
             return "contains-cjk"
 
         normalized_source = re.sub(r"\W+", "", source).lower()

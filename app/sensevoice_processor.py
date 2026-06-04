@@ -65,6 +65,33 @@ def load_model(model_dir: str, language: str = "auto"):
         _current_language = lang
 
 
+def _absorb_tiny_segments(segments):
+    if len(segments) < 2:
+        return segments
+    result = []
+    i = 0
+    while i < len(segments):
+        seg = segments[i]
+        dur = seg["end"] - seg["start"]
+        text_len = len(seg["text"].replace(" ", ""))
+        if (dur < 0.35 or text_len <= 1) and (result or i + 1 < len(segments)):
+            gap_prev = seg["start"] - result[-1]["end"] if result else float("inf")
+            gap_next = segments[i + 1]["start"] - seg["end"] if i + 1 < len(segments) else float("inf")
+            if gap_prev < 0.35 and result:
+                result[-1]["end"] = max(result[-1]["end"], seg["end"])
+                result[-1]["text"] = (result[-1]["text"] + " " + seg["text"]).strip()
+                i += 1
+                continue
+            elif gap_next < 0.35 and i + 1 < len(segments):
+                segments[i + 1]["start"] = min(seg["start"], segments[i + 1]["start"])
+                segments[i + 1]["text"] = (seg["text"] + " " + segments[i + 1]["text"]).strip()
+                i += 1
+                continue
+        result.append(seg)
+        i += 1
+    return result
+
+
 def transcribe_audio(audio_path: str, model_dir: str, *, language: str = "auto") -> list[dict]:
     import sherpa_onnx
 
@@ -98,6 +125,8 @@ def transcribe_audio(audio_path: str, model_dir: str, *, language: str = "auto")
                 "end": round(seg["end"], 3),
                 "text": text,
             })
+
+    results = _absorb_tiny_segments(results)
 
     if not results:
         stream = _recognizer.create_stream()

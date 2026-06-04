@@ -29,6 +29,11 @@
 - Timeline editing, subtitle styling, video filters
 - Translation-to-TTS cache prefetch to reduce voice generation wait time
 - Subtitle + voice export with FFmpeg
+- **TTS speed highlighting** — audio timeline segments show predicted voice-over timing fit via 5 color levels (green/cyan/yellow/orange/red)
+- **Stop pipeline** — stop button in progress popup to cancel long-running workflows
+- **Window fixed** — main window no longer draggable; stays at launch position
+- **Vietnamese normalizer dictionary manager** (More → Normalizer Dictionary) — CRUD editor for custom acronym/non-Vietnamese word mappings
+- **GGUF translator improvements** — automatic enable when provider is local, absolute model paths, smarter CJK quality validation, increased token limit
 
 ## Quick Start
 
@@ -268,7 +273,8 @@ CapCap/
 │   ├── cuda12_fw/                # CUDA runtime DLLs (optional GPU accel)
 │   └── UVR-MDX-NET-Inst_HQ_3.onnx  # Vocal separation model
 ├── models/
-│   └── sensevoice/                # SenseVoice ONNX model + tokens
+│   ├── sensevoice/                # SenseVoice ONNX model + tokens
+│   └── vietnormalizer/            # Custom dict CSV files (acronyms, non-VN words)
 ├── .env                          # Environment configuration
 └── .env_example                  # Example environment config
 ```

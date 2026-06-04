@@ -264,9 +264,16 @@ class _BlurRegionOverlayWindow(QWidget):
                 self.hide()
             elif event.type() == QEvent.WindowActivate:
                 self._suspended = False
-                if self._editable and self._regions:
+                if self._editable and self._regions and not self._has_active_popup():
                     self._queue_sync_to_view()
         return super().eventFilter(watched, event)
+
+    def _has_active_popup(self):
+        from PySide6.QtWidgets import QApplication
+        for widget in QApplication.topLevelWidgets():
+            if widget.isModal() and widget.isVisible():
+                return True
+        return False
 
     def region_rect(self, index: int | None = None) -> QRectF:
         if index is None:

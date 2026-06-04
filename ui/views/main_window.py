@@ -15,23 +15,13 @@ class _TitleBar(QFrame):
         self._drag_pos = None
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint()
-            event.accept()
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.LeftButton and self._drag_pos is not None:
-            delta = event.globalPosition().toPoint() - self._drag_pos
-            self._drag_pos = event.globalPosition().toPoint()
-            w = self.window()
-            if w:
-                w.move(w.pos() + delta)
-            event.accept()
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._drag_pos = None
-            event.accept()
+        super().mouseReleaseEvent(event)
 
 
 def build_main_window_ui(gui):
@@ -118,6 +108,9 @@ def _build_header_bar(gui):
     gui.exit_project_action.triggered.connect(gui.exit_to_launcher)
     gui.settings_action = more_menu.addAction("Settings")
     gui.settings_action.triggered.connect(gui.open_model_settings_dialog)
+    more_menu.addSeparator()
+    gui.normalizer_dict_action = more_menu.addAction("Normalizer Dictionary")
+    gui.normalizer_dict_action.triggered.connect(gui.open_normalizer_dict_dialog)
 
     gui.more_actions_btn.setMenu(more_menu)
     layout.addWidget(gui.more_actions_btn)

@@ -230,6 +230,23 @@ class ResourceDownloadService:
         except Exception:
             return ""
 
+    def _vietdict_status(self) -> str:
+        import csv
+        custom_dir = models_path("vietnormalizer")
+        if not os.path.isdir(custom_dir):
+            return "missing"
+        csv_files = [f for f in os.listdir(custom_dir) if f.endswith(".csv") and not f.startswith("_")]
+        if not csv_files:
+            return "missing"
+        total_entries = 0
+        for fname in csv_files:
+            try:
+                with open(os.path.join(custom_dir, fname), encoding="utf-8", newline="") as f:
+                    total_entries += sum(1 for _ in csv.DictReader(f))
+            except Exception:
+                pass
+        return f"installed ({total_entries} entries)" if total_entries > 0 else "missing"
+
     def _ocr_model_status(self) -> str:
         models_dir = self._ocr_model_dir()
         if not models_dir:
@@ -283,6 +300,14 @@ class ResourceDownloadService:
                 "target_dir": models_path("sensevoice"),
                 "description": "Multilingual SenseVoice model for CPU-based speech recognition. ~50MB download.",
             },
+            {
+                "id": "vietnormalizer:dict",
+                "name": "Vietnamese Normalizer Dictionary",
+                "kind": "vietdict",
+                "status": self._vietdict_status(),
+                "target_dir": models_path("vietnormalizer"),
+                "description": "Custom acronym/non-Vietnamese word mappings. Place .csv files here to override built-in normalizer rules.",
+            },
         ]
 
         piper_entries = self._piper_voice_entries()
@@ -335,6 +360,9 @@ class ResourceDownloadService:
             return os.path.exists(model_path) and os.path.exists(config_path)
         if resource_id == "cuda:ort":
             return self._cuda_ort_dll_status() == "installed"
+        if resource_id == "vietnormalizer:dict":
+            status = self._vietdict_status()
+            return status != "missing"
         return False
 
     def _find_voice_entry(self, voice_id: str) -> dict | None:

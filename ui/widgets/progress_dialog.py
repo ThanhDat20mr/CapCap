@@ -157,8 +157,13 @@ class StepWidget(QFrame):
         self.indicator.setStyleSheet(f"background-color: rgba(0, 229, 255, {alpha}); border-radius: 5px;")
 
 class PipelineProgressDialog(QDialog):
+    stop_requested = None
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        from PySide6.QtCore import Signal
+        self.stop_requested = Signal()
+        self._stopped = False
         self.setWindowTitle("CapCap AI Pipeline")
         self.setFixedSize(580, 700)
         # Do not force the progress dialog above QMessageBox/other dialogs.
@@ -275,7 +280,31 @@ class PipelineProgressDialog(QDialog):
             }
         """)
         self.dismiss_btn.clicked.connect(self.hide)
-        layout.addWidget(self.dismiss_btn)
+
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setFixedHeight(34)
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5a1a1a;
+                color: #ff6b6b;
+                border: 1px solid #8b2a2a;
+                border-radius: 10px;
+                font-weight: 700;
+                padding: 6px 16px;
+            }
+            QPushButton:hover {
+                background-color: #7a2828;
+                color: #ff8888;
+            }
+        """)
+        self.stop_btn.clicked.connect(self._on_stop)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addWidget(self.stop_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(self.dismiss_btn)
+        layout.addLayout(btn_row)
 
     def closeEvent(self, event):
         self.hide()
@@ -318,6 +347,7 @@ class PipelineProgressDialog(QDialog):
             self.steps[step_id].set_status("skipped")
 
     def set_completed(self):
+        self.stop_btn.hide()
         for step_id in self.step_order:
             widget = self.steps.get(step_id)
             if widget is None:
@@ -347,6 +377,14 @@ class PipelineProgressDialog(QDialog):
             mins = elapsed // 60
             secs = elapsed % 60
             self.total_time_label.setText(f"Total time: {mins:02d}:{secs:02d}")
+
+    def _on_stop(self):
+        self._stopped = True
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setText("Stopping...")
+        self.footer.setText("Stopping pipeline...")
+        self.footer.setStyleSheet("color: #FF6B6B; font-weight: bold; font-size: 14px; margin-top: 15px;")
+        self.stop_requested.emit()
 
     # Drag support for frameless window
     def mousePressEvent(self, event):

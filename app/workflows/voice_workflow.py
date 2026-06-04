@@ -1564,6 +1564,12 @@ class VoiceWorkflow:
         workflow_started = time.perf_counter()
         state = self._load_state(project_state_path)
         self._mark_started(state, with_background=bool(background_path))
+        try:
+            import tts_processor
+            tts_processor._VIETNAMESE_NORMALIZER = None
+            tts_processor._VIETNAMESE_NORMALIZER_DATA_DIR = ""
+        except Exception:
+            pass
         audio_mode_key = str(audio_handling_mode or "fast").strip().lower()
         print(f"[Voice Workflow] Audio handling mode: {audio_mode_key}")
         os.makedirs(output_dir, exist_ok=True)

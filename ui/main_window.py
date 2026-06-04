@@ -1484,6 +1484,192 @@ class VideoTranslatorGUI(QMainWindow):
         self._refresh_resource_manager_dialog(dialog)
         worker.start()
 
+    def _open_vietdict_folder(self, resource_id: str):
+        from runtime_paths import models_path
+        dir_path = models_path("vietnormalizer")
+        os.makedirs(dir_path, exist_ok=True)
+        os.startfile(dir_path)
+
+    def _create_vietdict_template(self, resource_id: str):
+        import csv
+        from runtime_paths import models_path
+        dir_path = models_path("vietnormalizer")
+        os.makedirs(dir_path, exist_ok=True)
+
+        acronyms_path = os.path.join(dir_path, "acronyms.csv")
+        if not os.path.exists(acronyms_path):
+            with open(acronyms_path, "w", encoding="utf-8", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["acronym", "transliteration"])
+                w.writerow(["vtv", "vô tuyến truyền hình"])
+                w.writerow(["CLB", "câu lạc bộ"])
+            print(f"[VietDict] Created template: {acronyms_path}")
+
+        nonvn_path = os.path.join(dir_path, "non-vietnamese-words.csv")
+        if not os.path.exists(nonvn_path):
+            with open(nonvn_path, "w", encoding="utf-8", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["original", "transliteration"])
+                w.writerow(["iPhone", "ai phôn"])
+            print(f"[VietDict] Created template: {nonvn_path}")
+
+        os.startfile(dir_path)
+        dialog = getattr(self, "_resource_download_dialog", None)
+        if dialog is not None:
+            self._refresh_resource_manager_dialog(dialog)
+
+    def _vietdict_add_row(self, table):
+        from PySide6.QtWidgets import QTableWidgetItem
+        r = table.rowCount()
+        table.insertRow(r)
+        table.setItem(r, 0, QTableWidgetItem(""))
+        table.setItem(r, 1, QTableWidgetItem(""))
+        table.scrollToBottom()
+
+    def _vietdict_remove_row(self, table):
+        rows = sorted({idx.row() for idx in table.selectedIndexes()}, reverse=True)
+        for r in rows:
+            table.removeRow(r)
+
+    def open_normalizer_dict_dialog(self):
+        import csv
+        from pathlib import Path
+        from runtime_paths import models_path
+        custom_dir = Path(models_path("vietnormalizer"))
+        custom_dir.mkdir(parents=True, exist_ok=True)
+
+        DICT_DEFS = [
+            {"label": "Acronyms", "file": "acronyms.csv", "col_a": "acronym", "col_b": "transliteration"},
+            {"label": "Non-Vietnamese Words", "file": "non-vietnamese-words.csv", "col_a": "original", "col_b": "transliteration"},
+        ]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Normalizer Dictionary")
+        dialog.setModal(True)
+        dialog.resize(700, 520)
+        dialog.setStyleSheet("""
+            QDialog { background-color: #0f1724; }
+            QLabel { color: #d7e3f4; background-color: transparent; }
+            QTableWidget { background-color: #132033; color: #d7e3f4; gridline-color: #2f4868;
+                border: 1px solid #2f4868; border-radius: 8px; font-size: 13px; }
+            QTableWidget::item:selected { background-color: #29405d; color: #f8fbff; }
+            QHeaderView::section { background-color: #1a2c44; color: #8ad7ff; border: none;
+                padding: 6px 8px; font-weight: 700; font-size: 12px; }
+            QPushButton { background-color: #22344d; color: #f8fbff; border: 1px solid #34506f;
+                border-radius: 8px; padding: 6px 16px; font-weight: 600; }
+            QPushButton:hover { background-color: #29405d; }
+            QPushButton#dangerBtn { background-color: #5a1a1a; border-color: #8b2a2a; }
+            QPushButton#dangerBtn:hover { background-color: #7a2828; }
+            QPushButton#primaryBtn { background-color: #1a4a5a; border-color: #2a6a8b; }
+            QPushButton#primaryBtn:hover { background-color: #1e5a6e; }
+            QTabWidget::pane { border: 1px solid #2f4868; background-color: #0f1724; border-radius: 8px; }
+            QTabBar::tab { background-color: #1a2c44; color: #9fb3ca; padding: 8px 20px; border: 1px solid #2f4868;
+                border-bottom: none; border-top-left-radius: 8px; border-top-right-radius: 8px; margin-right: 2px; }
+            QTabBar::tab:selected { background-color: #132033; color: #8ad7ff; }
+        """)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("Manage Normalizer Dictionary", dialog)
+        title.setStyleSheet("color: #f8fbff; font-size: 16px; font-weight: 700;")
+        layout.addWidget(title)
+
+        hint = QLabel(f"Dictionary location: {custom_dir}\nEntries here override built-in normalizer rules.", dialog)
+        hint.setStyleSheet("color: #9fb3ca; font-size: 12px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        from PySide6.QtWidgets import QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView
+        tabs = QTabWidget(dialog)
+        layout.addWidget(tabs, 1)
+
+        tables = {}
+
+        for defn in DICT_DEFS:
+            tab = QWidget(dialog)
+            tab_layout = QVBoxLayout(tab)
+            tab_layout.setContentsMargins(8, 8, 8, 8)
+            tab_layout.setSpacing(8)
+
+            table = QTableWidget(0, 2, dialog)
+            table.setHorizontalHeaderLabels([defn["col_a"].title(), defn["col_b"].title()])
+            table.horizontalHeader().setStretchLastSection(True)
+            table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
+            table.setSelectionBehavior(QTableWidget.SelectRows)
+            table.verticalHeader().setVisible(False)
+            tab_layout.addWidget(table, 1)
+
+            btn_row = QHBoxLayout()
+            btn_row.setSpacing(8)
+            add_btn = QPushButton("+ Add Row", dialog)
+            remove_btn = QPushButton("Remove Selected", dialog)
+            remove_btn.setObjectName("dangerBtn")
+            btn_row.addWidget(add_btn)
+            btn_row.addWidget(remove_btn)
+            btn_row.addStretch()
+            tab_layout.addLayout(btn_row)
+
+            add_btn.clicked.connect(lambda _checked=False, t=table: self._vietdict_add_row(t))
+            remove_btn.clicked.connect(lambda _checked=False, t=table: self._vietdict_remove_row(t))
+
+            tables[defn["file"]] = {"table": table, "defn": defn}
+            tabs.addTab(tab, defn["label"])
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(8)
+        bottom_row.addStretch()
+
+        save_btn = QPushButton("Save All", dialog)
+        save_btn.setObjectName("primaryBtn")
+        close_btn = QPushButton("Close", dialog)
+        close_btn.clicked.connect(dialog.accept)
+        bottom_row.addWidget(save_btn)
+        bottom_row.addWidget(close_btn)
+        layout.addLayout(bottom_row)
+
+        def _load_all():
+            for fname, meta in tables.items():
+                file_path = custom_dir / fname
+                table = meta["table"]
+                table.setRowCount(0)
+                if file_path.exists():
+                    try:
+                        with open(file_path, encoding="utf-8", newline="") as f:
+                            reader = csv.DictReader(f)
+                            for row in reader:
+                                a = (row.get(meta["defn"]["col_a"]) or "").strip()
+                                b = (row.get(meta["defn"]["col_b"]) or "").strip()
+                                if a or b:
+                                    r = table.rowCount()
+                                    table.insertRow(r)
+                                    table.setItem(r, 0, QTableWidgetItem(a))
+                                    table.setItem(r, 1, QTableWidgetItem(b))
+                    except Exception:
+                        pass
+
+        def _save_all():
+            for fname, meta in tables.items():
+                file_path = custom_dir / fname
+                table = meta["table"]
+                rows = []
+                for r in range(table.rowCount()):
+                    a = (table.item(r, 0).text() if table.item(r, 0) else "").strip()
+                    b = (table.item(r, 1).text() if table.item(r, 1) else "").strip()
+                    if a or b:
+                        rows.append({meta["defn"]["col_a"]: a, meta["defn"]["col_b"]: b})
+                with open(file_path, "w", encoding="utf-8", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=[meta["defn"]["col_a"], meta["defn"]["col_b"]])
+                    w.writeheader()
+                    w.writerows(rows)
+            print("[VietDict] Dictionary saved.")
+
+        save_btn.clicked.connect(_save_all)
+
+        _load_all()
+        dialog.exec()
+
     def _missing_resource_entries(self, *, include_whisper: bool = False, include_voice: bool = False) -> list[tuple[str, str]]:
         service = self._resource_service()
         missing: list[tuple[str, str]] = []
@@ -1617,7 +1803,6 @@ class VideoTranslatorGUI(QMainWindow):
             button = QPushButton("Download", dialog)
             button.clicked.connect(lambda _checked=False, rid=item["id"], dlg=dialog: self._start_resource_download(dlg, rid))
             card_layout.addWidget(button)
-
             target_layout.addWidget(card)
             dialog._resource_rows[item["id"]] = {
                 "item": item,
@@ -3433,6 +3618,9 @@ class VideoTranslatorGUI(QMainWindow):
         return "vi"
 
     def is_ai_polish_enabled(self):
+        provider = (os.getenv("AI_POLISHER_PROVIDER") or "gemini").strip().lower()
+        if provider == "local":
+            return True
         return getattr(self, "translator_ai_cb", None) and self.translator_ai_cb.isChecked()
 
     def is_skip_translation(self):
@@ -6724,14 +6912,17 @@ class VideoTranslatorGUI(QMainWindow):
                 }
             elif new_provider == "local":
                 if new_local_model_tier == "high":
-                    new_model = "models/ai/gemma-4-E4B-it-Q4_K_M.gguf"
+                    new_model = models_path("ai", "gemma-4-E4B-it-Q4_K_M.gguf")
                 else:
-                    new_model = "models/ai/Hy-MT2-1.8B-Q4_K_M.gguf"
+                    new_model = models_path("ai", "Hy-MT2-1.8B-Q4_K_M.gguf")
+                custom_model = model_edit.text().strip()
+                if custom_model and models_path("ai") not in custom_model:
+                    custom_model = models_path("ai", os.path.basename(custom_model))
                 updates = {
                     "AI_POLISHER_PROVIDER": "local",
                     "OPENAI_PROVIDER": "local",
                     "LOCAL_TRANSLATOR_MODEL_TIER": new_local_model_tier,
-                    "LOCAL_TRANSLATOR_MODEL_PATH": new_model,
+                    "LOCAL_TRANSLATOR_MODEL_PATH": custom_model or new_model,
                 }
             else:
                 updates = {

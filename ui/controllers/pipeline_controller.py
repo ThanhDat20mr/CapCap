@@ -22,6 +22,23 @@ class PipelineController:
         self.progress_dialog = None
         self.whisper_download_dialog = None
 
+    def _on_pipeline_stop(self):
+        worker = getattr(self.gui, "prepare_workflow_thread", None)
+        if worker and worker.isRunning():
+            worker.terminate()
+            worker.wait(2000)
+        if hasattr(self.gui, "_pipeline_active"):
+            self.gui._pipeline_active = False
+        if hasattr(self.gui, "run_all_btn"):
+            self.gui.run_all_btn.setEnabled(True)
+            self.gui.run_all_btn.setText("Generate")
+        if self.progress_dialog:
+            self.progress_dialog.fail_step(self.progress_dialog.step_order[-1] if self.progress_dialog.step_order else "ai_process")
+            self.progress_dialog.footer.setText("Pipeline stopped by user.")
+            self.progress_dialog.footer.setStyleSheet("color: #FF6B6B; font-weight: bold; font-size: 14px; margin-top: 15px;")
+            self.progress_dialog.stop_btn.hide()
+        self.gui.log("[Pipeline] Stopped by user.")
+
     
     def _whisper_model_cached(self, model_name: str) -> bool:
         try:
@@ -118,7 +135,8 @@ class PipelineController:
             
         self._setup_progress_dialog(includes_separation=requires_separation)
         self.progress_dialog.start_step("ai_process")
-        
+        self.progress_dialog.stop_requested.connect(self._on_pipeline_stop)
+
         # Start the background worker
         self.gui.log(f"[Pipeline] Starting prepare workflow for: {video_path}")
         transcription_engine = os.getenv("TRANSCRIPTION_ENGINE", "whisper")

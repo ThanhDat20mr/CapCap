@@ -18,6 +18,7 @@ if os.path.exists(ENV_PATH):
 _PIPER_VOICE_CACHE = {}
 _PIPER_VOICE_CACHE_LOCK = threading.Lock()
 _VIETNAMESE_NORMALIZER = None
+_VIETNAMESE_NORMALIZER_DATA_DIR = ""
 
 
 def _voice_catalog_path() -> str:
@@ -125,13 +126,72 @@ def normalize_text_for_tts(text: str, *, provider: str = "piper") -> str:
     if str(provider or "").strip().lower() != "piper":
         return value
 
-    global _VIETNAMESE_NORMALIZER
+    global _VIETNAMESE_NORMALIZER, _VIETNAMESE_NORMALIZER_DATA_DIR
     if _VIETNAMESE_NORMALIZER is None:
         try:
             from vietnormalizer.normalizer import VietnameseNormalizer
-            _VIETNAMESE_NORMALIZER = VietnameseNormalizer()
+            from vietnormalizer import normalizer as vn_mod
+            from pathlib import Path
+            import csv
+
+            custom_dir = Path(models_path("vietnormalizer"))
+            combined_dir = custom_dir / "_combined"
+            default_data = Path(vn_mod.__file__).parent / "data"
+
+            if custom_dir.exists() and any(custom_dir.glob("*.csv")):
+                combined_dir.mkdir(parents=True, exist_ok=True)
+                dict_files = [
+                    ("acronyms.csv", "acronym"),
+                    ("non-vietnamese-words.csv", "original"),
+                ]
+                for filename, key_col in dict_files:
+                    target = combined_dir / filename
+                    src = default_data / filename
+                    entries = {}
+                    if src.exists():
+                        with open(src, encoding="utf-8", newline="") as f:
+                            for row in csv.DictReader(f):
+                                k = (row.get(key_col) or "").strip().lower()
+                                if k:
+                                    entries[k] = row
+                    custom_file = custom_dir / filename
+                    if custom_file.exists():
+                        with open(custom_file, encoding="utf-8", newline="") as f:
+                            for row in csv.DictReader(f):
+                                k = (row.get(key_col) or "").strip().lower()
+                                if k:
+                                    entries[k] = row
+                    rows = list(entries.values())
+                    rows.sort(key=lambda r: len(r.get(key_col, "") or ""), reverse=True)
+                    fieldnames = list(rows[0].keys()) if rows else [key_col, "transliteration"]
+                    with open(target, "w", encoding="utf-8", newline="") as f:
+                        w = csv.DictWriter(f, fieldnames=fieldnames)
+                        w.writeheader()
+                        w.writerows(rows)
+
+                _VIETNAMESE_NORMALIZER = VietnameseNormalizer(data_dir=str(combined_dir))
+
+                custom_acro = custom_dir / "acronyms.csv"
+                if custom_acro.exists():
+                    with open(custom_acro, encoding="utf-8", newline="") as f:
+                        for row in csv.DictReader(f):
+                            k = (row.get("acronym") or "").strip().lower()
+                            v = (row.get("transliteration") or "").strip()
+                            if k and v:
+                                _VIETNAMESE_NORMALIZER.non_vietnamese_map[k] = v
+                    _VIETNAMESE_NORMALIZER.non_vietnamese_map = dict(
+                        sorted(_VIETNAMESE_NORMALIZER.non_vietnamese_map.items(), key=lambda x: len(x[0]), reverse=True)
+                    )
+                    _VIETNAMESE_NORMALIZER._build_replacement_dict()
+
+                _VIETNAMESE_NORMALIZER_DATA_DIR = str(custom_dir)
+                print(f"[TTS] Vietnamese normalizer loaded with custom dicts from: {custom_dir}")
+            else:
+                _VIETNAMESE_NORMALIZER = VietnameseNormalizer()
+                _VIETNAMESE_NORMALIZER_DATA_DIR = ""
         except Exception:
             _VIETNAMESE_NORMALIZER = False
+            _VIETNAMESE_NORMALIZER_DATA_DIR = ""
     if _VIETNAMESE_NORMALIZER is False:
         return value
     try:

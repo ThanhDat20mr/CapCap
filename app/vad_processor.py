@@ -130,15 +130,7 @@ def get_speech_segments(audio: np.ndarray, sr: int = 16000) -> list[dict]:
         if not segments:
             return _fallback_segment(audio, sr)
 
-        merged = []
-        for seg in segments:
-            if merged and seg["start"] - merged[-1]["end"] < 0.01:
-                merged[-1]["end"] = max(merged[-1]["end"], seg["end"])
-            else:
-                merged.append(seg)
-
-        print(f"[VAD] merged: {len(merged)}")
-        return merged if merged else _fallback_segment(audio, sr)
+        return segments
 
     except Exception:
         traceback.print_exc()

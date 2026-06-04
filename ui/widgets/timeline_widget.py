@@ -625,21 +625,6 @@ class TimelineWidget(QGraphicsView):
             segment_index = self._segment_index_at_scene_pos(scene_pos)
             if segment_index >= 0:
                 self.segmentSelected.emit(segment_index)
-                if self._in_audio_lane(scene_pos):
-                    resize_edge = self._resize_edge_at_scene_pos(scene_pos, segment_index)
-                    self._drag_mode = resize_edge or "move"
-                    self._drag_segment_index = segment_index
-                    segment = self.segments[segment_index]
-                    self.segmentTimingEditStarted.emit(
-                        segment_index,
-                        float(segment.get("start", 0.0)),
-                        float(segment.get("end", 0.0)),
-                    )
-                    self._drag_feedback_start = float(segment.get("start", 0.0))
-                    self._drag_feedback_end = float(segment.get("end", 0.0))
-                    cursor_seconds = max(0.0, float(scene_pos.x()) / self.pixels_per_second)
-                    self._drag_offset_seconds = cursor_seconds - float(segment.get("start", 0.0))
-                    return
             self.is_moving_playhead = True
             self.handle_seek(event.position().toPoint())
         super().mousePressEvent(event)
