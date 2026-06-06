@@ -399,7 +399,12 @@ class PreviewController:
             return
 
         mode = self.gui.get_output_mode_key()
-        out_dir = self.gui.final_output_folder_edit.text().strip() or os.path.join(self.gui.workspace_root, "output")
+        state = getattr(self.gui, "current_project_state", None)
+        project_root = getattr(state, "project_root", "") if state else ""
+        if project_root:
+            out_dir = os.path.join(project_root, "export")
+        else:
+            out_dir = self.gui.final_output_folder_edit.text().strip() or os.path.join(self.gui.workspace_root, "output")
         os.makedirs(out_dir, exist_ok=True)
 
         translated_srt_path = self.gui.last_translated_srt_path

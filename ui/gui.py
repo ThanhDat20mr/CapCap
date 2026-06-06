@@ -39,6 +39,12 @@ def _bootstrap_env(app_root: str) -> None:
 
 
 if __name__ == "__main__":
+    if os.getenv("CAPCAP_RUN_REMOTE_API_SERVER") == "1":
+        from remote_api_server import main as remote_api_server_main
+
+        remote_api_server_main()
+        sys.exit(0)
+
     app_root = _app_root()
     _bootstrap_env(app_root)
     os.chdir(app_root)

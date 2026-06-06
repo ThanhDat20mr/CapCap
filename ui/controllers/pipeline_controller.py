@@ -139,13 +139,15 @@ class PipelineController:
         env["CAPCAP_REMOTE_API_PORT"] = str(port)
         env["CAPCAP_REMOTE_API_TOKEN"] = token
         env["CAPCAP_REMOTE_PRELOAD_MODELS"] = "0"
+        env["CAPCAP_RUN_REMOTE_API_SERVER"] = "1" if getattr(sys, "frozen", False) else "0"
 
         creationflags = 0
         if os.name == "nt":
             creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
+        worker_command = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, server_script]
         self.local_worker_process = subprocess.Popen(
-            [sys.executable, server_script],
+            worker_command,
             cwd=app_root,
             env=env,
             stdin=subprocess.DEVNULL,

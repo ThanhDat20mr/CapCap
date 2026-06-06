@@ -1675,10 +1675,15 @@ class VideoTranslatorGUI(QMainWindow):
         missing: list[tuple[str, str]] = []
 
         if include_whisper and not is_remote_profile():
-            model_name = self.get_whisper_model_name()
-            resource_id = f"whisper:{model_name}"
-            if not service.is_resource_installed(resource_id):
-                missing.append((resource_id, f"Whisper {model_name.title()} model"))
+            engine = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower()
+            if engine == "sensevoice":
+                if not service.is_resource_installed("sensevoice:model"):
+                    missing.append(("sensevoice:model", "SenseVoice model"))
+            else:
+                model_name = self.get_whisper_model_name()
+                resource_id = f"whisper:{model_name}"
+                if not service.is_resource_installed(resource_id):
+                    missing.append((resource_id, f"Whisper {model_name.title()} model"))
 
         if include_voice and not is_remote_profile():
             voice_name = self.get_active_voice_name()
@@ -6931,7 +6936,15 @@ class VideoTranslatorGUI(QMainWindow):
                 "CAPCAP_REMOTE_API_TOKEN": remote_token_edit.text().strip(),
             }
         else:
-            if new_provider == "ollama":
+            if new_provider == "google":
+                updates = {
+                    "AI_POLISHER_PROVIDER": "google",
+                    "OPENAI_PROVIDER": "google",
+                    "OPENAI_API_KEY": "",
+                    "OPENAI_MODEL": "",
+                    "OPENAI_BASE_URL": "",
+                }
+            elif new_provider == "ollama":
                 updates = {
                     "AI_POLISHER_PROVIDER": "gemini",
                     "OPENAI_PROVIDER": "ollama",
