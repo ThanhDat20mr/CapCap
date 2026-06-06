@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect, QPushButton, QProgressDialog
 )
 import time
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 
 
@@ -157,12 +157,10 @@ class StepWidget(QFrame):
         self.indicator.setStyleSheet(f"background-color: rgba(0, 229, 255, {alpha}); border-radius: 5px;")
 
 class PipelineProgressDialog(QDialog):
-    stop_requested = None
+    stop_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        from PySide6.QtCore import Signal
-        self.stop_requested = Signal()
         self._stopped = False
         self.setWindowTitle("CapCap AI Pipeline")
         self.setFixedSize(580, 700)
@@ -301,8 +299,9 @@ class PipelineProgressDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
+        self.stop_btn.setMinimumWidth(200)
+        self.dismiss_btn.setMinimumWidth(200)
         btn_row.addWidget(self.stop_btn)
-        btn_row.addStretch()
         btn_row.addWidget(self.dismiss_btn)
         layout.addLayout(btn_row)
 
@@ -377,6 +376,7 @@ class PipelineProgressDialog(QDialog):
             mins = elapsed // 60
             secs = elapsed % 60
             self.total_time_label.setText(f"Total time: {mins:02d}:{secs:02d}")
+            self.workflow_start_time = None
 
     def _on_stop(self):
         self._stopped = True
@@ -385,6 +385,17 @@ class PipelineProgressDialog(QDialog):
         self.footer.setText("Stopping pipeline...")
         self.footer.setStyleSheet("color: #FF6B6B; font-weight: bold; font-size: 14px; margin-top: 15px;")
         self.stop_requested.emit()
+
+    def cancel_stop_request(self):
+        self._stopped = False
+        self.stop_btn.setEnabled(True)
+        self.stop_btn.setText("Stop")
+        self.footer.setText("Pipeline is still running.")
+        self.footer.setStyleSheet("color: #888; font-size: 13px; margin-top: 15px;")
+
+    def hideEvent(self, event):
+        self._stop_total_timer()
+        super().hideEvent(event)
 
     # Drag support for frameless window
     def mousePressEvent(self, event):

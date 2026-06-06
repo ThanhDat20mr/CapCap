@@ -32,6 +32,19 @@ from whisper_processor import transcribe_audio
 
 
 WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_STATUS_LOCK = threading.Lock()
+_STATUS = {"phase": "idle", "message": "Idle"}
+
+
+def _set_status(phase: str, message: str = "") -> None:
+    with _STATUS_LOCK:
+        _STATUS["phase"] = str(phase or "idle")
+        _STATUS["message"] = str(message or _STATUS["phase"])
+
+
+def _get_status() -> dict:
+    with _STATUS_LOCK:
+        return dict(_STATUS)
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status_code: int, payload: dict) -> None:
@@ -58,6 +71,12 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
                         "profile": os.getenv("CAPCAP_RUNTIME_PROFILE", "local"),
                     },
                 )
+                return
+            if self.path == "/v1/status":
+                self._check_auth()
+                payload = _get_status()
+                payload["ok"] = True
+                _json_response(self, 200, payload)
                 return
             _json_response(self, 404, {"ok": False, "error": "Not found"})
         except Exception as exc:
@@ -240,19 +259,43 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             raise ValueError("video_path required and must exist.")
         workspace_root = str(payload.get("workspace_root", "") or "").strip() or WORKSPACE_ROOT
         runtime = WorkflowRuntime(workspace_root)
-        state = runtime.run_prepare(
-            video_path,
-            source_language=str(payload.get("source_language", "auto") or "auto"),
-            target_language=str(payload.get("target_language", "vi") or "vi"),
-            mode=str(payload.get("mode", "subtitle") or "subtitle"),
-            audio_handling_mode=str(payload.get("audio_handling_mode", "fast") or "fast"),
-            translator_ai=bool(payload.get("translator_ai", True)),
-            optimize_subtitles=False,
-            translator_style=str(payload.get("translator_style", "") or ""),
-            whisper_model_name=str(payload.get("whisper_model_name", "base") or "base"),
-        )
-        _unload_whisper()
-        return {"ok": True, "project_state_path": runtime.project_state_path(state)}
+        _set_status("prepare", "Preparing project")
+
+        def step_callback(step_id):
+            labels = {
+                "prepare": "Preparing project",
+                "extract_audio": "Extracting audio",
+                "extraction": "Extracting audio",
+                "separation": "Separating vocals",
+                "transcription": "Transcribing audio",
+                "translation": "Translating subtitles",
+            }
+            _set_status(step_id, labels.get(str(step_id or ""), str(step_id or "Processing")))
+
+        try:
+            state = runtime.run_prepare(
+                video_path,
+                source_language=str(payload.get("source_language", "auto") or "auto"),
+                target_language=str(payload.get("target_language", "vi") or "vi"),
+                mode=str(payload.get("mode", "subtitle") or "subtitle"),
+                audio_handling_mode=str(payload.get("audio_handling_mode", "fast") or "fast"),
+                translator_ai=bool(payload.get("translator_ai", True)),
+                optimize_subtitles=False,
+                translator_style=str(payload.get("translator_style", "") or ""),
+                whisper_model_name=str(payload.get("whisper_model_name", "base") or "base"),
+                transcription_engine=str(payload.get("transcription_engine", "whisper") or "whisper"),
+                skip_translation=bool(payload.get("skip_translation", False)),
+                prefetch_voice_name=str(payload.get("prefetch_voice_name", "") or ""),
+                prefetch_voice_speed=float(payload.get("prefetch_voice_speed", 1.0) or 1.0),
+                step_callback=step_callback,
+            )
+            _set_status("done", "Prepare complete")
+            return {"ok": True, "project_state_path": runtime.project_state_path(state)}
+        except Exception:
+            _set_status("error", "Prepare failed")
+            raise
+        finally:
+            _unload_models()
 
     def _handle_voice(self, payload: dict) -> dict:
         _log(f"[Remote API] _handle_voice called. voice_name={payload.get('voice_name')}, segments_count={len(payload.get('segments', []))}")
@@ -331,15 +374,17 @@ def main() -> None:
     except Exception:
         port = 8765
 
-    _log("[Remote API] Pre-loading Whisper model on main thread...")
-    model_name = os.getenv("CAPCAP_WHISPER_MODEL_NAME", "base")
-    try:
-        from whisper_processor import _load_whisper_model
-        _load_whisper_model(model_name)
-        _log(f"[Remote API] Whisper '{model_name}' loaded on main thread.")
-    except Exception as exc:
-        _log(f"[Remote API] Whisper pre-load failed (will load on demand): {exc}")
-        _log("[Remote API] Tip: set CAPCAP_WHISPER_DEVICE=cpu in .env if CUDA hangs in thread.")
+    preload_models = str(os.getenv("CAPCAP_REMOTE_PRELOAD_MODELS", "1") or "1").strip().lower()
+    if preload_models not in {"0", "false", "no", "off"}:
+        _log("[Remote API] Pre-loading Whisper model on main thread...")
+        model_name = os.getenv("CAPCAP_WHISPER_MODEL_NAME", "base")
+        try:
+            from whisper_processor import _load_whisper_model
+            _load_whisper_model(model_name)
+            _log(f"[Remote API] Whisper '{model_name}' loaded on main thread.")
+        except Exception as exc:
+            _log(f"[Remote API] Whisper pre-load failed (will load on demand): {exc}")
+            _log("[Remote API] Tip: set CAPCAP_WHISPER_DEVICE=cpu in .env if CUDA hangs in thread.")
 
     server = ThreadingHTTPServer((host, port), CapCapRemoteHandler)
     _log(f"[Remote API] Listening on http://{host}:{port}")

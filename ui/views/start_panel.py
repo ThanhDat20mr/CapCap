@@ -484,7 +484,7 @@ def build_start_group(gui, left_layout):
     gui.subtitle_preset_youtube_radio = QRadioButton("YouTube")
     gui.subtitle_preset_minimal_radio = QRadioButton("Short")
     gui.subtitle_preset_custom_radio = QRadioButton("Custom")
-    gui.subtitle_preset_tiktok_radio.setChecked(True)
+    gui.subtitle_preset_youtube_radio.setChecked(True)
     gui.subtitle_preset_group = QButtonGroup(gui)
     gui.subtitle_preset_group.addButton(gui.subtitle_preset_tiktok_radio)
     gui.subtitle_preset_group.addButton(gui.subtitle_preset_youtube_radio)
@@ -589,7 +589,7 @@ def build_start_group(gui, left_layout):
     subtitle_layout.addWidget(position_card)
     gui.subtitle_position_card = position_card
 
-    timing_card, timing_layout = _build_collapsible_section("Animation & Timing", start_expanded=False)
+    timing_card, timing_layout = _build_collapsible_section("Animation", start_expanded=False)
     timing_wrapper = QFrame()
     timing_wrapper.setObjectName("statusCard")
     timing_wrapper_layout = QVBoxLayout(timing_wrapper)

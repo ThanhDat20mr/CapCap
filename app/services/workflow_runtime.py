@@ -29,6 +29,10 @@ class WorkflowRuntime:
         optimize_subtitles: bool = False,
         translator_style: str = "",
         whisper_model_name: str = "ggml-base.bin",
+        transcription_engine: str = "whisper",
+        skip_translation: bool = False,
+        prefetch_voice_name: str = "",
+        prefetch_voice_speed: float = 1.0,
         step_callback=None,
     ) -> str:
         if step_callback: step_callback("prepare")
@@ -42,6 +46,10 @@ class WorkflowRuntime:
             optimize_subtitles=optimize_subtitles,
             translator_style=translator_style,
             whisper_model_name=whisper_model_name,
+            transcription_engine=transcription_engine,
+            skip_translation=skip_translation,
+            prefetch_voice_name=prefetch_voice_name,
+            prefetch_voice_speed=prefetch_voice_speed,
             step_callback=step_callback,
         )
 

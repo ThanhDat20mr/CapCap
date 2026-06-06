@@ -227,6 +227,8 @@ def _connect_ui_signals(gui):
     gui.translated_text.textChanged.connect(gui.schedule_live_subtitle_preview_refresh)
     gui.translated_text.textChanged.connect(gui.sync_segment_editor_from_hidden_text)
     gui.show_original_subtitle_cb.toggled.connect(gui.toggle_original_subtitle_visibility)
+    if hasattr(gui, "anchor_subtitle_inspector_cb"):
+        gui.anchor_subtitle_inspector_cb.toggled.connect(gui.on_anchor_subtitle_inspector_toggled)
     gui.subtitle_font_combo.currentTextChanged.connect(gui.update_subtitle_preview_style)
     gui.subtitle_font_size_spin.valueChanged.connect(gui.update_subtitle_preview_style)
     gui.subtitle_animation_combo.currentTextChanged.connect(gui.on_subtitle_animation_changed)
@@ -331,7 +333,7 @@ def _initialize_ui_state(gui):
     gui.on_output_mode_changed(gui.output_mode_combo.currentText())
     gui.update_project_header()
     gui.refresh_ui_state()
-    gui.set_subtitle_inspector_details_visible(False, sync=False)
+    gui.set_subtitle_inspector_details_visible(gui.is_subtitle_inspector_anchored(), sync=False)
     gui.sync_segment_editor_rows()
     gui.set_controls_panel_visible(False)
 

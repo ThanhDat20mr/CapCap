@@ -43,6 +43,8 @@ def save_user_settings(gui):
     s.setValue("use_existing_audio", gui.use_existing_audio_radio.isChecked())
     s.setValue("keep_audio", gui.keep_audio_cb.isChecked())
     s.setValue("keep_timeline", gui.keep_timeline_cb.isChecked())
+    if hasattr(gui, "anchor_subtitle_inspector_cb"):
+        s.setValue("anchor_subtitle_inspector", gui.anchor_subtitle_inspector_cb.isChecked())
     s.setValue("auto_preview_frame", gui.auto_preview_frame_cb.isChecked())
     s.setValue("subtitle_font", gui.subtitle_font_combo.currentText())
     s.setValue("subtitle_size", gui.subtitle_font_size_spin.value())
@@ -155,6 +157,10 @@ def load_user_settings(gui):
         gui.use_free_voice_radio.setChecked(True)
     gui.keep_audio_cb.setChecked(str(s.value("keep_audio", gui.keep_audio_cb.isChecked())).lower() == "true")
     gui.keep_timeline_cb.setChecked(str(s.value("keep_timeline", gui.keep_timeline_cb.isChecked())).lower() == "true")
+    if hasattr(gui, "anchor_subtitle_inspector_cb"):
+        gui.anchor_subtitle_inspector_cb.setChecked(
+            str(s.value("anchor_subtitle_inspector", gui.anchor_subtitle_inspector_cb.isChecked())).lower() == "true"
+        )
     auto_preview_enabled = str(s.value("auto_preview_frame", "false")).lower() == "true"
     if gui.auto_preview_frame_cb.isHidden():
         auto_preview_enabled = False
@@ -164,15 +170,17 @@ def load_user_settings(gui):
     gui.subtitle_font_size_spin.setValue(int(s.value("subtitle_size", gui.subtitle_font_size_spin.value())))
     gui.subtitle_animation_combo.setCurrentText(s.value("subtitle_animation", gui.subtitle_animation_combo.currentText()))
     gui.subtitle_animation_time_spin.setValue(float(s.value("subtitle_animation_time", gui.subtitle_animation_time_spin.value())))
-    preset_key = str(s.value("subtitle_preset", gui.get_selected_subtitle_preset())).lower()
+    preset_key = str(s.value("subtitle_preset", "youtube")).lower()
     if preset_key == "youtube":
         gui.subtitle_preset_youtube_radio.setChecked(True)
     elif preset_key == "minimal":
         gui.subtitle_preset_minimal_radio.setChecked(True)
     elif preset_key == "custom" and getattr(gui, "subtitle_preset_custom_radio", None):
         gui.subtitle_preset_custom_radio.setChecked(True)
-    else:
+    elif preset_key == "tiktok":
         gui.subtitle_preset_tiktok_radio.setChecked(True)
+    else:
+        gui.subtitle_preset_youtube_radio.setChecked(True)
     position_mode = str(s.value("subtitle_position_mode", gui.subtitle_position_mode_combo.currentData() or "anchor")).strip().lower()
     position_mode_index = gui.subtitle_position_mode_combo.findData(position_mode)
     if position_mode_index >= 0:

@@ -827,9 +827,13 @@ def build_preview_panel(gui):
 
     gui.show_original_subtitle_cb = QCheckBox("Show original")
     gui.show_original_subtitle_cb.setChecked(True)
+    gui.anchor_subtitle_inspector_cb = QCheckBox("Anchor Subtitle Inspector")
+    gui.anchor_subtitle_inspector_cb.setChecked(False)
+    gui.anchor_subtitle_inspector_cb.setToolTip("Keep Subtitle Inspector open while previewing and editing.")
     inspector_toggle_row = QHBoxLayout()
     inspector_toggle_row.setSpacing(10)
     inspector_toggle_row.addWidget(gui.show_original_subtitle_cb)
+    inspector_toggle_row.addWidget(gui.anchor_subtitle_inspector_cb)
     inspector_toggle_row.addStretch(1)
     inspector_layout.addLayout(inspector_toggle_row)
 

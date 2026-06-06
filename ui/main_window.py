@@ -634,7 +634,7 @@ class VideoTranslatorGUI(QMainWindow):
             return "youtube"
         if getattr(self, "subtitle_preset_minimal_radio", None) and self.subtitle_preset_minimal_radio.isChecked():
             return "minimal"
-        return "tiktok"
+        return "youtube"
 
     def get_subtitle_preset_config(self, preset_key: str | None = None) -> dict:
         preset = (preset_key or self.get_selected_subtitle_preset()).lower()
@@ -4793,6 +4793,10 @@ class VideoTranslatorGUI(QMainWindow):
         widget = getattr(self, "subtitle_inspector_details_widget", None)
         return bool(widget and widget.isVisible())
 
+    def is_subtitle_inspector_anchored(self) -> bool:
+        checkbox = getattr(self, "anchor_subtitle_inspector_cb", None)
+        return bool(checkbox and checkbox.isChecked())
+
     def _sync_subtitle_inspector_shell_width(self, visible: bool):
         shell = getattr(self, "subtitle_inspector_shell", None)
         card = getattr(self, "subtitle_inspector_card", None)
@@ -4844,6 +4848,8 @@ class VideoTranslatorGUI(QMainWindow):
             self.rewrite_selected_segment_btn.setEnabled(True)
 
     def set_subtitle_inspector_details_visible(self, visible: bool, *, sync: bool = True):
+        if not visible and self.is_subtitle_inspector_anchored():
+            visible = True
         card = getattr(self, "subtitle_inspector_card", None)
         widget = getattr(self, "subtitle_inspector_details_widget", None)
         if card is not None:
@@ -4861,6 +4867,11 @@ class VideoTranslatorGUI(QMainWindow):
             else:
                 toggle_btn.setText("Hide details" if visible else "Show details")
             toggle_btn.blockSignals(False)
+        anchor_cb = getattr(self, "anchor_subtitle_inspector_cb", None)
+        if anchor_cb is not None:
+            toggle_btn = getattr(self, "subtitle_inspector_toggle_btn", None)
+            if toggle_btn is not None:
+                toggle_btn.setEnabled(not self.is_subtitle_inspector_anchored())
         if not visible:
             self._clear_segment_editor_rows()
             self._segment_editor_rows = []
@@ -4875,6 +4886,15 @@ class VideoTranslatorGUI(QMainWindow):
 
     def toggle_subtitle_inspector_details(self, checked: bool):
         self.set_subtitle_inspector_details_visible(bool(checked), sync=bool(checked))
+
+    def on_anchor_subtitle_inspector_toggled(self, checked: bool):
+        if checked:
+            self.set_subtitle_inspector_details_visible(True, sync=True)
+        else:
+            toggle_btn = getattr(self, "subtitle_inspector_toggle_btn", None)
+            if toggle_btn is not None:
+                toggle_btn.setEnabled(True)
+        self.save_user_settings()
 
     def _sync_selected_segment_to_playback_position(self):
         if not hasattr(self, "media_player"):
