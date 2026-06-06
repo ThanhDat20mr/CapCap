@@ -6,6 +6,7 @@ import subprocess
 import time
 
 from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from runtime_paths import bin_path
@@ -421,16 +422,6 @@ class PreviewController:
         target_width, target_height = self._resolve_output_canvas_dimensions(video_path)
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
         video_name = os.path.splitext(os.path.basename(video_path))[0]
-        if self.gui.last_preview_video_path and self.gui.last_preview_video_path != self.gui.last_exact_preview_5s_path:
-            try:
-                # Release file handle so Windows can delete the previous preview clip.
-                self.gui.media_player.stop()
-                self.gui.media_player.setSource(QUrl())
-            except Exception:
-                pass
-            self.gui.cleanup_file_if_exists(self.gui.last_preview_video_path)
-            self.gui.processed_artifacts.pop("preview_video", None)
-            self.gui.last_preview_video_path = ""
         self.gui.cleanup_file_if_exists(self.gui.last_exact_preview_5s_path)
         preview_output = os.path.join(out_dir, f"{video_name}_preview5s_{int(time.time())}.mp4")
         preview_srt_path = ""
@@ -443,7 +434,7 @@ class PreviewController:
                 return
 
         self.gui.preview_5s_btn.setEnabled(False)
-        self.gui.preview_5s_btn.setText("Rendering 5s...")
+        self.gui.preview_5s_btn.setText("Exporting 5s...")
         self.gui.progress_bar.setValue(92)
 
         try:
@@ -644,7 +635,7 @@ class PreviewController:
             self.gui.ensure_media_backend_ready()
         self.gui._suspend_live_subtitle_sync = False
         self.gui.preview_5s_btn.setEnabled(True)
-        self.gui.preview_5s_btn.setText("Open 5-Second Preview")
+        self.gui.preview_5s_btn.setText("Export 5-Second Preview")
         self.gui.progress_bar.setValue(100)
 
         if error:
@@ -653,25 +644,12 @@ class PreviewController:
 
         if output_path and os.path.exists(output_path):
             self.gui.last_exact_preview_5s_path = output_path
-            self.gui.last_preview_video_path = output_path
             self.gui.processed_artifacts["preview_video_5s"] = output_path
-            self.gui.refresh_video_dimensions(output_path)
-            self.gui.media_player.setSource(QUrl.fromLocalFile(output_path))
-            self.gui.media_player.setPosition(0)
-            self.gui._preview_video_has_burned_subtitles = self.gui.get_output_mode_key() in ("subtitle", "both")
-            if getattr(self.gui, "_preview_video_has_burned_subtitles", False):
-                self.gui.media_player.clear_subtitle()
-            else:
-                self.gui.sync_live_subtitle_preview()
-            self.gui.sync_preview_audio_track_to_output(apply_to_player=False)
-            self.gui._refresh_preview_audio_controls()
-            # QMessageBox.information(
-            #     self.gui,
-            #     "Preview Ready",
-            #     "Loaded the styled preview into the player.\nPress Play to review the karaoke render, then click 'Export Final Video' when you are satisfied.",
-            # )
-            self.gui._pipeline_done()
-            self.gui.apply_segments_to_timeline()
+            if hasattr(self.gui, "update_project_artifact"):
+                self.gui.update_project_artifact("preview_video_5s", output_path)
+            self.gui.log(f"[Preview] 5-second preview exported: {output_path}")
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(output_path)):
+                self.gui.open_folder(os.path.dirname(output_path))
             self.gui.refresh_ui_state()
 
     def preview_video(self):

@@ -48,11 +48,6 @@ class StepWidget(QFrame):
                 font-size: 12px;
                 font-weight: 500;
             }
-            #stepTime {
-                color: #888;
-                font-family: 'Consolas', monospace;
-                font-size: 11px;
-            }
         """)
         
         layout = QHBoxLayout(self)
@@ -76,18 +71,6 @@ class StepWidget(QFrame):
         self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(self.status_label)
         
-        self.time_label = QLabel("00:00")
-        self.time_label.setObjectName("stepTime")
-        self.time_label.setFixedWidth(50)
-        self.time_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        layout.addWidget(self.time_label)
-        
-        self.timer = QTimer(self)
-        self.timer.setInterval(1000)
-        self.timer.timeout.connect(self._update_time)
-        self.elapsed = 0
-        self.start_time = None
-        
         # Pulse animation for running state
         self.pulse_timer = QTimer(self)
         self.pulse_timer.setInterval(800)
@@ -101,55 +84,28 @@ class StepWidget(QFrame):
             self.status_label.setStyleSheet("color: #00E5FF;")
             self.indicator.setStyleSheet("background-color: #00E5FF; border: 2px solid rgba(0, 229, 255, 50);")
             self.setStyleSheet(self.styleSheet() + "#stepWidget { border: 1px solid rgba(0, 229, 255, 80); background-color: rgba(0, 229, 255, 15); }")
-            self.start_time = time.monotonic()
-            self.start_timer()
             self.pulse_timer.start()
         elif status == "done":
             self.status_label.setText("Completed")
             self.status_label.setStyleSheet("color: #00FF88;")
             self.indicator.setStyleSheet("background-color: #00FF88;")
             self.setStyleSheet(self.styleSheet().replace("rgba(0, 229, 255, 80)", "rgba(0, 255, 136, 40)").replace("rgba(0, 229, 255, 15)", "rgba(0, 0, 0, 180)"))
-            self.stop_timer()
             self.pulse_timer.stop()
         elif status == "failed":
             self.status_label.setText("Failed")
             self.status_label.setStyleSheet("color: #FF4444;")
             self.indicator.setStyleSheet("background-color: #FF4444;")
             self.setStyleSheet(self.styleSheet() + "#stepWidget { border: 1px solid rgba(255, 68, 68, 80); background-color: rgba(255, 68, 68, 15); }")
-            self.stop_timer()
             self.pulse_timer.stop()
         elif status == "skipped":
             self.status_label.setText("Skipped")
             self.status_label.setStyleSheet("color: #f5c86a;")
             self.indicator.setStyleSheet("background-color: #f5c86a;")
-            self.stop_timer()
             self.pulse_timer.stop()
         else:
             self.status_label.setText("Pending")
             self.status_label.setStyleSheet("color: #666;")
             self.indicator.setStyleSheet("background-color: #444; border-radius: 5px;")
-            self.start_time = None
-            self.elapsed = 0
-            self.time_label.setText("00:00")
-
-    def start_timer(self):
-        self._update_time()
-        self.timer.start()
-        
-    def stop_timer(self):
-        if self.start_time is not None:
-            self.elapsed = int(time.monotonic() - self.start_time)
-            mins = self.elapsed // 60
-            secs = self.elapsed % 60
-            self.time_label.setText(f"{mins:02d}:{secs:02d}")
-            self.start_time = None
-        self.timer.stop()
-
-    def _update_time(self):
-        self.elapsed = int(time.monotonic() - self.start_time) if self.start_time is not None else self.elapsed + 1
-        mins = self.elapsed // 60
-        secs = self.elapsed % 60
-        self.time_label.setText(f"{mins:02d}:{secs:02d}")
         
     def _toggle_pulse(self):
         self._pulse_state = not self._pulse_state

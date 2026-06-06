@@ -3866,8 +3866,8 @@ class VideoTranslatorGUI(QMainWindow):
         export_font_size = int(self.subtitle_font_size_spin.value())
         preview_font_size = max(10, int(round(export_font_size * (preview_h / source_h))))
         font_name = self.subtitle_font_combo.currentText().strip() or preset.get("font_name", "Segoe UI")
-        bg_alpha = float(preset.get("background_alpha", 0.0))
-        bg_color = QColor(preset.get("background_color", "#000000"))
+        bg_alpha = float(self.subtitle_bg_alpha_spin.value()) if hasattr(self, "subtitle_bg_alpha_spin") else float(preset.get("background_alpha", 0.0))
+        bg_color = QColor(getattr(self, "subtitle_background_color_hex", preset.get("background_color", "#000000")))
         bg_color.setAlpha(max(0, min(255, int(round(bg_alpha * 255.0)))))
         item.set_style(
             font_name=font_name or preset.get("font_name", "Segoe UI"),
@@ -3933,8 +3933,10 @@ class VideoTranslatorGUI(QMainWindow):
             "shadow_color": self._hex_to_ass_color(preset.get("shadow_color", "#000000")),
             "shadow_depth": float(preset.get("shadow_depth", 1)),
             "shadow_alpha": float(preset.get("shadow_alpha", 0.0)),
-            "background_color": self._hex_to_ass_color(preset.get("background_color", "#000000")),
-            "background_alpha": float(preset.get("background_alpha", 0.0)),
+            "background_color": self._hex_to_ass_color(
+                getattr(self, "subtitle_background_color_hex", preset.get("background_color", "#000000"))
+            ),
+            "background_alpha": float(self.subtitle_bg_alpha_spin.value()) if hasattr(self, "subtitle_bg_alpha_spin") else float(preset.get("background_alpha", 0.0)),
             "animation": self.subtitle_animation_combo.currentText().strip() or preset.get("animation", "Static"),
             "animation_duration": float(self.subtitle_animation_time_spin.value()),
             "karaoke_timing_mode": str(self.subtitle_karaoke_timing_combo.currentData() or "vietnamese"),
@@ -3998,6 +4000,11 @@ class VideoTranslatorGUI(QMainWindow):
                 self.subtitle_font_size_spin.setValue(int(preset.get("font_size", self.subtitle_font_size_spin.value())))
                 self.subtitle_animation_combo.setCurrentText(preset.get("animation", "Static"))
                 self.subtitle_background_cb.setChecked(bool(preset.get("background_box", False)))
+                self.subtitle_background_color_hex = str(
+                    preset.get("background_color", getattr(self, "subtitle_background_color_hex", "#000000"))
+                ).upper()
+                if hasattr(self, "subtitle_background_color_btn"):
+                    self.subtitle_background_color_btn.setText(self.subtitle_background_color_hex)
                 if hasattr(self, "subtitle_outline_cb"):
                     self.subtitle_outline_cb.setChecked(bool(preset.get("outline_width", 0) > 0))
                 if hasattr(self, "subtitle_bg_alpha_spin"):
@@ -6216,6 +6223,8 @@ class VideoTranslatorGUI(QMainWindow):
         self.run_all_btn.setEnabled(v_ok and not self._pipeline_active)
         self.preview_frame_btn.setEnabled(v_ok and bool(self.get_active_segments()))
         self.preview_5s_btn.setEnabled(v_ok)
+        if hasattr(self, "preview_5s_action"):
+            self.preview_5s_action.setEnabled(v_ok)
         self.export_btn.setEnabled(can_export)
         if hasattr(self, "download_subtitle_action"):
             self.download_subtitle_action.setEnabled(bool(self.translated_text.toPlainText().strip()))

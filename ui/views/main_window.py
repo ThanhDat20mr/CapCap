@@ -101,6 +101,8 @@ def _build_header_bar(gui):
     gui.download_subtitle_action.triggered.connect(gui.download_subtitle)
     gui.download_original_action = more_menu.addAction("Original Script")
     gui.download_original_action.triggered.connect(gui.download_original_script)
+    gui.preview_5s_action = more_menu.addAction("Export 5-Second Preview")
+    gui.preview_5s_action.triggered.connect(gui.preview_five_seconds)
     more_menu.addSeparator()
     gui.clean_project_action = more_menu.addAction("Clean")
     gui.clean_project_action.triggered.connect(gui.clean_current_project)

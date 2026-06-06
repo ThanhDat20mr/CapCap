@@ -193,7 +193,7 @@ def build_start_group(gui, left_layout):
     gui.export_btn.setObjectName("mainActionBtn")
     gui.export_btn.clicked.connect(gui.export_final_video)
 
-    gui.preview_5s_btn = QPushButton("Open 5-Second Preview")
+    gui.preview_5s_btn = QPushButton("Export 5-Second Preview")
     gui.preview_5s_btn.clicked.connect(gui.preview_five_seconds)
     gui.preview_frame_btn = QPushButton("Open Large Frame Preview")
     gui.preview_frame_btn.clicked.connect(gui.preview_exact_frame)

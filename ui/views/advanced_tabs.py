@@ -76,6 +76,7 @@ def _build_audio_mix_controls(gui, advanced_layout):
 
     subtitle_card, subtitle_layout = _advanced_block("Subtitle")
     subtitle_layout.addWidget(gui.import_original_srt_btn)
+    subtitle_card.hide()
     advanced_layout.addWidget(subtitle_card)
 
     source_card, source_layout = _advanced_block("Audio Source")
@@ -173,6 +174,7 @@ def _build_hidden_runtime_widgets(gui):
     gui.vocal_sep_btn = QPushButton("Separate Voice and Background", gui)
     gui.transcribe_btn = QPushButton("Create Original Subtitle", gui)
     gui.import_original_srt_btn = QPushButton("Import Original Subtitle", gui)
+    gui.import_original_srt_btn.hide()
     gui.translate_btn = QPushButton("Translate to Vietnamese", gui)
 
     gui.bg_music_edit = QLineEdit(gui)

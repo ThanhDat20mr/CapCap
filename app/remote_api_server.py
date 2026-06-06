@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import os
 import tempfile
@@ -49,11 +50,21 @@ def _get_status() -> dict:
 
 def _json_response(handler: BaseHTTPRequestHandler, status_code: int, payload: dict) -> None:
     raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    handler.send_response(status_code)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(raw)))
-    handler.end_headers()
-    handler.wfile.write(raw)
+    try:
+        handler.send_response(status_code)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.end_headers()
+        handler.wfile.write(raw)
+    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, TimeoutError, OSError) as exc:
+        if isinstance(exc, OSError) and exc.errno not in {
+            errno.EPIPE,
+            errno.ECONNABORTED,
+            errno.ECONNRESET,
+            10053,
+            10054,
+        }:
+            raise
 
 
 class CapCapRemoteHandler(BaseHTTPRequestHandler):
