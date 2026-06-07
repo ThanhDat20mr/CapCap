@@ -176,6 +176,12 @@ class LauncherWindow(QDialog):
         self.selected_device = "cuda"
         self._thumbnail_dir = os.path.join(os.path.dirname(__file__), "..", "..", "temp", "launcher_thumbs")
 
+        from runtime_paths import asset_path
+        from PySide6.QtGui import QIcon
+        logo = asset_path("capcap.png")
+        if os.path.exists(logo):
+            self.setWindowIcon(QIcon(logo))
+
         self.setWindowTitle("CapCap - Video Translator")
         self.setMinimumSize(840, 540)
         self.setStyleSheet("""
@@ -303,6 +309,25 @@ class LauncherWindow(QDialog):
         """)
         self.split_btn.clicked.connect(self._on_split_video)
         header.addWidget(self.split_btn)
+
+        self.resource_btn = QPushButton("Manage Resources")
+        self.resource_btn.setMinimumHeight(44)
+        self.resource_btn.setMinimumWidth(150)
+        self.resource_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #22344d;
+                color: #8ad7ff;
+                font-weight: 600;
+                font-size: 13px;
+                border-radius: 8px;
+                border: 1px solid #34506f;
+            }
+            QPushButton:hover {
+                background-color: #29405d;
+            }
+        """)
+        self.resource_btn.clicked.connect(self._on_manage_resources)
+        header.addWidget(self.resource_btn)
         root.addLayout(header)
 
         self.section_label = QLabel("Recent Projects")
@@ -443,6 +468,10 @@ class LauncherWindow(QDialog):
         if path:
             self.selected_video = path
             self.accept()
+
+    def _on_manage_resources(self):
+        from views.resource_manager import open_resource_manager
+        open_resource_manager(parent=self)
 
     def _on_split_video(self):
         from PySide6.QtWidgets import QMessageBox, QProgressDialog, QInputDialog

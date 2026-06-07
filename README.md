@@ -143,13 +143,19 @@ Behavior note:
 | UI | PySide6 |
 | Video preview | libmpv / Qt Multimedia |
 | Workers | QThread |
-| Speech-to-text | faster-whisper (CT2, CUDA/CPU), SenseVoice (sherpa-onnx, CPU) |
-| Vocal separation | ONNX Runtime + UVR MDX-NET model |
+| Speech-to-text | faster-whisper (CTranslate2, CUDA/CPU), SenseVoice (sherpa-onnx, CPU) |
+| OCR subtitle extraction | RapidOCR (PP-OCRv4) via opencv-python-headless |
+| Voice activity detection | Silero VAD (sherpa-onnx) |
+| Vocal separation | ONNX Runtime + UVR MDX-NET model, Demucs (Hybrid Transformer, optional) |
 | Audio post-process | FFmpeg (afftdn denoise, loudnorm) |
-| Translation | OpenAI API / Ollama / llama-cpp-python (GGUF) |
+| Audio analysis | scipy, librosa, numpy, soundfile |
+| Translation | OpenAI API / Ollama / llama-cpp-python (GGUF) / Microsoft Translator |
 | Fallback translate | Google web translate (free, no key) |
 | TTS | Piper (local), edge-tts (online) |
-| Audio processing | FFmpeg, pydub, soundfile |
+| Vietnamese normalization | vietnormalizer |
+| Audio processing | FFmpeg, pydub |
+| Model downloads | huggingface_hub |
+| Configuration | python-dotenv |
 | Packaging | PyInstaller |
 
 ## Dependencies
@@ -159,9 +165,10 @@ requirements-base.txt:
   PySide6, requests, python-dotenv, pydub, python-mpv
 
 requirements-local.txt:
-  faster-whisper, onnxruntime, scipy, librosa, numpy, soundfile
+  faster-whisper, onnxruntime-gpu, scipy, librosa, numpy, soundfile
   edge-tts, piper-tts, vietnormalizer
   openai, llama-cpp-python, huggingface_hub
+  sherpa-onnx, rapidocr, opencv-python-headless
 ```
 
 ## Key Environment Variables (`.env`)
@@ -303,7 +310,15 @@ Apache License 2.0. See [LICENSE](./LICENSE).
 
 ## References
 
-- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — Speech-to-text
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — Speech-to-text (CTranslate2)
+- [SenseVoice](https://github.com/FunAudioLLM/SenseVoice) — Multilingual ASR model
+- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — ONNX ASR runtime (SenseVoice, Silero VAD)
+- [Silero VAD](https://github.com/snakers4/silero-vad) — Voice activity detection
+- [RapidOCR](https://github.com/RapidAI/RapidOCR) — OCR subtitle extraction (PP-OCRv4)
 - [UVR MDX-NET](https://github.com/TRvlvr/model_repo) — Vocal separation model
+- [Demucs](https://github.com/facebookresearch/demucs) — Alternative vocal separation (Hybrid Transformer)
 - [piper](https://github.com/rhasspy/piper) — Local text-to-speech
+- [edge-tts](https://github.com/rany2/edge-tts) — Online TTS fallback
+- [llama-cpp-python](https://github.com/abetlen/llama-cpp-python) — GGUF local translation
 - [vietnormalizer](https://github.com/nghimestudio/vietnormalizer) — Vietnamese text normalization
+- [PyInstaller](https://github.com/pyinstaller/pyinstaller) — Windows .exe packaging

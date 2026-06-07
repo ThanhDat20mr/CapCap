@@ -552,12 +552,6 @@ class VideoTranslatorGUI(QMainWindow):
         self.voice_preview_dialog = None
         self._voice_preview_row_buttons = {}
         self._tracked_progress_dialogs = []
-        self._resource_download_state = {
-            "resource_id": "",
-            "percent": 0,
-            "message": "",
-            "running": False,
-        }
         self._timeline_timing_undo_stack = []
         self._timeline_timing_redo_stack = []
         self._suspend_timeline_undo = False
@@ -630,6 +624,8 @@ class VideoTranslatorGUI(QMainWindow):
     def get_selected_subtitle_preset(self) -> str:
         if getattr(self, "subtitle_preset_custom_radio", None) and self.subtitle_preset_custom_radio.isChecked():
             return "custom"
+        if getattr(self, "subtitle_preset_tiktok_radio", None) and self.subtitle_preset_tiktok_radio.isChecked():
+            return "tiktok"
         if getattr(self, "subtitle_preset_youtube_radio", None) and self.subtitle_preset_youtube_radio.isChecked():
             return "youtube"
         if getattr(self, "subtitle_preset_minimal_radio", None) and self.subtitle_preset_minimal_radio.isChecked():
@@ -1360,130 +1356,6 @@ class VideoTranslatorGUI(QMainWindow):
     def _resource_service(self) -> ResourceDownloadService:
         return ResourceDownloadService(self.workspace_root)
 
-    def _refresh_resource_manager_dialog(self, dialog):
-        rows = getattr(dialog, "_resource_rows", {})
-        if not rows:
-            return
-        resources = {item["id"]: item for item in self._resource_service().list_resources()}
-        state = dict(getattr(self, "_resource_download_state", {}) or {})
-        active_resource_id = str(state.get("resource_id", "") or "")
-        worker_running = bool(state.get("running"))
-        for resource_id, row in rows.items():
-            item = resources.get(resource_id, row.get("item", {}))
-            row["item"] = item
-            status = str(item.get("status", "missing")).strip().lower()
-            target_dir = str(item.get("target_dir", "")).strip()
-            description = str(item.get("description", "")).strip()
-            status_label = row.get("status_label")
-            if status_label is not None:
-                lines = [status.title()]
-                if description:
-                    lines.append(description)
-                if target_dir:
-                    lines.append(target_dir)
-                status_label.setText("\n".join(lines))
-            button = row.get("button")
-            if button is not None:
-                if worker_running and resource_id == active_resource_id:
-                    button.setText("Downloading...")
-                    button.setEnabled(False)
-                elif status == "installed":
-                    button.setText("Installed")
-                    button.setEnabled(False)
-                elif resource_id == "voice:pack" and status == "partial":
-                    button.setText("Complete Pack")
-                    button.setEnabled(not worker_running)
-                else:
-                    button.setText("Download")
-                    button.setEnabled(not worker_running)
-
-        footer_text = str(state.get("message", "") or "").strip() or "Select a resource to download."
-        if hasattr(dialog, "_resource_footer"):
-            dialog._resource_footer.setText(footer_text)
-        if hasattr(dialog, "_resource_progress_bar"):
-            try:
-                value = int(state.get("percent", 0))
-            except Exception:
-                value = 0
-            if worker_running and value < 0:
-                dialog._resource_progress_bar.setRange(0, 0)
-            else:
-                dialog._resource_progress_bar.setRange(0, 100)
-                dialog._resource_progress_bar.setValue(max(0, min(100, value)))
-
-    def _on_resource_download_progress(self, percent: int, message: str):
-        try:
-            value = int(percent)
-        except Exception:
-            value = -1
-        self._resource_download_state = {
-            "resource_id": str(getattr(self, "_resource_download_resource_id", "") or ""),
-            "percent": value,
-            "message": str(message or "").strip() or "Downloading resource...",
-            "running": True,
-        }
-        dialog = getattr(self, "_resource_download_dialog", None)
-        if dialog is not None and hasattr(dialog, "_resource_footer"):
-            dialog._resource_footer.setText(str(message or "").strip() or "Downloading resource...")
-        if dialog is not None and hasattr(dialog, "_resource_progress_bar"):
-            if value < 0:
-                dialog._resource_progress_bar.setRange(0, 0)
-            else:
-                if dialog._resource_progress_bar.maximum() == 0:
-                    dialog._resource_progress_bar.setRange(0, 100)
-                dialog._resource_progress_bar.setValue(max(0, min(100, value)))
-
-    def _on_resource_download_finished(self, resource_id: str, error: str):
-        worker = getattr(self, "resource_download_worker", None)
-        self.resource_download_worker = None
-        self._resource_download_resource_id = ""
-        self._resource_download_state = {
-            "resource_id": "",
-            "percent": 0 if error else 100,
-            "message": "Download failed." if error else "Download completed.",
-            "running": False,
-        }
-        dialog = getattr(self, "_resource_download_dialog", None)
-        if dialog is not None and hasattr(dialog, "_resource_footer"):
-            dialog._resource_footer.setText("Download failed." if error else "Download completed.")
-            self._refresh_resource_manager_dialog(dialog)
-        if dialog is not None and hasattr(dialog, "_resource_progress_bar"):
-            dialog._resource_progress_bar.setRange(0, 100)
-            dialog._resource_progress_bar.setValue(100 if not error else 0)
-        if not error:
-            try:
-                self.load_voice_preview_catalog()
-            except Exception:
-                pass
-            self.refresh_ui_state()
-            return
-        self.show_error("Download Failed", f"Could not download resource '{resource_id}'.", error)
-
-    def _start_resource_download(self, dialog, resource_id: str):
-        worker = getattr(self, "resource_download_worker", None)
-        if worker is not None and worker.isRunning():
-            QMessageBox.information(self, "Download in Progress", "A resource is already downloading.")
-            return
-        self._resource_download_dialog = dialog
-        self._resource_download_resource_id = str(resource_id or "").strip()
-        self._resource_download_state = {
-            "resource_id": self._resource_download_resource_id,
-            "percent": 0,
-            "message": f"Preparing download: {resource_id}",
-            "running": True,
-        }
-        if hasattr(dialog, "_resource_footer"):
-            dialog._resource_footer.setText(f"Preparing download: {resource_id}")
-        if hasattr(dialog, "_resource_progress_bar"):
-            dialog._resource_progress_bar.setRange(0, 100)
-            dialog._resource_progress_bar.setValue(0)
-        worker = ResourceDownloadWorker(self.workspace_root, resource_id)
-        worker.progress.connect(self._on_resource_download_progress)
-        worker.finished.connect(self._on_resource_download_finished)
-        self.resource_download_worker = worker
-        self._refresh_resource_manager_dialog(dialog)
-        worker.start()
-
     def _open_vietdict_folder(self, resource_id: str):
         from runtime_paths import models_path
         dir_path = models_path("vietnormalizer")
@@ -1514,9 +1386,6 @@ class VideoTranslatorGUI(QMainWindow):
             print(f"[VietDict] Created template: {nonvn_path}")
 
         os.startfile(dir_path)
-        dialog = getattr(self, "_resource_download_dialog", None)
-        if dialog is not None:
-            self._refresh_resource_manager_dialog(dialog)
 
     def _vietdict_add_row(self, table):
         from PySide6.QtWidgets import QTableWidgetItem
@@ -1727,167 +1596,19 @@ class VideoTranslatorGUI(QMainWindow):
         return False
 
     def open_resource_manager_dialog(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Manage Resources")
-        dialog.setModal(True)
-        dialog.resize(760, 550)
-        dialog.setStyleSheet(
-            """
-            QDialog { background-color: #0f1724; }
-            QLabel { color: #d7e3f4; background-color: transparent; }
-            QLabel#resourceTitle { color: #f8fbff; font-size: 16px; font-weight: 700; }
-            QLabel#resourceHint { color: #9fb3ca; font-size: 12px; }
-            QWidget#resourceContent { background-color: transparent; }
-            QScrollArea { border: none; background-color: #0f1724; }
-            QFrame#resourceCard { background-color: #132033; border: 1px solid #2f4868; border-radius: 12px; }
-            QPushButton {
-                background-color: #22344d; color: #f8fbff; border: 1px solid #34506f;
-                border-radius: 10px; padding: 8px 16px; font-weight: 600; min-width: 84px;
-            }
-            QPushButton:hover { background-color: #29405d; }
-            QPushButton:disabled { color: #8ea3bb; background-color: #182636; border-color: #29405d; }
-            """
+        from views.resource_manager import open_resource_manager
+        open_resource_manager(
+            self.workspace_root,
+            parent=self,
+            on_finished=lambda: self._on_resource_download_complete(),
         )
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
 
-        title = QLabel("Download runtime resources from Hugging Face", dialog)
-        title.setObjectName("resourceTitle")
-        layout.addWidget(title)
-
-        hint = QLabel(
-            f"Whisper models use faster-whisper download/cache. Extra runtime files come from: {self._resource_service().repo_id} @ {self._resource_service().revision}\n"
-            "Use this screen to install Whisper, GPU runtime, and local Piper voices separately.",
-            dialog,
-        )
-        hint.setObjectName("resourceHint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        scroll = QScrollArea(dialog)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        layout.addWidget(scroll, 1)
-
-        content = QWidget(dialog)
-        content.setObjectName("resourceContent")
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(10)
-        scroll.setWidget(content)
-
-        dialog._resource_rows = {}
-        from PySide6.QtWidgets import QToolButton
-
-        resources = self._resource_service().list_resources()
-
-        cpu_items = [r for r in resources if r.get("kind") == "sensevoice"]
-        gpu_kinds = {"ai", "whisper", "cuda"}
-        gpu_items = [r for r in resources if r.get("kind") in gpu_kinds]
-        voice_items = [r for r in resources if r.get("kind") == "voice"]
-
-        def _add_card(item, target_layout):
-            card = QFrame(dialog)
-            card.setObjectName("resourceCard")
-            card_layout = QHBoxLayout(card)
-            card_layout.setContentsMargins(8, 8, 8, 8)
-            card_layout.setSpacing(8)
-
-            text_layout = QVBoxLayout()
-            name_label = QLabel(str(item.get("name", item.get("id", "Resource"))), dialog)
-            name_label.setStyleSheet("color: #f8fbff; font-weight: 700; background-color: transparent;")
-            status_label = QLabel("", dialog)
-            status_label.setObjectName("resourceHint")
-            status_label.setStyleSheet("color: #9fb3ca; background-color: transparent;")
-            status_label.setWordWrap(True)
-            text_layout.addWidget(name_label)
-            text_layout.addWidget(status_label)
-            card_layout.addLayout(text_layout, 1)
-
-            button = QPushButton("Download", dialog)
-            button.clicked.connect(lambda _checked=False, rid=item["id"], dlg=dialog: self._start_resource_download(dlg, rid))
-            card_layout.addWidget(button)
-            target_layout.addWidget(card)
-            dialog._resource_rows[item["id"]] = {
-                "item": item,
-                "status_label": status_label,
-                "button": button,
-            }
-
-        def _make_section(title, expanded):
-            wrapper = QFrame()
-            wrapper.setObjectName("statusCard")
-            wrapper.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            wrapper_layout = QVBoxLayout(wrapper)
-            wrapper_layout.setContentsMargins(8, 2, 8, 2)
-            wrapper_layout.setSpacing(0)
-
-            btn = QToolButton()
-            btn.setText(("▼ " if expanded else "▶ ") + title)
-            btn.setCheckable(True)
-            btn.setChecked(expanded)
-            btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
-            btn.setStyleSheet("QToolButton { text-align: left; font-weight: 700; color: #8ad7ff; border: none; padding: 2px 4px; margin: 0; }")
-
-            content = QWidget()
-            content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            content_layout = QVBoxLayout(content)
-            content_layout.setContentsMargins(0, 0, 0, 4)
-            content_layout.setSpacing(2)
-            content.setVisible(expanded)
-            if not expanded:
-                content.setMaximumHeight(0)
-
-            btn.toggled.connect(lambda c: (
-                btn.setText(("▼ " if c else "▶ ") + title),
-                content.setVisible(c),
-                content.setMaximumHeight(16777215 if c else 0),
-            ))
-            wrapper_layout.addWidget(btn)
-            wrapper_layout.addWidget(content)
-            return wrapper, content_layout
-
-        if cpu_items:
-            cpu_card, cpu_layout = _make_section("CPU Resource", expanded=True)
-            for item in cpu_items:
-                _add_card(item, cpu_layout)
-            content_layout.addWidget(cpu_card)
-
-        if gpu_items:
-            cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
-            print(f"[ResourceMgr] CAPCAP_DEVICE={os.getenv('CAPCAP_DEVICE')}, cpu_mode={cpu_mode}")
-            if not cpu_mode:
-                gpu_card, gpu_layout = _make_section("GPU Resource", expanded=False)
-                for item in gpu_items:
-                    _add_card(item, gpu_layout)
-                content_layout.addWidget(gpu_card)
-
-        for item in voice_items:
-            _add_card(item, content_layout)
-
-        content_layout.addStretch()
-
-        dialog._resource_footer = QLabel("Select a resource to download.", dialog)
-        dialog._resource_footer.setObjectName("resourceHint")
-        dialog._resource_footer.setWordWrap(True)
-        layout.addWidget(dialog._resource_footer)
-
-        dialog._resource_progress_bar = QProgressBar(dialog)
-        dialog._resource_progress_bar.setRange(0, 100)
-        dialog._resource_progress_bar.setValue(0)
-        dialog._resource_progress_bar.setTextVisible(True)
-        layout.addWidget(dialog._resource_progress_bar)
-
-        close_row = QHBoxLayout()
-        close_row.addStretch()
-        close_btn = QPushButton("Close", dialog)
-        close_btn.clicked.connect(dialog.accept)
-        close_row.addWidget(close_btn)
-        layout.addLayout(close_row)
-
-        self._refresh_resource_manager_dialog(dialog)
-        dialog.exec()
+    def _on_resource_download_complete(self):
+        try:
+            self.load_voice_preview_catalog()
+        except Exception:
+            pass
+        self.refresh_ui_state()
 
     def show_error(self, title: str, short_msg: str, details: str = ""):
         show_error_impl(self, title, short_msg, details)
@@ -7660,9 +7381,56 @@ class VideoTranslatorGUI(QMainWindow):
             except Exception as e:
                 self.log(f"[Clean] Failed: {e}")
         self._current_video_path = ""
+        self._terminate_workers()
         self.hide()
         QApplication.setQuitOnLastWindowClosed(False)
         QTimer.singleShot(100, _relaunch_launcher)
+
+    def _terminate_workers(self):
+        attrs = [
+            "extraction_thread",
+            "vocal_thread",
+            "voice_thread",
+            "_voice_sample_preview_thread",
+            "transcription_thread",
+            "translation_thread",
+            "rewrite_translation_thread",
+            "prepare_workflow_thread",
+            "export_thread",
+            "quick_preview_thread",
+            "frame_preview_thread",
+            "preview_thread",
+        ]
+        for name in attrs:
+            worker = getattr(self, name, None)
+            if worker is not None and getattr(worker, "isRunning", lambda: False)():
+                print(f"[Cleanup] Terminating worker: {name}")
+                try:
+                    worker.quit()
+                    worker.wait(3000)
+                    if worker.isRunning():
+                        worker.terminate()
+                        worker.wait(2000)
+                        print(f"[Cleanup] Force-terminated {name}")
+                    else:
+                        print(f"[Cleanup] Graceful quit {name}")
+                except Exception as e:
+                    print(f"[Cleanup] Failed to terminate {name}: {e}")
+        threads_dict = getattr(self, "_segment_preview_threads", None)
+        if threads_dict:
+            for idx, worker in list(threads_dict.items()):
+                try:
+                    if getattr(worker, "isRunning", lambda: False)():
+                        print(f"[Cleanup] Terminating segment preview thread idx={idx}")
+                        worker.quit()
+                        worker.wait(3000)
+                        if worker.isRunning():
+                            worker.terminate()
+                            worker.wait(2000)
+                except Exception as e:
+                    print(f"[Cleanup] Failed to terminate segment thread {idx}: {e}")
+            threads_dict.clear()
+        print("[Cleanup] Worker termination complete.")
 
     def closeEvent(self, event):
         try:
@@ -7670,6 +7438,7 @@ class VideoTranslatorGUI(QMainWindow):
                 self.video_view.clear_blur_region()
             self.save_user_settings()
             self.cleanup_temp_preview_files()
+            self._terminate_workers()
         finally:
             super().closeEvent(event)
 

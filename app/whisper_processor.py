@@ -176,6 +176,53 @@ def _detect_faster_whisper_runtime() -> dict:
     return runtime
 
 
+def _download_whisper_from_custom_repo(model_name: str) -> str | None:
+    target_dir = os.path.join(_faster_whisper_cache_dir(), model_name)
+    if os.path.isdir(target_dir) and any(
+        f for f in os.listdir(target_dir)
+        if f.endswith(".bin") and os.path.getsize(os.path.join(target_dir, f)) > 0
+    ):
+        return target_dir
+
+    repo_id = "Hacht/CapCapResource"
+    base_subfolder = f"faster_whisper/models--Systran--faster-whisper-{model_name}"
+
+    try:
+        from huggingface_hub import list_repo_files, hf_hub_download
+
+        repo_files = list_repo_files(repo_id)
+        snapshot_prefix = f"{base_subfolder}/snapshots/"
+
+        model_files = [f for f in repo_files if f.startswith(snapshot_prefix) and not f.endswith("/")]
+
+        if not model_files:
+            print(f"[Whisper] No model files found in {repo_id}/{snapshot_prefix}")
+            return None
+
+        os.makedirs(target_dir, exist_ok=True)
+
+        print(f"[Whisper] Downloading {model_name} ({len(model_files)} files) from {repo_id}...")
+        for repo_path in model_files:
+            filename = os.path.basename(repo_path)
+            dest = os.path.join(target_dir, filename)
+            if os.path.exists(dest) and os.path.getsize(dest) > 0:
+                continue
+            print(f"[Whisper]   {filename}")
+            cached_path = hf_hub_download(repo_id=repo_id, filename=repo_path)
+            shutil.copy2(cached_path, dest)
+
+        if any(
+            f for f in os.listdir(target_dir)
+            if f.endswith(".bin") and os.path.getsize(os.path.join(target_dir, f)) > 0
+        ):
+            print(f"[Whisper] {model_name} ready at {target_dir}")
+            return target_dir
+
+    except Exception as e:
+        print(f"[Whisper] Custom repo download failed for {model_name}: {e}")
+    return None
+
+
 def _load_whisper_model(model_name):
     _ensure_openmp_runtime_compat()
     _ensure_cuda_runtime_on_path()
@@ -192,6 +239,11 @@ def _load_whisper_model(model_name):
         "compute_type": runtime["compute_type"],
     }
 
+    original_name = str(model_name)
+    if not os.path.isdir(original_name):
+        local_dir = _download_whisper_from_custom_repo(original_name)
+        if local_dir:
+            model_name = local_dir
     if not os.path.isdir(str(model_name)):
         model_kwargs["download_root"] = _faster_whisper_cache_dir()
     cache_key = (str(model_name), str(model_kwargs["device"]), str(model_kwargs["compute_type"]))
