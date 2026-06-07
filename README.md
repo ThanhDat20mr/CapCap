@@ -10,16 +10,18 @@
 
 - **Fully offline capable** — all processing runs locally on your PC
 - **CPU-first** — works on any Windows PC without GPU
-- **GPU-accelerated** — plug in NVIDIA GPU, install driver only, get 3-5x faster
+- **GPU-accelerated** — plug in NVIDIA GPU, install driver only, get ~5x faster transcription
 - Three output modes: `subtitle only`, `voice only`, `subtitle + voice`
 - Speech-to-text: `faster-whisper` (CPU/GPU), `SenseVoice` (CPU, multilingual), or `RapidOCR` (video subtitle)
 - OCR subtitle region editor with separate show/hide control
-- AI translation — 3 providers:
+- AI translation — 5 providers:
   - **Local GGUF** (default, offline, CPU/GPU, `.gguf` model)
     - **Normal Quality AI Model** — `Hy-MT2-1.8B-Q4_K_M.gguf`
     - **High Quality AI Model** — `gemma-4-E4B-it-Q4_K_M.gguf`
   - **OpenAI** (Google AI Studio, cloud, free tier)
   - **Ollama** (local, no internet, `ollama pull qwen2.5:7b`)
+  - **Microsoft Translator** (Azure Cognitive Services, cloud)
+  - **OpenRouter** (generic OpenAI-compatible API)
 - Free Google translate fallback — no API key needed
 - Vietnamese voice with `Piper` (fully offline) or `edge-tts` (online)
 - Default bundled Piper voice: `ngochuyen`
@@ -39,12 +41,17 @@
 2. GPU mode: Whisper + local AI models use GPU acceleration
 3. CPU mode: SenseVoice (CPU-only ASR) + Google Translate by default
 4. Open Settings (More → Settings)
-5. Default translator provider is **Google Translate** (free, no key)
+5. Default translator provider is **Local (GGUF)** (offline, CPU/GPU)
 6. Optionally switch to:
    - **OpenAI** — get [free API key](https://aistudio.google.com/apikey), paste it
    - **Ollama** — install [Ollama](https://ollama.com), run `ollama pull qwen2.5:7b`
-   - **Local (GGUF)** — only available in GPU mode (needs good GPU)
+   - **Microsoft Translator** — get [Azure key](https://portal.azure.com), paste it
+   - **Google Translate** — free, no key (fallback quality)
 7. Save → Load video → click **Generate**
+
+If you use OCR mode, open **Settings → Manage Resources** and download **OCR Engine (RapidOCR PP-OCRv4)** first.
+
+No key? Google translate fallback works for free (slower, lower quality).
 
 ## Launcher
 
@@ -57,21 +64,6 @@ On startup, CapCap shows a launcher with:
 
 ### Video Duration Limit
 Videos over 2 hours are blocked from opening. Use the **Split Video** button to cut long videos into 2-hour segments first, then open individual parts.
-
-1. Open the launcher — select **CPU** or **GPU (Recommended)** mode
-2. GPU mode: Whisper + local AI models use GPU acceleration
-3. CPU mode: SenseVoice (CPU-only ASR) + Google Translate by default
-4. Open Settings (More → Settings)
-5. Default translator provider is **Google Translate** (free, no key)
-6. Optionally switch to:
-   - **OpenAI** — get [free API key](https://aistudio.google.com/apikey), paste it
-   - **Ollama** — install [Ollama](https://ollama.com), run `ollama pull qwen2.5:7b`
-   - **Local (GGUF)** — only available in GPU mode (needs good GPU)
-7. Save → Load video → click **Generate**
-
-If you use OCR mode, open **Settings → Manage Resources** and download **OCR Engine (RapidOCR PP-OCRv4)** first.
-
-No key? Google translate fallback works for free (slower, lower quality).
 
 ## CPU vs GPU
 
@@ -175,19 +167,27 @@ requirements-local.txt:
 
 | Variable | Default | Description |
 |---|---|---|
-| `AI_POLISHER_PROVIDER` | `local` | AI provider: `local` (GGUF), `gemini` (OpenAI API) |
-| `OPENAI_PROVIDER` | `local` | `local`, `openai`, or `ollama` |
-| `OPENAI_API_KEY` | (none) | API key (only needed for OpenAI provider) |
-| `OPENAI_MODEL` | (GGUF path) | Model name (OpenAI/Ollama only) |
-| `OPENAI_BASE_URL` | (empty for local) | API endpoint URL (OpenAI/Ollama only) |
-| `LOCAL_TRANSLATOR_MODEL_TIER` | `normal` | Local GGUF quality tier: `normal` (Hy-MT2) or `high` (Gemma 4) |
-| `LOCAL_TRANSLATOR_MODEL_PATH` | `models/ai/Hy-MT2...` | GGUF model path (local provider) |
-| `OCR_SUBTITLE_REGION` | `bottom` | OCR crop preset: `bottom` or `top` |
-| `OCR_SUBTITLE_RECT` | (empty) | Explicit normalized OCR crop rectangle from preview editor |
 | `TRANSCRIPTION_ENGINE` | `whisper` | ASR engine: `whisper`, `sensevoice`, or `ocr` |
 | `CAPCAP_DEVICE` | `cuda` | Processing mode set by launcher: `cuda` or `cpu` |
 | `CAPCAP_WHISPER_DEVICE` | (auto-detect) | Force `cpu` to avoid CUDA conflicts |
+| `AI_POLISHER_PROVIDER` | `local` | AI provider: `local` (GGUF), `gemini` (OpenAI API) |
+| `OPENAI_PROVIDER` | `local` | Translator source: `local`, `openai`, `ollama`, or `google` |
+| `OPENAI_API_KEY` | (none) | API key for OpenAI/Ollama/OpenRouter providers |
+| `OPENAI_MODEL` | `gemma-4-31b-it` | Model name for OpenAI/Ollama/OpenRouter |
+| `OPENAI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai/` | API endpoint URL |
+| `LOCAL_TRANSLATOR_MODEL_TIER` | `normal` | Local GGUF quality: `normal` (Hy-MT2) or `high` (Gemma 4) |
+| `LOCAL_TRANSLATOR_MODEL_PATH` | `models/ai/Hy-MT2-1.8B-Q4_K_M.gguf` | GGUF model path |
+| `LOCAL_TRANSLATOR_GPU_LAYERS` | `0` | GPU layers to offload (0 = CPU-only, -1 = all) |
+| `LOCAL_TRANSLATOR_N_CTX` | `8192` | GGUF context size |
+| `LOCAL_TRANSLATOR_N_THREADS` | `4` | CPU threads for GGUF inference |
+| `LOCAL_TRANSLATOR_MAX_TOKENS` | `2048` | Max output tokens |
+| `LOCAL_TRANSLATOR_TEMPERATURE` | `0.1` | Sampling temperature |
 | `TRANSLATOR_STYLE` | (empty) | Translation style hint: e.g. `natural`, `funny`, `formal` |
+| `OCR_SUBTITLE_REGION` | `bottom` | OCR crop preset: `bottom` or `top` |
+| `OCR_SUBTITLE_RECT` | (empty) | Explicit normalized OCR crop rectangle |
+| `MS_TRANSLATOR_KEY` | (empty) | Azure Translator API key |
+| `MS_TRANSLATOR_REGION` | (empty) | Azure region (e.g. `southeastasia`) |
+| `MS_TRANSLATOR_ENDPOINT` | `https://api.cognitive.microsofttranslator.com/` | Azure endpoint |
 | `CAPCAP_QUIET` | `false` | Set `true` to suppress server logs |
 | `CAPCAP_RUNTIME_PROFILE` | `local` | `local` or `remote` |
 | `CAPCAP_REMOTE_API_URL` | `http://127.0.0.1:8765` | Remote API address (remote mode) |
@@ -208,9 +208,13 @@ requirements-local.txt:
 ```bash
 git clone https://github.com/notepower2k1/CapCap.git
 cd CapCap
+python -m venv venv
+venv\Scripts\activate
 pip install -r requirements-local.txt
 python ui/gui.py
 ```
+
+> **CPU-only?** `onnxruntime-gpu` requires CUDA DLLs to import. Replace with `onnxruntime` in requirements-local.txt, or set `CUDA_VISIBLE_DEVICES=` to bypass.
 
 ### Remote Server
 ```bash
@@ -239,49 +243,96 @@ Performance notes:
 ```
 CapCap/
 ├── ui/
-│   ├── gui.py                    # Main app entry point
-│   ├── main_window.py            # Main window, controllers, signal wiring
-│   ├── controllers/              # Pipeline, preview, subtitle controllers
-│   ├── views/                    # UI layout builders
-│   │   ├── main_window.py        # Main window layout + signal connections
-│   │   ├── start_panel.py        # Left panel (media, voice, style, etc.)
-│   │   ├── preview_panel.py      # Right panel (preview + inspector + timeline)
-│   │   └── advanced_tabs.py      # Advanced settings tab
-│   ├── widgets/                  # Custom widgets (timeline, video, overlay)
-│   ├── worker_adapters/          # QThread worker classes
-│   ├── helpers/                  # SRT helpers, presentation helpers
-│   └── utils/                    # Icon, media, settings utilities
+│   ├── gui.py                        # Main app entry point
+│   ├── main_window.py                # Main window, controllers, signal wiring
+│   ├── controllers/                  # Pipeline, preview, subtitle controllers
+│   ├── views/                        # UI layout builders
+│   │   ├── launcher.py               # Startup launcher (CPU/GPU, recent projects)
+│   │   ├── main_window.py            # Main window layout + signal connections
+│   │   ├── start_panel.py            # Left panel (media, voice, style, etc.)
+│   │   ├── preview_panel.py          # Right panel (preview + inspector + timeline)
+│   │   ├── resource_manager.py       # Hugging Face resource download dialog
+│   │   └── advanced_tabs.py          # Advanced settings tab
+│   ├── widgets/                      # Custom widgets (timeline, video, overlay)
+│   │   ├── timeline_widget.py        # Multi-lane timeline with voice timing
+│   │   ├── video_view.py             # Video/audio playback via libmpv
+│   │   ├── mpv_video_view.py         # MPV-backed preview
+│   │   ├── subtitle_overlay.py       # Live subtitle overlay on video
+│   │   └── progress_dialog.py        # Progress dialog with file size display
+│   ├── worker_adapters/              # QThread worker classes
+│   │   ├── processing_workers.py     # Extraction, vocal, transcription, TTS workers
+│   │   └── preview_workers.py        # Frame preview, waveform workers
+│   ├── helpers/                      # SRT helpers, presentation helpers
+│   └── utils/                        # Icon, media, settings, file dialog utilities
 ├── app/
-│   ├── remote_api_server.py      # Backend API server (remote mode only)
-│   ├── workflows/                # Prepare, voice, export workflows
-│   │   ├── prepare_workflow.py   # Extract → separate → transcribe → translate
-│   │   ├── voice_workflow.py     # TTS + timing sync + retry logic
-│   │   └── export_workflow.py    # Subtitle burn, audio mux, final export
-│   ├── translation/              # Translation orchestrator + providers
-│   │   ├── orchestrator.py       # Main translation pipeline
+│   ├── remote_api_server.py          # Backend API server (remote mode only)
+│   ├── remote_api.py                 # Remote API client
+│   ├── runtime_paths.py              # Runtime path resolution (assets, models, bins)
+│   ├── runtime_profile.py            # Runtime profile (local/remote) management
+│   ├── workflows/                    # Prepare, voice, export workflows
+│   │   ├── prepare_workflow.py       # Extract → separate → transcribe → translate → TTS cache
+│   │   ├── voice_workflow.py         # TTS + timing sync + retry logic
+│   │   └── export_workflow.py        # Subtitle burn, audio mux, final export
+│   ├── translation/                  # Translation orchestrator + providers
+│   │   ├── orchestrator.py           # Main translation pipeline
+│   │   ├── models.py                 # Translation data models
+│   │   ├── srt_utils.py              # SRT parsing/formatting
 │   │   └── providers/
-│   │       ├── gemini_polisher.py    # OpenAI-compatible API provider
-│   │       ├── google_web_translator.py  # Free fallback translator
-│   │       └── local_polisher.py   # Local GGUF provider + output validation
-│   ├── ocr_processor.py          # RapidOCR subtitle extraction + OCR cleanup
-│   ├── whisper_processor.py      # Whisper ASR with CUDA/CPU fallback
-│   ├── sensevoice_processor.py   # SenseVoice ASR (sherpa-onnx, CPU, multilingual)
-│   ├── vad_processor.py          # Silero VAD speech segmentation
-│   ├── vocal_processor.py        # ONNX Runtime vocal separation
-│   ├── audio_mixer.py            # Voice track builder + time-stretch
-│   ├── engines/                  # Engine adapters (whisper, sensevoice, OCR, TTS, etc.)
-│   │   ├── sensevoice_adapter.py # SenseVoice ASR adapter
-│   │   └── ...
+│   │       ├── gemini_polisher.py        # OpenAI-compatible API (Google AI Studio, Ollama)
+│   │       ├── google_web_translator.py  # Free Google web translate fallback
+│   │       ├── local_polisher.py         # Local GGUF provider (CPU + GPU)
+│   │       ├── microsoft_translator.py   # Azure Cognitive Services Translator
+│   │       └── ai_polisher.py            # OpenRouter generic API provider
+│   ├── engines/                      # Engine adapters (whisper, sensevoice, OCR, TTS, etc.)
+│   │   ├── whisper_adapter.py        # Whisper ASR adapter
+│   │   ├── sensevoice_adapter.py     # SenseVoice ASR adapter
+│   │   ├── ocr_adapter.py            # RapidOCR adapter
+│   │   ├── tts_adapter.py            # TTS orchestration (Piper + edge-tts)
+│   │   ├── translator_adapter.py     # Translation provider router
+│   │   ├── demucs_adapter.py         # Demucs vocal separation (optional)
+│   │   ├── ffmpeg_adapter.py         # FFmpeg audio/video processing
+│   │   ├── audio_mix_adapter.py      # Voice track builder + time-stretch
+│   │   ├── subtitle_adapter.py       # Subtitle formatting/burning
+│   │   ├── preview_adapter.py        # Video preview processing
+│   │   └── remote_*.py               # Remote mode adapters (whisper, TTS, translator)
+│   ├── core/                         # Core domain models and state
+│   │   ├── models/                   # Segment, chunk data classes
+│   │   └── state/                    # Project state manager
+│   ├── services/                     # Business logic services
+│   │   ├── project_service.py        # Project CRUD, recent projects
+│   │   ├── segment_service.py        # Subtitle segment management
+│   │   ├── chunking_service.py       # Audio segmentation
+│   │   ├── engine_runtime.py         # Engine initialization and lifecycle
+│   │   ├── resource_download_service.py  # Hugging Face model downloads
+│   │   └── ...                       # + GPU scheduling, ASR merge, etc.
+│   ├── utils/                        # Voice preview utilities
+│   ├── ocr_processor.py             # RapidOCR subtitle extraction + cleanup
+│   ├── whisper_processor.py         # Whisper ASR with CUDA/CPU fallback
+│   ├── sensevoice_processor.py      # SenseVoice ASR (sherpa-onnx, CPU)
+│   ├── vad_processor.py             # Silero VAD speech segmentation
+│   ├── vocal_processor.py           # ONNX Runtime vocal separation
+│   ├── tts_processor.py             # TTS generation (Piper + edge-tts)
+│   ├── translator.py                # Translation orchestrator (legacy)
+│   ├── subtitle_builder.py          # Subtitle assembly
+│   ├── video_processor.py           # Video/audio post-processing
+│   └── preview_processor.py         # Preview asset generation
 ├── bin/
-│   ├── ffmpeg/                   # Bundled FFmpeg
-│   ├── mpv/                      # Bundled libmpv
-│   ├── cuda12_fw/                # CUDA runtime DLLs (optional GPU accel)
-│   └── UVR-MDX-NET-Inst_HQ_3.onnx  # Vocal separation model
+│   ├── ffmpeg/                       # Bundled FFmpeg (ffmpeg.exe, ffprobe.exe)
+│   ├── mpv/                          # Bundled libmpv-2.dll
+│   ├── cuda12_fw/                    # CUDA runtime DLLs (cuBLAS, cuDNN — driver only needed)
+│   ├── UVR-MDX-NET-Inst_HQ_3.onnx   # Vocal separation model (ONNX Runtime)
+│   └── silero_vad.onnx               # Silero VAD model (sherpa-onnx)
 ├── models/
-│   ├── sensevoice/                # SenseVoice ONNX model + tokens
-│   └── vietnormalizer/            # Custom dict CSV files (acronyms, non-VN words)
-├── .env                          # Environment configuration
-└── .env_example                  # Example environment config
+│   ├── sensevoice/                   # SenseVoice ONNX model + tokens
+│   ├── vietnormalizer/               # Custom dict CSV files (acronyms, non-VN words)
+│   ├── faster_whisper/               # CTranslate2 Whisper models (cached)
+│   ├── piper/                        # Piper voice models (12+ Vietnamese voices)
+│   └── ai/                           # GGUF translation models
+│       ├── Hy-MT2-1.8B-Q4_K_M.gguf      # Normal quality (default)
+│       └── gemma-4-E4B-it-Q4_K_M.gguf   # High quality
+├── assets/                           # App assets (icon, preview images)
+├── .env                              # Environment configuration
+└── .env_example                      # Example environment config
 ```
 
 ## CUDA / GPU
@@ -292,8 +343,9 @@ GPU can accelerate:
 - local GGUF translation (if the bundled `llama-cpp-python` build supports GPU offload)
 
 CPU-only paths in the current app:
+- SenseVoice ASR
 - Piper TTS
-- vocal separation in the current setup
+- vocal separation
 
 | What you need | Where to get |
 |---|---|
