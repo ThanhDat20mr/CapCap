@@ -253,10 +253,9 @@ def build_start_group(gui, left_layout):
     language_page, language_layout = _make_page("language")
     voice_page, voice_layout = _make_page("voice")
     style_page, style_layout = _make_page("style")
-    filter_page, filter_layout = _make_page("filter")
     advanced_page, advanced_layout = _make_page("advanced")
     gui.workflow_advanced_layout = advanced_layout
-    pages.extend([media_page, language_page, voice_page, style_page, filter_page, advanced_page])
+    pages.extend([media_page, language_page, voice_page, style_page, advanced_page])
 
     def _add_tab(label: str, page_index: int, page_key: str, checked: bool = False):
         btn = QPushButton(label)
@@ -278,8 +277,7 @@ def build_start_group(gui, left_layout):
     _add_tab("Language", 1, "language")
     _add_tab("Voice", 2, "voice")
     _add_tab("Style", 3, "style")
-    _add_tab("Filter", 4, "filter")
-    _add_tab("Advanced", 5, "advanced")
+    _add_tab("Advanced", 4, "advanced")
     gui.show_progress_btn = QPushButton("Show Progress")
     gui.show_progress_btn.clicked.connect(gui.show_active_progress_dialog)
     gui.show_progress_btn.setVisible(False)
@@ -717,110 +715,6 @@ def build_start_group(gui, left_layout):
 
     gui.custom_settings_toggle_btn.toggled.connect(_toggle_custom_section)
     style_page.layout().addWidget(subtitle_card)
-
-    filter_shell, filter_shell_layout = _build_collapsible_section("Video Filter")
-    filter_presets_card, filter_presets_layout = _section_card()
-    filter_presets_title = QLabel("Preset")
-    filter_presets_title.setObjectName("sectionTitle")
-    filter_presets_layout.addWidget(filter_presets_title)
-    filter_preset_grid = QGridLayout()
-    filter_preset_grid.setContentsMargins(0, 0, 0, 0)
-    filter_preset_grid.setHorizontalSpacing(8)
-    filter_preset_grid.setVerticalSpacing(8)
-    gui.video_filter_preset_group = QButtonGroup(gui)
-    gui.video_filter_preset_group.setExclusive(True)
-    gui.video_filter_preset_buttons = {}
-    for idx, (preset_key, preset_label) in enumerate([
-        ("original", "Original"),
-        ("bright", "Bright"),
-        ("warm", "Warm"),
-        ("vivid", "Vivid"),
-        ("cool", "Cool"),
-        ("soft", "Soft"),
-    ]):
-        btn = _build_filter_preset_button(preset_label)
-        btn.setChecked(preset_key == "original")
-        btn.clicked.connect(lambda _checked=False, key=preset_key: gui.on_video_filter_preset_selected(key))
-        gui.video_filter_preset_group.addButton(btn)
-        gui.video_filter_preset_buttons[preset_key] = btn
-        filter_preset_grid.addWidget(btn, idx // 3, idx % 3)
-    filter_presets_layout.addLayout(filter_preset_grid)
-    filter_shell_layout.addWidget(filter_presets_card)
-
-    intensity_card, intensity_layout = _section_card()
-    intensity_title = QLabel("Intensity")
-    intensity_title.setObjectName("sectionTitle")
-    intensity_layout.addWidget(intensity_title)
-    intensity_header = QHBoxLayout()
-    intensity_header.setContentsMargins(0, 0, 0, 0)
-    intensity_header.setSpacing(8)
-    intensity_hint = QLabel("Preset strength")
-    intensity_hint.setObjectName("helperLabel")
-    gui.video_filter_intensity_value_label = QLabel("75")
-    gui.video_filter_intensity_value_label.setObjectName("helperLabel")
-    gui.video_filter_intensity_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-    intensity_header.addWidget(intensity_hint)
-    intensity_header.addStretch(1)
-    intensity_header.addWidget(gui.video_filter_intensity_value_label)
-    intensity_layout.addLayout(intensity_header)
-    gui.video_filter_intensity_slider = QSlider(Qt.Horizontal)
-    gui.video_filter_intensity_slider.setRange(0, 100)
-    gui.video_filter_intensity_slider.setValue(75)
-    gui.video_filter_intensity_slider.valueChanged.connect(gui.on_video_filter_intensity_changed)
-    gui.video_filter_intensity_slider.sliderReleased.connect(gui.on_video_filter_slider_released)
-    intensity_layout.addWidget(gui.video_filter_intensity_slider)
-    filter_shell_layout.addWidget(intensity_card)
-
-    adjust_card, adjust_layout = _section_card()
-    adjust_title = QLabel("Adjust")
-    adjust_title.setObjectName("sectionTitle")
-    adjust_layout.addWidget(adjust_title)
-    gui.video_filter_adjust_sliders = {}
-    gui.video_filter_adjust_value_labels = {}
-    for field_key, field_label in (
-        ("brightness", "Brightness"),
-        ("contrast", "Contrast"),
-        ("saturation", "Saturation"),
-        ("temperature", "Temperature"),
-        ("highlights", "Highlights"),
-        ("shadows", "Shadows"),
-    ):
-        value_label = QLabel("0")
-        slider = QSlider(Qt.Horizontal)
-        slider.setRange(-100, 100)
-        slider.setValue(0)
-        slider.valueChanged.connect(lambda value, key=field_key: gui.on_video_filter_adjust_changed(key, value))
-        slider.sliderReleased.connect(gui.on_video_filter_slider_released)
-        gui.video_filter_adjust_sliders[field_key] = slider
-        gui.video_filter_adjust_value_labels[field_key] = value_label
-        adjust_layout.addWidget(_build_filter_slider_row(field_label, slider, value_label))
-    gui.video_filter_reset_adjust_btn = QPushButton("Reset Adjust")
-    gui.video_filter_reset_adjust_btn.clicked.connect(gui.reset_video_filter_adjustments)
-    gui.video_filter_reset_btn = QPushButton("Reset All")
-    gui.video_filter_reset_btn.clicked.connect(gui.reset_video_filters)
-    filter_action_row = QHBoxLayout()
-    filter_action_row.setContentsMargins(0, 0, 0, 0)
-    filter_action_row.setSpacing(8)
-    filter_action_row.addStretch(1)
-    gui.video_filter_apply_btn = QPushButton("Apply Filter")
-    gui.video_filter_apply_btn.clicked.connect(gui.apply_current_video_filter)
-    filter_action_row.addWidget(gui.video_filter_apply_btn)
-    filter_action_row.addWidget(gui.video_filter_reset_adjust_btn)
-    filter_action_row.addWidget(gui.video_filter_reset_btn)
-    adjust_layout.addLayout(filter_action_row)
-    gui.video_filter_render_status_label = QLabel("")
-    gui.video_filter_render_status_label.setObjectName("helperLabel")
-    gui.video_filter_render_status_label.setWordWrap(True)
-    gui.video_filter_render_status_label.hide()
-    adjust_layout.addWidget(gui.video_filter_render_status_label)
-    gui.video_filter_render_progress = QProgressBar()
-    gui.video_filter_render_progress.setRange(0, 0)
-    gui.video_filter_render_progress.setTextVisible(False)
-    gui.video_filter_render_progress.setFixedHeight(6)
-    gui.video_filter_render_progress.hide()
-    adjust_layout.addWidget(gui.video_filter_render_progress)
-    filter_shell_layout.addWidget(adjust_card)
-    filter_page.layout().addWidget(filter_shell)
 
     for page in pages:
         page.layout().addStretch()

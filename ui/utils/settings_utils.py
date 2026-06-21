@@ -43,8 +43,8 @@ def save_user_settings(gui):
     s.setValue("use_existing_audio", gui.use_existing_audio_radio.isChecked())
     s.setValue("keep_audio", gui.keep_audio_cb.isChecked())
     s.setValue("keep_timeline", gui.keep_timeline_cb.isChecked())
-    if hasattr(gui, "anchor_subtitle_inspector_cb"):
-        s.setValue("anchor_subtitle_inspector", gui.anchor_subtitle_inspector_cb.isChecked())
+    if hasattr(gui, "anchor_inspector_cb"):
+        s.setValue("anchor_inspector", gui.anchor_inspector_cb.isChecked())
     s.setValue("auto_preview_frame", gui.auto_preview_frame_cb.isChecked())
     s.setValue("subtitle_font", gui.subtitle_font_combo.currentText())
     s.setValue("subtitle_size", gui.subtitle_font_size_spin.value())
@@ -157,9 +157,9 @@ def load_user_settings(gui):
         gui.use_free_voice_radio.setChecked(True)
     gui.keep_audio_cb.setChecked(str(s.value("keep_audio", gui.keep_audio_cb.isChecked())).lower() == "true")
     gui.keep_timeline_cb.setChecked(str(s.value("keep_timeline", gui.keep_timeline_cb.isChecked())).lower() == "true")
-    if hasattr(gui, "anchor_subtitle_inspector_cb"):
-        gui.anchor_subtitle_inspector_cb.setChecked(
-            str(s.value("anchor_subtitle_inspector", gui.anchor_subtitle_inspector_cb.isChecked())).lower() == "true"
+    if hasattr(gui, "anchor_inspector_cb"):
+        gui.anchor_inspector_cb.setChecked(
+            str(s.value("anchor_inspector", gui.anchor_inspector_cb.isChecked())).lower() == "true"
         )
     auto_preview_enabled = str(s.value("auto_preview_frame", "false")).lower() == "true"
     if gui.auto_preview_frame_cb.isHidden():

@@ -86,6 +86,7 @@ from worker_adapters import (
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'app'))
 from video_processor import get_video_dimensions
 from workflows.voice_workflow import predict_speed_ratios
+from audio_mixer import mix_voice_with_background
 
 
 class _BootstrapMediaBackend:
@@ -131,6 +132,12 @@ class _BootstrapMediaBackend:
     def clear_audio(self):
         return None
 
+    def set_original_audio_file(self, audio_path):
+        return None
+
+    def _clear_original_audio(self):
+        return None
+
     def set_blur_region(self, blur_region=None):
         return None
 
@@ -148,6 +155,30 @@ class _BootstrapMediaBackend:
 
     def is_muted(self):
         return False
+
+    def set_mute_original(self, muted):
+        return None
+
+    def set_mute_dubbed(self, muted):
+        return None
+
+    def is_original_muted(self):
+        return False
+
+    def is_dubbed_muted(self):
+        return False
+
+    def set_original_volume(self, percent):
+        return None
+
+    def set_dubbed_volume(self, percent):
+        return None
+
+    def original_volume(self):
+        return 100
+
+    def dubbed_volume(self):
+        return 100
 
     def set_playback_rate(self, rate):
         return None
@@ -1669,6 +1700,94 @@ class VideoTranslatorGUI(QMainWindow):
                 return normalized
         return ""
 
+    def _resolve_preview_voice_only_audio_path(self) -> str:
+        if self.using_existing_audio_source():
+            return ""
+        candidates = [
+            self.processed_artifacts.get("voice_vi"),
+            self.last_voice_vi_path,
+        ]
+        for candidate in candidates:
+            normalized = self._normalize_local_file_path(candidate)
+            if normalized and os.path.exists(normalized):
+                return normalized
+        return ""
+
+    def _resolve_preview_background_audio_path(self) -> str:
+        audio_mode_key = str(self.get_audio_handling_mode() or "fast").strip().lower()
+        if audio_mode_key == "clean":
+            candidates = [self.last_music_path]
+        else:
+            candidates = [
+                self.audio_source_edit.text().strip() if hasattr(self, "audio_source_edit") else "",
+                self.processed_artifacts.get("audio_extracted"),
+                self.last_extracted_audio,
+                self.last_music_path,
+            ]
+        for candidate in candidates:
+            normalized = self._normalize_local_file_path(candidate)
+            if normalized and os.path.exists(normalized):
+                return normalized
+        return ""
+
+    def _resolve_preview_mixed_audio_path(self) -> str:
+        if self.using_existing_audio_source():
+            audio_path = self._normalize_local_file_path(self.mixed_audio_edit.text().strip())
+            return audio_path if audio_path and os.path.exists(audio_path) else ""
+        voice_only = self._resolve_preview_voice_only_audio_path()
+        background_audio = self._resolve_preview_background_audio_path()
+        if not voice_only or not background_audio:
+            return ""
+
+        try:
+            voice_stat = os.stat(voice_only)
+            background_stat = os.stat(background_audio)
+        except OSError:
+            return ""
+
+        segments = list(self.get_active_segments() or [])
+        audio_mode_key = str(self.get_audio_handling_mode() or "fast").strip().lower()
+        background_gain_db = float(self.bg_gain_spin.value()) if hasattr(self, "bg_gain_spin") else 0.0
+        ducking_amount_db = float(self.ducking_amount_spin.value()) if hasattr(self, "ducking_amount_spin") else -6.0
+        signature_payload = {
+            "voice": os.path.abspath(voice_only),
+            "voice_size": int(voice_stat.st_size),
+            "voice_mtime_ns": int(getattr(voice_stat, "st_mtime_ns", int(voice_stat.st_mtime * 1_000_000_000))),
+            "background": os.path.abspath(background_audio),
+            "background_size": int(background_stat.st_size),
+            "background_mtime_ns": int(getattr(background_stat, "st_mtime_ns", int(background_stat.st_mtime * 1_000_000_000))),
+            "audio_mode": audio_mode_key,
+            "background_gain_db": round(background_gain_db, 3),
+            "ducking_amount_db": round(ducking_amount_db, 3),
+            "segments": [
+                {
+                    "start": round(float(seg.get("start", 0.0)), 3),
+                    "end": round(float(seg.get("end", 0.0)), 3),
+                }
+                for seg in segments
+            ],
+        }
+        mix_hash = hashlib.sha1(json.dumps(signature_payload, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        output_path = os.path.join(self.get_workspace_temp_root(create=True), f"timeline_preview_mix_{mix_hash}.wav")
+        if os.path.exists(output_path):
+            return output_path
+
+        try:
+            mix_voice_with_background(
+                background_wav_path=background_audio,
+                voice_wav_path=voice_only,
+                output_wav_path=output_path,
+                background_gain_db=background_gain_db,
+                voice_gain_db=0.0,
+                ducking_mode="timeline" if audio_mode_key == "fast" else "off",
+                ducking_segments=segments if audio_mode_key == "fast" else None,
+                ducking_amount_db=ducking_amount_db,
+            )
+        except Exception as exc:
+            self.log(f"[Preview] timeline mix fallback to voice-only: {exc}")
+            return ""
+        return output_path
+
     def resolve_timeline_audio_visualization_path(self) -> str:
         preview_mode = str(getattr(self, "_preview_audio_track_mode", "original") or "original").strip().lower()
         if preview_mode == "original":
@@ -1684,9 +1803,9 @@ class VideoTranslatorGUI(QMainWindow):
                 if normalized and os.path.exists(normalized):
                     return normalized
 
-        selected_audio = self.resolve_selected_audio_path()
-        if selected_audio and os.path.exists(selected_audio):
-            return selected_audio
+        dubbed_audio_kind, dubbed_audio = self._resolve_preview_dubbed_playback_source()
+        if dubbed_audio_kind in ("mixed", "voice") and dubbed_audio and os.path.exists(dubbed_audio):
+            return dubbed_audio
 
         candidates = [
             self.audio_source_edit.text().strip() if hasattr(self, "audio_source_edit") else "",
@@ -1707,24 +1826,76 @@ class VideoTranslatorGUI(QMainWindow):
         return normalized if normalized and os.path.exists(normalized) else ""
 
     def _resolve_preview_dubbed_audio_path(self) -> str:
-        audio_path = self.resolve_selected_audio_path()
-        return audio_path if audio_path and os.path.exists(audio_path) else ""
+        mixed_audio = self._resolve_preview_mixed_audio_path()
+        if mixed_audio:
+            return mixed_audio
+        return self._resolve_preview_voice_only_audio_path()
+
+    def _has_preview_dubbed_audio_source(self) -> bool:
+        if self.using_existing_audio_source():
+            audio_path = self._normalize_local_file_path(self.mixed_audio_edit.text().strip())
+            return bool(audio_path and os.path.exists(audio_path))
+        return bool(self._resolve_preview_voice_only_audio_path())
+
+    def _timeline_audio_track_mutes(self) -> tuple[bool, bool] | None:
+        if not hasattr(self, "timeline") or not getattr(self.timeline, "_timeline", None):
+            return None
+        a1_muted = None
+        a2_muted = None
+        for track in self.timeline._timeline.tracks:
+            if track.name == "A1 Original Audio":
+                a1_muted = bool(track.muted)
+            elif track.name == "A2 Dub Audio":
+                a2_muted = bool(track.muted)
+        if a1_muted is None and a2_muted is None:
+            return None
+        return bool(a1_muted), bool(a2_muted)
+
+    def _resolve_preview_dubbed_playback_source(self) -> tuple[str, str]:
+        """Resolve which audio file represents the dubbed track in preview.
+
+        For preview we want PURE TTS (voice_vi) so the user hears only
+        the new dub voice with natural gaps between segments. The mixed
+        (TTS+background) version is only used for final export.
+
+        Returns ("voice", path) | ("mixed", path) | ("original", "").
+        """
+        track_mutes = self._timeline_audio_track_mutes()
+        voice_only = self._resolve_preview_voice_only_audio_path()
+        mixed_audio = self._resolve_preview_mixed_audio_path()
+
+        if not track_mutes:
+            if voice_only:
+                return "voice", voice_only
+            if mixed_audio:
+                return "mixed", mixed_audio
+            return "original", ""
+
+        a1_muted, a2_muted = track_mutes
+        if a2_muted:
+            return "original", ""
+        # Prefer pure TTS for preview in all other cases.
+        if voice_only:
+            return "voice", voice_only
+        if mixed_audio:
+            return "mixed", mixed_audio
+        return "original", ""
 
     def _preview_audio_track_choices(self) -> list[tuple[str, str]]:
-        choices = [("Original", "original")]
-        dubbed_audio = self._resolve_preview_dubbed_audio_path()
-        if dubbed_audio:
-            label = "Dubbed"
-            if self.using_existing_audio_source():
-                label = "Mixed"
-            choices.append((label, "dubbed"))
+        choices = [("Original Audio", "original")]
+        if self._has_preview_dubbed_audio_source():
+            choices.append(("Dub Voice", "dubbed"))
         return choices
 
     def _preferred_preview_audio_track_mode(self) -> str:
+        track_mutes = self._timeline_audio_track_mutes()
+        if track_mutes:
+            _a1_muted, a2_muted = track_mutes
+            if a2_muted:
+                return "original"
         mode = str(self.get_output_mode_key() or "subtitle").strip().lower()
         if mode in ("voice", "both"):
-            dubbed_audio = self._resolve_preview_dubbed_audio_path()
-            if dubbed_audio:
+            if self._has_preview_dubbed_audio_source():
                 return "dubbed"
         return "original"
 
@@ -1759,11 +1930,13 @@ class VideoTranslatorGUI(QMainWindow):
             self._refresh_preview_audio_controls()
             return
 
-        dubbed_audio = self._resolve_preview_dubbed_audio_path()
-        selected_mode = str(getattr(self, "_preview_audio_track_mode", "original") or "original").strip().lower()
-        if selected_mode == "dubbed" and not dubbed_audio:
-            selected_mode = "original"
-            self._preview_audio_track_mode = "original"
+        # Always load BOTH the original audio file (extracted audio) and
+        # the dubbed audio file as separate sidecar streams. Per-track mute
+        # is controlled by the timeline track labels (A1 Original / A2 Dub).
+        dubbed_audio_kind, dubbed_audio = self._resolve_preview_dubbed_playback_source()
+        if not dubbed_audio or dubbed_audio_kind == "original":
+            dubbed_audio = ""
+        original_audio = self._resolve_preview_original_audio_path()
 
         try:
             current_position = int(self.media_player.position())
@@ -1776,11 +1949,10 @@ class VideoTranslatorGUI(QMainWindow):
 
         current_source = str(getattr(self.media_player, "_source_path", "") or "")
         should_reset_source = not current_source or os.path.abspath(current_source) != os.path.abspath(source_video)
-        force_source_reload = selected_mode == "original"
 
         self._preview_audio_track_switching = True
         try:
-            if should_reset_source or force_source_reload:
+            if should_reset_source:
                 try:
                     self.media_player.pause()
                 except Exception:
@@ -1789,10 +1961,20 @@ class VideoTranslatorGUI(QMainWindow):
                 self.refresh_video_dimensions(source_video)
                 self._preview_video_has_burned_subtitles = False
                 self.sync_live_subtitle_preview()
-            if selected_mode == "dubbed" and dubbed_audio:
+            # Always load the original audio sidecar when available
+            if hasattr(self.media_player, "set_original_audio_file"):
+                if original_audio:
+                    self.media_player.set_original_audio_file(original_audio)
+                else:
+                    try:
+                        self.media_player._clear_original_audio()
+                    except Exception:
+                        pass
+            if dubbed_audio:
                 self.media_player.set_audio_file(dubbed_audio)
             else:
                 self.media_player.clear_audio()
+            self._apply_preview_audio_state()
             if current_position > 0:
                 try:
                     self.media_player.setPosition(current_position)
@@ -1808,13 +1990,39 @@ class VideoTranslatorGUI(QMainWindow):
             else:
                 if hasattr(self, "timeline"):
                     self.timeline.set_playing(False)
-            self.log(
-                f"[Preview] audio track: {'dubbed' if selected_mode == 'dubbed' and dubbed_audio else 'original'}"
-            )
+            active_label = "both" if (original_audio or dubbed_audio) else "silent"
+            self.log(f"[Preview] audio: {active_label}")
         finally:
             self._preview_audio_track_switching = False
         self.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
         self._refresh_preview_audio_controls()
+
+    def _resolve_preview_original_audio_path(self) -> str:
+        """Resolve the original audio file path (separate from source video).
+
+        Fast mode: full extracted audio (vocals + music)
+        Clean mode: background stem only (no vocals, to avoid double voices)
+        Fallback: extracted_audio artifact
+        """
+        audio_mode = str(self.get_audio_handling_mode() or "fast").strip().lower()
+        candidates: list[str] = []
+        if audio_mode == "clean":
+            candidates.extend([
+                self.last_music_path,
+                self.processed_artifacts.get("music"),
+            ])
+        candidates.extend([
+            self.processed_artifacts.get("extracted_audio"),
+            self.last_extracted_audio,
+            self.audio_source_edit.text().strip() if hasattr(self, "audio_source_edit") else "",
+        ])
+        for candidate in candidates:
+            if not candidate:
+                continue
+            normalized = self._normalize_local_file_path(candidate)
+            if normalized and os.path.exists(normalized):
+                return normalized
+        return ""
 
     def on_preview_audio_track_changed(self, index: int):
         if getattr(self, "_preview_audio_track_switching", False) or not hasattr(self, "preview_audio_track_combo"):
@@ -2631,6 +2839,8 @@ class VideoTranslatorGUI(QMainWindow):
         self.last_translated_srt_path = ""
         self.last_extracted_audio = ""
         self.last_vocals_path = ""
+        # Sync timeline track mute -> GUI per-track mute state
+        self._sync_timeline_mute_to_gui()
         self.last_music_path = ""
         self.last_voice_vi_path = ""
         self.last_mixed_vi_path = ""
@@ -2678,8 +2888,41 @@ class VideoTranslatorGUI(QMainWindow):
             self._enable_post_pipeline_preview_assets(refresh=True)
             self.apply_segments_to_timeline()
             self.set_selected_segment_index(0, sync_ui=True)
+        # Restore A2 Dub Audio track if TTS was generated
+        voice_path = context.get("artifacts", {}).get("voice_vi", "")
+        if voice_path and os.path.exists(voice_path) and hasattr(self, "timeline"):
+            self.timeline.sync_tts_track(voice_path, segments=self.current_translated_segments or self.current_segments)
+        self._sync_timeline_mute_to_gui()
         self._update_ocr_overlay()
+        # Clear any stale layer selection from the previous project so
+        # the inspector does not stay pinned to a track that no longer
+        # exists (e.g. a BlurLayer from a previous project that was
+        # removed by _restore_project_blur_state).
+        if hasattr(self, "timeline"):
+            try:
+                self.timeline.select_layer("")
+            except Exception:
+                pass
+        self._show_default_inspector()
         self._restore_project_blur_state(state)
+        # Force the dual-track sidecar player to re-initialize for this
+        # project. Without this, reopening a project would leave the
+        # original/dubbed QMediaPlayer sidecars pointing at the previous
+        # project's audio files (or empty), so the user hears nothing
+        # until they press Generate.
+        try:
+            if hasattr(self, "sync_preview_audio_track_to_output"):
+                self.sync_preview_audio_track_to_output(apply_to_player=True)
+        except Exception:
+            pass
+        # Stop any active playback so the user re-presses Play after
+        # reopening. Otherwise mpv / QMediaPlayer may keep playing the
+        # previous source.
+        try:
+            if hasattr(self, "media_player") and self.media_player is not None:
+                self.media_player.pause()
+        except Exception:
+            pass
 
     def _enable_post_pipeline_preview_assets(self, *, refresh: bool = True):
         self._allow_post_pipeline_preview_assets = True
@@ -3843,9 +4086,17 @@ class VideoTranslatorGUI(QMainWindow):
             segment = self.current_translated_segments[index] or {}
         subtitle_text = " ".join(str(segment.get("text", "") or "").split()).strip()
         spoken_text = " ".join(str(segment.get("tts_text") or segment.get("dubbing_vi") or segment.get("text", "")).split()).strip()
-        row["spoken_status_label"].clear()
-        if "match_subtitle_button" in row:
-            row["match_subtitle_button"].setEnabled(bool(spoken_text) and subtitle_text != spoken_text)
+        # The per-segment status label was moved to the A2 Dub Audio
+        # Track Inspector. Update it there so the inspector reflects
+        # whether the spoken text matches the subtitle.
+        status_label = getattr(self, "audio_inspector_spoken_status_label", None)
+        if status_label is not None:
+            if spoken_text and subtitle_text and spoken_text != subtitle_text:
+                status_label.setText("Spoken text differs from subtitle.")
+            elif spoken_text:
+                status_label.setText("Spoken text matches subtitle.")
+            else:
+                status_label.setText("")
 
     def _resolve_segment_voice_text(self, segment: dict) -> str:
         current = dict(segment or {})
@@ -4089,6 +4340,11 @@ class VideoTranslatorGUI(QMainWindow):
             self._selected_segment_index = valid_indexes[0]
         if sync_ui:
             self.sync_segment_editor_rows()
+        if hasattr(self, "_refresh_audio_inspector_dub_voice_buttons"):
+            try:
+                self._refresh_audio_inspector_dub_voice_buttons()
+            except Exception:
+                pass
 
     def on_timeline_segment_timing_edit_started(self, index: int, start: float, end: float):
         if self._suspend_timeline_undo:
@@ -4114,6 +4370,949 @@ class VideoTranslatorGUI(QMainWindow):
         self.set_selected_segment_index(index, sync_ui=True)
         if hasattr(self, "timeline"):
             self.timeline.set_active_segment_index(index)
+
+    def on_timeline_layer_selected(self, layer_id: str):
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return
+        track = None
+        layer = None
+        for t in self.timeline._timeline.tracks:
+            for l in t.layers:
+                if l.id == layer_id:
+                    layer = l
+                    track = t
+                    break
+            if layer:
+                break
+        if not layer:
+            self._show_default_inspector()
+            return
+        layer_type = str(getattr(layer.type, "value", layer.type)).lower()
+        if layer_type == "subtitle":
+            self._show_subtitle_inspector_for_layer(layer_id)
+        elif layer_type == "audio":
+            self._show_audio_inspector_for_track(track, layer)
+            # A2 Dub Audio layers store the original subtitle segment
+            # index in metadata["_seg_index"]. Use it to update the
+            # selected segment so the Dub Voice editor shows the
+            # matching content.
+            if track is not None and str(getattr(track, "name", "")) == "A2 Dub Audio":
+                seg_idx = None
+                meta = getattr(layer, "metadata", None) or {}
+                raw = meta.get("_seg_index")
+                if raw is not None:
+                    try:
+                        seg_idx = int(raw)
+                    except (TypeError, ValueError):
+                        seg_idx = None
+                if seg_idx is not None and seg_idx >= 0:
+                    self.set_selected_segment_index(seg_idx, sync_ui=True)
+        elif layer_type == "blur":
+            self._show_blur_inspector_for_track(track, layer)
+        elif layer_type == "video":
+            self._show_video_inspector_for_track(track, layer)
+        else:
+            # Text, image, sticker: show default with info
+            self._show_default_inspector_for_layer(track, layer)
+
+    def _show_subtitle_inspector_for_layer(self, layer_id: str):
+        """Show subtitle inspector and select the matching segment."""
+        self._switch_inspector("subtitle")
+        if hasattr(self, "timeline") and self.timeline:
+            idx = self.timeline._segment_indices.get(layer_id, -1)
+            if idx >= 0:
+                self.set_selected_segment_index(idx, sync_ui=True)
+
+    def _show_audio_inspector_for_track(self, track, layer=None):
+        """Show audio inspector populated with the selected track's settings."""
+        self._switch_inspector("audio")
+        # The Dub Voice section is only for A2 Dub Audio. Hide it for
+        # A1 Original Audio (or any other audio track).
+        track_name = str(getattr(track, "name", "") or "")
+        dub_section = getattr(self, "audio_inspector_dub_section", None)
+        if dub_section is not None:
+            dub_section.setVisible(track_name == "A2 Dub Audio")
+        if track is None:
+            return
+        track_name = str(getattr(track, "name", "Audio"))
+        if hasattr(self, "audio_inspector_track_name_label"):
+            self.audio_inspector_track_name_label.setText(track_name)
+        if hasattr(self, "audio_inspector_layer_count_label"):
+            count = len(list(getattr(track, "layers", [])))
+            if layer is not None:
+                layer_label = f"Selected: {layer.name}"
+            else:
+                layer_label = "No layer selected"
+            self.audio_inspector_layer_count_label.setText(
+                f"{layer_label}    •    {count} layer(s) in track"
+            )
+        if hasattr(self, "audio_inspector_summary_label"):
+            self.audio_inspector_summary_label.setText(
+                f"Audio settings for {track_name}. Adjust volume, gain, "
+                "speed or mute the track for preview."
+            )
+        # Load current track metadata into the controls
+        meta = getattr(track, "metadata", None) or {}
+        try:
+            volume = float(meta.get("_volume", 100.0))
+        except (TypeError, ValueError):
+            volume = 100.0
+        try:
+            gain = float(meta.get("_gain_db", 0.0))
+        except (TypeError, ValueError):
+            gain = 0.0
+        try:
+            speed = float(meta.get("_speed", 1.0))
+        except (TypeError, ValueError):
+            speed = 1.0
+        muted = bool(meta.get("_muted", False))
+        solo = bool(meta.get("_solo", False))
+        if hasattr(self, "audio_inspector_volume_slider"):
+            self.audio_inspector_volume_slider.blockSignals(True)
+            self.audio_inspector_volume_slider.setValue(int(max(0, min(200, volume))))
+            self.audio_inspector_volume_slider.blockSignals(False)
+        if hasattr(self, "audio_inspector_volume_label"):
+            self.audio_inspector_volume_label.setText(f"{int(volume)}%")
+        if hasattr(self, "audio_inspector_gain_spin"):
+            self.audio_inspector_gain_spin.blockSignals(True)
+            self.audio_inspector_gain_spin.setValue(gain)
+            self.audio_inspector_gain_spin.blockSignals(False)
+        if hasattr(self, "audio_inspector_speed_spin"):
+            self.audio_inspector_speed_spin.blockSignals(True)
+            self.audio_inspector_speed_spin.setValue(speed)
+            self.audio_inspector_speed_spin.blockSignals(False)
+        if hasattr(self, "audio_inspector_mute_btn"):
+            self.audio_inspector_mute_btn.blockSignals(True)
+            self.audio_inspector_mute_btn.setChecked(muted)
+            self.audio_inspector_mute_btn.setText("Unmute Track" if muted else "Mute Track")
+            self.audio_inspector_mute_btn.blockSignals(False)
+        if hasattr(self, "audio_inspector_solo_btn"):
+            self.audio_inspector_solo_btn.blockSignals(True)
+            self.audio_inspector_solo_btn.setChecked(solo)
+            self.audio_inspector_solo_btn.blockSignals(False)
+        if hasattr(self, "_refresh_audio_inspector_dub_voice_buttons"):
+            try:
+                self._refresh_audio_inspector_dub_voice_buttons()
+            except Exception:
+                pass
+
+    def _show_default_inspector_for_layer(self, track, layer):
+        self._switch_inspector("default")
+        if hasattr(self, "default_inspector_summary_label"):
+            tname = getattr(track, "name", "Track") if track else "Track"
+            lname = getattr(layer, "name", "Layer") if layer else "Layer"
+            ltype = str(getattr(layer.type, "value", layer.type)) if layer else "?"
+            self.default_inspector_summary_label.setText(
+                f"Selected: {tname} → {lname} ({ltype}).\n"
+                "No per-layer settings available for this track type yet."
+            )
+
+    def _show_blur_inspector_for_track(self, track, layer=None):
+        """Show the Blur Track Inspector populated with the selected track."""
+        self._switch_inspector("blur")
+        if track is None:
+            return
+        track_name = str(getattr(track, "name", "Blur"))
+        if hasattr(self, "blur_inspector_track_name_label"):
+            self.blur_inspector_track_name_label.setText(track_name)
+        if hasattr(self, "blur_inspector_layer_count_label"):
+            count = len(list(getattr(track, "layers", [])))
+            if layer is not None:
+                self.blur_inspector_layer_count_label.setText(
+                    f"Selected: {layer.name}    •    {count} blur region(s) in track"
+                )
+            else:
+                self.blur_inspector_layer_count_label.setText(
+                    f"{count} blur region(s) in track"
+                )
+        # Load show-on-preview state from track metadata
+        meta = getattr(track, "metadata", None) or {}
+        show = bool(meta.get("_show_on_preview", True))
+        if hasattr(self, "blur_inspector_show_cb"):
+            self.blur_inspector_show_cb.blockSignals(True)
+            self.blur_inspector_show_cb.setChecked(show)
+            self.blur_inspector_show_cb.blockSignals(False)
+        if hasattr(self, "blur_inspector_summary_label"):
+            state = "shown" if show else "hidden"
+            self.blur_inspector_summary_label.setText(
+                f"Blur regions in '{track_name}'. The visual blur is "
+                f"currently {state} on the video preview."
+            )
+
+    def _show_default_inspector(self):
+        self._switch_inspector("default")
+
+    def _show_video_inspector_for_track(self, track, layer=None):
+        """Show the Video Track Inspector (V1 Original Video)."""
+        self._switch_inspector("video")
+        if track is None:
+            return
+        if hasattr(self, "video_inspector_summary_label"):
+            self.video_inspector_summary_label.setText(
+                "Adjust the preset, intensity and fine-tune each channel below."
+            )
+        # Populate the inline filter controls
+        self._wire_video_inspector_controls()
+        self._refresh_video_inspector_status()
+
+    def _wire_video_inspector_controls(self):
+        """One-time wiring of the inline video filter controls."""
+        if getattr(self, "_video_inspector_wired", False):
+            return
+        # Preset combo
+        if hasattr(self, "video_inspector_preset_combo"):
+            preset_keys = (
+                list(self._video_filter_presets().keys())
+                if hasattr(self, "_video_filter_presets")
+                else ["original", "bright", "warm", "vivid", "cool", "soft"]
+            )
+            preset_labels = {
+                "original": "Original",
+                "bright": "Bright",
+                "warm": "Warm",
+                "vivid": "Vivid",
+                "cool": "Cool",
+                "soft": "Soft",
+            }
+            for key in preset_keys:
+                label = preset_labels.get(str(key), str(key).title())
+                self.video_inspector_preset_combo.addItem(label, str(key))
+            self.video_inspector_preset_combo.currentIndexChanged.connect(
+                self._on_video_inspector_preset_changed
+            )
+        # Intensity
+        if hasattr(self, "video_inspector_intensity_slider"):
+            self.video_inspector_intensity_slider.valueChanged.connect(
+                self._on_video_inspector_intensity_changed
+            )
+            self.video_inspector_intensity_slider.sliderReleased.connect(
+                self._on_video_inspector_intensity_released
+            )
+        # Adjust sliders
+        if hasattr(self, "video_inspector_adjust_sliders"):
+            for field_key, (slider, value_lbl) in self.video_inspector_adjust_sliders.items():
+                slider.valueChanged.connect(
+                    lambda v, lbl=value_lbl, fk=field_key: self._on_video_inspector_adjust_changed(fk, v, lbl)
+                )
+                slider.sliderReleased.connect(
+                    lambda fk=field_key: self._on_video_inspector_adjust_released(fk)
+                )
+        # Apply / Revert
+        if hasattr(self, "video_inspector_apply_btn"):
+            self.video_inspector_apply_btn.clicked.connect(self._on_video_inspector_apply)
+        if hasattr(self, "video_inspector_revert_btn"):
+            self.video_inspector_revert_btn.clicked.connect(self._on_video_inspector_revert)
+        self._video_inspector_wired = True
+        # Initial UI sync
+        self._sync_video_inspector_ui()
+
+    def _sync_video_inspector_ui(self):
+        if hasattr(self, "video_inspector_preset_combo"):
+            try:
+                key = self._normalize_video_filter_preset_key(
+                    getattr(self, "_video_filter_preset_key", "original")
+                )
+                for i in range(self.video_inspector_preset_combo.count()):
+                    if self.video_inspector_preset_combo.itemData(i) == key:
+                        self.video_inspector_preset_combo.blockSignals(True)
+                        self.video_inspector_preset_combo.setCurrentIndex(i)
+                        self.video_inspector_preset_combo.blockSignals(False)
+                        break
+            except Exception:
+                pass
+        if hasattr(self, "video_inspector_intensity_slider"):
+            try:
+                self.video_inspector_intensity_slider.blockSignals(True)
+                self.video_inspector_intensity_slider.setValue(int(self._video_filter_intensity))
+                self.video_inspector_intensity_slider.blockSignals(False)
+            except Exception:
+                pass
+        if hasattr(self, "video_inspector_intensity_value_label"):
+            try:
+                self.video_inspector_intensity_value_label.setText(str(int(self._video_filter_intensity)))
+            except Exception:
+                pass
+        if hasattr(self, "video_inspector_adjust_sliders"):
+            overrides = getattr(self, "_video_filter_adjust_overrides", {}) or {}
+            for field_key, (slider, value_lbl) in self.video_inspector_adjust_sliders.items():
+                try:
+                    val = int(overrides.get(field_key, 0))
+                except Exception:
+                    val = 0
+                try:
+                    slider.blockSignals(True)
+                    slider.setValue(val)
+                    slider.blockSignals(False)
+                except Exception:
+                    pass
+                value_lbl.setText(str(val))
+
+    def _refresh_video_inspector_status(self):
+        if not hasattr(self, "video_inspector_status_label"):
+            return
+        try:
+            active = bool(self.has_active_video_filters())
+        except Exception:
+            active = False
+        self.video_inspector_status_label.setText(
+            "Filter is currently active." if active
+            else "No filter is currently applied."
+        )
+
+    def _on_video_inspector_preset_changed(self, index: int):
+        if not hasattr(self, "video_inspector_preset_combo"):
+            return
+        try:
+            key = self.video_inspector_preset_combo.itemData(index)
+            if not key:
+                return
+            self.on_video_filter_preset_selected(str(key))
+        except Exception:
+            pass
+        # When the preset changes, the base values for each adjust
+        # field change too. Refresh the slider UI so the user can see
+        # what the new preset looks like at the current intensity.
+        self._sync_video_inspector_ui()
+        self._refresh_video_inspector_status()
+
+    def _on_video_inspector_intensity_changed(self, value: int):
+        if hasattr(self, "video_inspector_intensity_value_label"):
+            self.video_inspector_intensity_value_label.setText(str(int(value)))
+        try:
+            self.on_video_filter_intensity_changed(int(value))
+        except Exception:
+            pass
+
+    def _on_video_inspector_intensity_released(self):
+        if hasattr(self, "on_video_filter_slider_released"):
+            try:
+                self.on_video_filter_slider_released()
+            except Exception:
+                pass
+        self._refresh_video_inspector_status()
+
+    def _on_video_inspector_adjust_changed(self, field_key: str, value: int, value_lbl):
+        value_lbl.setText(str(int(value)))
+        if not isinstance(getattr(self, "_video_filter_adjust_overrides", None), dict):
+            self._video_filter_adjust_overrides = {}
+        self._video_filter_adjust_overrides[field_key] = int(value)
+        if not isinstance(getattr(self, "_video_filter_user_modified", None), dict):
+            self._video_filter_user_modified = {}
+        self._video_filter_user_modified[field_key] = True
+
+    def _on_video_inspector_adjust_released(self, field_key: str):
+        if hasattr(self, "on_video_filter_slider_released"):
+            try:
+                self.on_video_filter_slider_released()
+            except Exception:
+                pass
+        self._refresh_video_inspector_status()
+
+    def _on_video_inspector_apply(self):
+        if hasattr(self, "apply_current_video_filter"):
+            try:
+                self.apply_current_video_filter()
+            except Exception:
+                pass
+        if hasattr(self, "schedule_live_video_filter_preview"):
+            try:
+                self.schedule_live_video_filter_preview()
+            except Exception:
+                pass
+        self._refresh_video_inspector_status()
+
+    def _on_video_inspector_revert(self):
+        if hasattr(self, "revert_video_filter_preview_to_source"):
+            try:
+                self.revert_video_filter_preview_to_source()
+            except Exception:
+                pass
+        self._refresh_video_inspector_status()
+
+    def _current_blur_track_for_inspector(self):
+        """Return the Blur Track currently displayed in the Blur inspector."""
+        if not hasattr(self, "blur_inspector_track_name_label"):
+            return None, None
+        target = self.blur_inspector_track_name_label.text().strip()
+        if not target or target == "-":
+            return None, None
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return None, None
+        for t in self.timeline._timeline.tracks:
+            if t.name == target:
+                return t, target
+        return None, None
+
+    def on_blur_inspector_show_toggled(self, checked: bool):
+        """Toggle whether the blur is rendered on the video preview.
+
+        The blur layers remain in the timeline; only the visual mpv vf
+        filter is toggled on/off via the media player's blur region.
+        """
+        track, _track_name = self._current_blur_track_for_inspector()
+        if track is None:
+            return
+        if not isinstance(track.metadata, dict):
+            track.metadata = {}
+        track.metadata["_show_on_preview"] = bool(checked)
+        if hasattr(self, "media_player") and self.media_player is not None:
+            if checked:
+                # Re-apply the blur region to the media player.
+                if hasattr(self, "apply_preview_blur_region"):
+                    try:
+                        self.apply_preview_blur_region(force=True)
+                    except Exception:
+                        pass
+            else:
+                # Clear the blur vf filter but keep the layer data.
+                try:
+                    self.media_player.clear_blur_region()
+                except Exception:
+                    pass
+        if hasattr(self, "blur_inspector_summary_label"):
+            state = "shown" if checked else "hidden"
+            self.blur_inspector_summary_label.setText(
+                f"The visual blur is currently {state} on the video preview."
+            )
+
+    def _switch_inspector(self, kind: str):
+        if not hasattr(self, "inspector_stack"):
+            return
+        idx_map = {
+            "subtitle": 0,
+            "audio": 1,
+            "blur": 2,
+            "video": 3,
+            "default": 4,
+        }
+        target = idx_map.get(kind, 4)
+        if self.inspector_stack.currentIndex() != target:
+            self.inspector_stack.setCurrentIndex(target)
+        # The handle/toggle button is always visible so the user can
+        # collapse/expand ANY inspector (subtitle, audio, blur, video,
+        # default).
+        if hasattr(self, "subtitle_inspector_handle"):
+            self.subtitle_inspector_handle.setVisible(True)
+        # Clicking a track layer opens the inspector (auto-expand shell).
+        if kind in ("subtitle", "audio", "blur", "video"):
+            self.set_inspector_collapsed(False)
+
+    def _current_audio_track_for_inspector(self):
+        """Return the Track object currently displayed in the audio inspector."""
+        if not hasattr(self, "audio_inspector_card") or not hasattr(self, "timeline"):
+            return None, None
+        if not self.timeline._timeline:
+            return None, None
+        if not hasattr(self, "audio_inspector_track_name_label"):
+            return None, None
+        target = self.audio_inspector_track_name_label.text().strip()
+        if not target or target == "-":
+            return None, None
+        for t in self.timeline._timeline.tracks:
+            if t.name == target:
+                return t, target
+        return None, None
+
+    def on_audio_inspector_volume_changed(self, value: int):
+        track, track_name = self._current_audio_track_for_inspector()
+        if track is None:
+            return
+        if not isinstance(track.metadata, dict):
+            track.metadata = {}
+        track.metadata["_volume"] = float(value)
+        if hasattr(self, "audio_inspector_volume_label"):
+            self.audio_inspector_volume_label.setText(f"{int(value)}%")
+        self._apply_audio_track_settings(track_name)
+
+    def on_audio_inspector_volume_up(self):
+        if not hasattr(self, "audio_inspector_volume_slider"):
+            return
+        slider = self.audio_inspector_volume_slider
+        new_val = min(slider.maximum(), int(slider.value()) + 5)
+        slider.setValue(new_val)
+
+    def on_audio_inspector_volume_down(self):
+        if not hasattr(self, "audio_inspector_volume_slider"):
+            return
+        slider = self.audio_inspector_volume_slider
+        new_val = max(slider.minimum(), int(slider.value()) - 5)
+        slider.setValue(new_val)
+
+    def on_audio_inspector_gain_changed(self, value: float):
+        track, track_name = self._current_audio_track_for_inspector()
+        if track is None:
+            return
+        if not isinstance(track.metadata, dict):
+            track.metadata = {}
+        track.metadata["_gain_db"] = float(value)
+        self._apply_audio_track_settings(track_name)
+
+    def on_audio_inspector_speed_changed(self, value: float):
+        track, track_name = self._current_audio_track_for_inspector()
+        if track is None:
+            return
+        if not isinstance(track.metadata, dict):
+            track.metadata = {}
+        track.metadata["_speed"] = float(value)
+        self._apply_audio_track_settings(track_name)
+
+    def on_audio_inspector_mute_toggled(self, checked: bool):
+        track, track_name = self._current_audio_track_for_inspector()
+        if track is None:
+            return
+        if not isinstance(track.metadata, dict):
+            track.metadata = {}
+        track.metadata["_muted"] = bool(checked)
+        if hasattr(self, "audio_inspector_mute_btn"):
+            self.audio_inspector_mute_btn.setText(
+                "Unmute Track" if checked else "Mute Track"
+            )
+        self._apply_audio_track_settings(track_name)
+
+    def on_audio_inspector_solo_toggled(self, checked: bool):
+        track, track_name = self._current_audio_track_for_inspector()
+        if track is None:
+            return
+        if not isinstance(track.metadata, dict):
+            track.metadata = {}
+        track.metadata["_solo"] = bool(checked)
+        self._apply_audio_track_settings(track_name)
+
+    def _refresh_audio_inspector_dub_voice_buttons(self):
+        """Enable/disable the Dub Voice buttons and load the spoken
+        text for the currently selected segment into the A2 inspector's
+        spoken-text editor. The buttons live in the A2 audio inspector
+        card but act on the currently selected subtitle segment.
+        """
+        idx = int(getattr(self, "_selected_segment_index", -1))
+        segments = self.get_active_segments() or []
+        valid = 0 <= idx < len(segments)
+        for attr in (
+            "audio_inspector_use_voice_btn",
+            "audio_inspector_regenerate_voice_btn",
+        ):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setEnabled(valid)
+        label = getattr(self, "audio_inspector_segment_index_label", None)
+        if label is not None:
+            if valid:
+                label.setText(f"Selected segment: Block {idx + 1} / {len(segments)}")
+            else:
+                label.setText("Selected segment: none")
+        # Update Start/End timing chips for the dub segment
+        start_lbl = getattr(self, "audio_inspector_dub_start_label", None)
+        end_lbl = getattr(self, "audio_inspector_dub_end_label", None)
+        if start_lbl is not None or end_lbl is not None:
+            if valid:
+                seg = segments[idx] if isinstance(segments[idx], dict) else {}
+                try:
+                    fmt = getattr(self, "format_timestamp", None)
+                    if callable(fmt):
+                        start_text = f"Start  {fmt(float(seg.get('start', 0.0)))}"
+                        end_text = f"End  {fmt(float(seg.get('end', 0.0)))}"
+                    else:
+                        start_text = f"Start  {seg.get('start', 0.0):.2f}s"
+                        end_text = f"End  {seg.get('end', 0.0):.2f}s"
+                except Exception:
+                    start_text = "Start  -"
+                    end_text = "End  -"
+                if start_lbl is not None:
+                    start_lbl.setText(start_text)
+                if end_lbl is not None:
+                    end_lbl.setText(end_text)
+            else:
+                if start_lbl is not None:
+                    start_lbl.setText("Start  -")
+                if end_lbl is not None:
+                    end_lbl.setText("End  -")
+        # Load the dub content (spoken text if stored, otherwise the
+        # subtitle text) into the A2 inspector's editable input. The
+        # user can edit it directly - no separate read-only display.
+        editor = getattr(self, "audio_inspector_spoken_editor", None)
+        if editor is not None:
+            try:
+                editor.blockSignals(True)
+                if valid:
+                    seg = segments[idx] if isinstance(segments[idx], dict) else {}
+                    content = str(
+                        seg.get("spoken")
+                        or seg.get("tts_text")
+                        or seg.get("text", "")
+                        or ""
+                    ).strip()
+                    current = editor.toPlainText().strip()
+                    if current != content:
+                        editor.setPlainText(content)
+                else:
+                    if editor.toPlainText():
+                        editor.setPlainText("")
+            finally:
+                editor.blockSignals(False)
+        status_label = getattr(self, "audio_inspector_spoken_status_label", None)
+        if status_label is not None:
+            if not valid:
+                status_label.setText("")
+
+    def _on_audio_inspector_spoken_text_edited(self):
+        """Persist edits made in the A2 inspector's spoken-text editor
+        back to the currently selected segment.
+        """
+        editor = getattr(self, "audio_inspector_spoken_editor", None)
+        if editor is None:
+            return
+        idx = int(getattr(self, "_selected_segment_index", -1))
+        segments = self.get_active_segments() or []
+        if not (0 <= idx < len(segments)):
+            return
+        new_text = editor.toPlainText()
+        seg = segments[idx]
+        if isinstance(seg, dict):
+            seg["spoken"] = new_text
+            seg["tts_text"] = new_text
+
+    def on_audio_inspector_use_voice_clicked(self):
+        idx = int(getattr(self, "_selected_segment_index", -1))
+        segments = self.get_active_segments() or []
+        if not (0 <= idx < len(segments)):
+            return
+        self.use_spoken_text_for_subtitle(idx)
+
+    def on_audio_inspector_regenerate_voice_clicked(self):
+        idx = int(getattr(self, "_selected_segment_index", -1))
+        segments = self.get_active_segments() or []
+        if not (0 <= idx < len(segments)):
+            return
+        self.preview_segment_audio(idx)
+
+    def _apply_audio_track_settings(self, track_name: str):
+        """Apply per-track volume/gain/mute to the underlying media player.
+
+        Maps the timeline track name to the media player:
+          "A1 Original Audio" -> QMediaPlayer #1 (original sidecar)
+          "A2 Dub Audio"      -> QMediaPlayer #2 (dubbed sidecar)
+        """
+        if not hasattr(self, "media_player") or self.media_player is None:
+            return
+        try:
+            if track_name == "A1 Original Audio":
+                vol = self._compute_audio_track_volume(track_name, base=100.0)
+                gain_db = self._get_audio_track_gain_db(track_name)
+                effective = vol * (10 ** (gain_db / 20.0))
+                effective = max(0.0, min(200.0, effective))
+                if hasattr(self.media_player, "set_original_volume"):
+                    self.media_player.set_original_volume(effective)
+                muted = self._is_audio_track_muted(track_name)
+                if hasattr(self.media_player, "set_mute_original"):
+                    self.media_player.set_mute_original(muted)
+            elif track_name == "A2 Dub Audio":
+                vol = self._compute_audio_track_volume(track_name, base=100.0)
+                gain_db = self._get_audio_track_gain_db(track_name)
+                effective = vol * (10 ** (gain_db / 20.0))
+                effective = max(0.0, min(200.0, effective))
+                if hasattr(self.media_player, "set_dubbed_volume"):
+                    self.media_player.set_dubbed_volume(effective)
+                muted = self._is_audio_track_muted(track_name)
+                if hasattr(self.media_player, "set_mute_dubbed"):
+                    self.media_player.set_mute_dubbed(muted)
+        except Exception:
+            pass
+
+    def _get_audio_track_meta(self, track_name: str) -> dict:
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return {}
+        for t in self.timeline._timeline.tracks:
+            if t.name == track_name:
+                if not isinstance(t.metadata, dict):
+                    t.metadata = {}
+                return t.metadata
+        return {}
+
+    def _get_audio_track_volume(self, track_name: str) -> float:
+        meta = self._get_audio_track_meta(track_name)
+        try:
+            return float(meta.get("_volume", 100.0))
+        except (TypeError, ValueError):
+            return 100.0
+
+    def _get_audio_track_gain_db(self, track_name: str) -> float:
+        meta = self._get_audio_track_meta(track_name)
+        try:
+            return float(meta.get("_gain_db", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _is_audio_track_muted(self, track_name: str) -> bool:
+        meta = self._get_audio_track_meta(track_name)
+        if bool(meta.get("_muted", False)):
+            return True
+        # A soloed track is never muted by another track's solo. If
+        # multiple tracks are soloed, all of them play; the rest are muted.
+        if bool(meta.get("_solo", False)):
+            return False
+        # If any OTHER audio track is soloed, this one is muted.
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return False
+        for t in self.timeline._timeline.tracks:
+            if t.name == track_name:
+                continue
+            if str(getattr(t, "name", "")).startswith(("A1", "A2")):
+                if isinstance(t.metadata, dict) and bool(t.metadata.get("_solo", False)):
+                    return True
+        return False
+
+    def _compute_audio_track_volume(self, track_name: str, base: float = 100.0) -> float:
+        meta = self._get_audio_track_meta(track_name)
+        try:
+            v = float(meta.get("_volume", base))
+        except (TypeError, ValueError):
+            v = base
+        return max(0.0, min(200.0, v))
+
+    def on_track_mute_toggled(self, track_name: str, is_muted: bool):
+        """Handle timeline audio track mute toggling.
+        Maps timeline mute to per-track mute on the dual-track player.
+        """
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return
+        for t in self.timeline._timeline.tracks:
+            if t.name == track_name:
+                t.muted = is_muted
+
+        muted = bool(is_muted)
+        if track_name == "A1 Original Audio":
+            self._mute_original = muted
+            if hasattr(self, "media_player"):
+                try:
+                    self.media_player.set_mute_original(muted)
+                except Exception:
+                    pass
+        elif track_name == "A2 Dub Audio":
+            self._mute_dubbed = muted
+            if hasattr(self, "media_player"):
+                try:
+                    self.media_player.set_mute_dubbed(muted)
+                except Exception:
+                    pass
+
+        if hasattr(self, "track_label_bar"):
+            self.track_label_bar.set_muted(track_name, muted)
+
+        self._refresh_preview_audio_controls()
+        self.schedule_timeline_visual_refresh(waveform=True, thumbnails=False)
+
+    def _sync_timeline_mute_to_gui(self):
+        """Pull the current timeline track mute state into the GUI and backend."""
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return
+        a1_muted = False
+        a2_muted = False
+        for t in self.timeline._timeline.tracks:
+            if t.name == "A1 Original Audio":
+                a1_muted = bool(t.muted)
+            elif t.name == "A2 Dub Audio":
+                a2_muted = bool(t.muted)
+        self._mute_original = a1_muted
+        self._mute_dubbed = a2_muted
+        if hasattr(self, "media_player"):
+            try:
+                self.media_player.set_mute_original(a1_muted)
+            except Exception:
+                pass
+            try:
+                self.media_player.set_mute_dubbed(a2_muted)
+            except Exception:
+                pass
+        if hasattr(self, "track_label_bar"):
+            self.track_label_bar.set_muted("A1 Original Audio", a1_muted)
+            self.track_label_bar.set_muted("A2 Dub Audio", a2_muted)
+
+    def _is_active_timeline_audio_track_muted(self) -> bool:
+        track_mutes = self._timeline_audio_track_mutes()
+        if not track_mutes:
+            return False
+        a1_muted, a2_muted = track_mutes
+        mode = str(getattr(self, "_preview_audio_track_mode", "original") or "original").strip().lower()
+        if mode != "dubbed":
+            return a1_muted
+        dubbed_audio_kind, _dubbed_path = self._resolve_preview_dubbed_playback_source()
+        if dubbed_audio_kind == "voice":
+            return a2_muted
+        if dubbed_audio_kind == "mixed":
+            return a1_muted and a2_muted
+        return a1_muted
+
+    def on_add_timeline_layer(self, layer_type: str = "subtitle"):
+        if not hasattr(self, "timeline"):
+            return
+
+        tl = self.timeline._timeline
+        if not tl:
+            return
+
+        from app.layers.base import LayerType
+        from app.layers.sync_bridge import find_or_create_track
+
+        if layer_type == "subtitle":
+            from app.layers.subtitle import SubtitleLayer
+            sub_track = None
+            for track in tl.tracks:
+                if track.type.value == "subtitle":
+                    sub_track = track
+                    break
+            if sub_track is None:
+                return
+            idx = len(sub_track.layers)
+            last_end = max((l.end for l in sub_track.layers), default=0.0)
+            layer = SubtitleLayer(
+                name=f"New Subtitle {idx + 1}",
+                text="New text",
+                start=last_end,
+                end=last_end + 2.0,
+            )
+            layer.z_index = idx
+            sub_track.layers.append(layer)
+            self.timeline._segment_indices[layer.id] = idx
+            self.timeline._duration = max(self.timeline._duration, layer.end)
+            self.timeline._redraw()
+            seg = {"id": idx, "start": layer.start, "end": layer.end, "text": layer.text}
+            if not hasattr(self, "current_segments"):
+                self.current_segments = []
+            self.current_segments.append(seg)
+            if not hasattr(self, "current_translated_segment_models"):
+                self.current_translated_segment_models = []
+            self.current_translated_segment_models.append(seg)
+
+        elif layer_type == "text":
+            from app.layers.text import TextLayer
+            text_track = find_or_create_track(tl, "T1 Text", LayerType.TEXT, 80)
+            idx = len(text_track.layers)
+            layer = TextLayer(
+                name=f"Text {idx + 1}",
+                text="New text layer",
+                start=0.0,
+                end=min(tl.duration, 10.0) if tl.duration > 0 else 10.0,
+            )
+            layer.z_index = idx
+            text_track.layers.append(layer)
+            self.timeline._redraw()
+
+        elif layer_type == "image":
+            from app.layers.image import ImageLayer
+            img_track = find_or_create_track(tl, "I1 Image", LayerType.IMAGE, 80)
+            idx = len(img_track.layers)
+            layer = ImageLayer(
+                name=f"Image {idx + 1}",
+                source="",
+                start=0.0,
+                end=min(tl.duration, 10.0) if tl.duration > 0 else 10.0,
+            )
+            layer.z_index = idx
+            img_track.layers.append(layer)
+            self.timeline._redraw()
+
+        elif layer_type == "blur":
+            from app.layers.blur import BlurLayer
+            blur_track = find_or_create_track(tl, "B1 Blur", LayerType.BLUR, 60)
+            # Register the new track's height in the timeline so it gets a
+            # real draw slot (otherwise the track silently uses the default
+            # height and may not be visible).
+            if hasattr(self.timeline, "_track_heights"):
+                self.timeline._track_heights[blur_track.id] = (
+                    blur_track.height or 60
+                )
+            idx = len(blur_track.layers)
+            # Stagger each new blur layer slightly so all layers are
+            # visible in the timeline (otherwise overlapping layers at
+            # the same position hide each other).
+            stagger = idx % 4
+            base_y = 0.75 - stagger * 0.06
+            base_x = 0.30 + (stagger % 2) * 0.08
+            layer = BlurLayer(
+                name=f"Blur {idx + 1}",
+                position_x=float(base_x),
+                position_y=float(base_y),
+                width=0.4,
+                height=0.1,
+                blur_strength=20.0,
+                start=0.0,
+                end=min(tl.duration, 5.0) if tl.duration > 0 else 5.0,
+            )
+            layer.z_index = idx
+            blur_track.layers.append(layer)
+            # Force a redraw so the new track + layer are visible.
+            self.timeline._redraw()
+            # Auto-scroll the timeline vertically so the new B1 Blur
+            # track is in view (it sits below V1 + A1 by default).
+            try:
+                if hasattr(self.timeline, "verticalScrollBar"):
+                    y_offset = 0
+                    if hasattr(self.timeline, "RULER_HEIGHT"):
+                        y_offset = int(self.timeline.RULER_HEIGHT)
+                    for tr in tl.tracks:
+                        if tr.id == blur_track.id:
+                            break
+                        y_offset += int(
+                            self.timeline._track_heights.get(
+                                tr.id, self.timeline.TRACK_DEFAULT_H
+                            )
+                        )
+                    bar = self.timeline.verticalScrollBar()
+                    # Make sure the scroll bar range reflects the new scene
+                    # size (it is normally auto-sized by the QGraphicsView,
+                    # but the range can lag on first update).
+                    viewport_h = int(self.timeline.viewport().height())
+                    scene_h = int(self.timeline._scene.height())
+                    bar.setRange(0, max(0, scene_h - viewport_h))
+                    # Center the B1 track in the viewport
+                    target = max(0, y_offset - max(0, (viewport_h - 80) // 2))
+                    bar.setValue(target)
+                    # Make sure the new layer is fully visible too.
+                    self.timeline.ensureVisible(
+                        0,
+                        y_offset,
+                        1,
+                        int(self.timeline._track_heights.get(
+                            blur_track.id, 60
+                        )),
+                    )
+            except Exception:
+                pass
+            # Auto-enable the blur effect so the visual blur shows on the
+            # video preview the moment the layer is added.
+            if hasattr(self, "blur_area_btn"):
+                self.blur_area_btn.blockSignals(True)
+                self.blur_area_btn.setChecked(True)
+                self.blur_area_btn.blockSignals(False)
+            # Push the new region's normalized data into the video view
+            # and force the mpv vf filter to be applied immediately.
+            try:
+                regions = []
+                for ll in blur_track.layers:
+                    if not getattr(ll, "visible", True):
+                        continue
+                    regions.append({
+                        "x": float(getattr(ll, "position_x", 0.3)),
+                        "y": float(getattr(ll, "position_y", 0.8)),
+                        "width": float(getattr(ll, "width", 0.4)),
+                        "height": float(getattr(ll, "height", 0.1)),
+                        "blur_strength": float(getattr(ll, "blur_strength", 20.0)),
+                    })
+                if hasattr(self.video_view, "set_blur_regions_normalized"):
+                    self.video_view.set_blur_regions_normalized(regions)
+                if hasattr(self, "apply_preview_blur_region"):
+                    self.apply_preview_blur_region(force=True)
+            except Exception:
+                pass
+            # Persist the new region(s) to the project state so they
+            # survive a close/reopen. Without this, the blur_state is
+            # only saved on the legacy blur add/edit handlers, and a
+            # region added via the new "Blur" button would be lost.
+            try:
+                if hasattr(self, "persist_project_blur_state"):
+                    self.persist_project_blur_state()
+            except Exception:
+                pass
 
     def _sync_hidden_transcript_text_from_segments(self):
         if getattr(self, "_syncing_segment_editor", False):
@@ -4363,6 +5562,64 @@ class VideoTranslatorGUI(QMainWindow):
         self.refresh_ui_state()
 
     def delete_selected_timeline_segment(self):
+        # First, if a blur layer is currently selected, remove it from the
+        # B1 Blur track AND remove the corresponding video-view region so
+        # both stay in sync.
+        if hasattr(self, "timeline") and self.timeline._timeline:
+            selected_id = str(getattr(self.timeline, "_selected_layer_id", "") or "")
+            for track in self.timeline._timeline.tracks:
+                if track.type.value == "blur":
+                    for layer_idx, layer in enumerate(list(track.layers)):
+                        if layer.id == selected_id:
+                            # Pop the corresponding overlay region (same
+                            # index) SILENTLY so the on_region_changed
+                            # signal does not fire and re-sync B1 with
+                            # the now-stale region count. We then sync
+                            # B1 manually from the new (smaller) overlay
+                            # list.
+                            try:
+                                overlay = getattr(self.video_view, "blur_overlay", None)
+                                if overlay is not None and 0 <= layer_idx < len(overlay._regions):
+                                    overlay._regions.pop(layer_idx)
+                                    overlay._active_index = min(
+                                        layer_idx, len(overlay._regions) - 1
+                                    )
+                                    overlay.update()
+                                    if hasattr(overlay, "sync_to_view"):
+                                        overlay.sync_to_view()
+                            except Exception:
+                                pass
+                            # Remove the layer only if it is still in
+                            # the track (the manual sync below clears
+                            # and recreates, which can race with this
+                            # branch).
+                            try:
+                                if layer in track.layers:
+                                    track.layers.remove(layer)
+                            except ValueError:
+                                pass
+                            # Sync the video view + preview to the new state
+                            try:
+                                if hasattr(self, "_current_blur_regions_payload"):
+                                    regions = self._current_blur_regions_payload()
+                                else:
+                                    regions = []
+                                if hasattr(self.timeline, "sync_blur_regions"):
+                                    self.timeline.sync_blur_regions(regions)
+                                if hasattr(self, "apply_preview_blur_region"):
+                                    self.apply_preview_blur_region(force=True)
+                            except Exception:
+                                pass
+                            if hasattr(self.timeline, "_redraw"):
+                                self.timeline._redraw()
+                            if hasattr(self.timeline, "viewport"):
+                                self.timeline.viewport().update()
+                            try:
+                                if hasattr(self, "persist_project_blur_state"):
+                                    self.persist_project_blur_state()
+                            except Exception:
+                                pass
+                            return
         segments = list(self.get_active_segments() or [])
         if not segments:
             return
@@ -4527,23 +5784,57 @@ class VideoTranslatorGUI(QMainWindow):
         return bool(widget and widget.isVisible())
 
     def is_subtitle_inspector_anchored(self) -> bool:
-        checkbox = getattr(self, "anchor_subtitle_inspector_cb", None)
+        # Backwards-compatible alias - the anchor now applies to the
+        # entire track inspector (subtitle, audio, blur, default).
+        return self.is_inspector_anchored()
+
+    def is_inspector_anchored(self) -> bool:
+        checkbox = getattr(self, "anchor_inspector_cb", None)
         return bool(checkbox and checkbox.isChecked())
 
-    def _sync_subtitle_inspector_shell_width(self, visible: bool):
+    def _sync_subtitle_inspector_shell_width(self, visible: bool = None):
+        """Width of the inspector shell.
+
+        The shell hosts a QStackedWidget that can show a subtitle, audio or
+        default card. Width is driven by the `_inspector_collapsed` state:
+        - collapsed=True  -> handle only
+        - collapsed=False -> wide enough for the widest card
+
+        The `visible` parameter is ignored (kept for API compatibility).
+        """
         shell = getattr(self, "subtitle_inspector_shell", None)
-        card = getattr(self, "subtitle_inspector_card", None)
-        handle = getattr(self, "subtitle_inspector_handle", None)
         if shell is None:
             return
-        handle_width = 34
+        handle_width = 48
+        handle = getattr(self, "subtitle_inspector_handle", None)
         if handle is not None:
-            handle_width = max(handle_width, int(handle.sizeHint().width() or handle.width() or 34))
-        if visible and card is not None:
-            card_width = int(card.maximumWidth() or card.sizeHint().width() or card.minimumWidth() or 560)
-            target_width = handle_width + max(360, card_width)
-        else:
+            try:
+                handle_width = max(handle_width, int(handle.sizeHint().width() or handle.width() or 48))
+            except Exception:
+                pass
+
+        if bool(getattr(self, "_inspector_collapsed", False)):
             target_width = handle_width
+        else:
+            widest = 400
+            for attr in ("subtitle_inspector_card", "audio_inspector_card", "default_inspector_card"):
+                card = getattr(self, attr, None)
+                if card is None:
+                    continue
+                try:
+                    raw_max = int(card.maximumWidth() or 0)
+                    if raw_max > 5000 or raw_max <= 0:
+                        raw_max = 0
+                    raw_min = int(card.minimumWidth() or 0)
+                    if raw_min > 5000 or raw_min < 0:
+                        raw_min = 0
+                    raw_hint = int(card.sizeHint().width() or 0)
+                    candidate = raw_max or raw_hint or raw_min or 400
+                    widest = max(widest, candidate)
+                except Exception:
+                    pass
+            widest = max(400, min(widest, 560))
+            target_width = handle_width + widest
         shell.setMinimumWidth(target_width)
         shell.setMaximumWidth(target_width)
         shell.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
@@ -4555,12 +5846,6 @@ class VideoTranslatorGUI(QMainWindow):
             self._selected_segment_index = -1
             if hasattr(self, "subtitle_inspector_summary_label"):
                 self.subtitle_inspector_summary_label.setText("Selected subtitle: none")
-            if hasattr(self, "segment_selection_label"):
-                self.segment_selection_label.setText("No subtitle selected")
-            if hasattr(self, "segment_prev_btn"):
-                self.segment_prev_btn.setEnabled(False)
-            if hasattr(self, "segment_next_btn"):
-                self.segment_next_btn.setEnabled(False)
             if hasattr(self, "rewrite_selected_segment_btn"):
                 self.rewrite_selected_segment_btn.setEnabled(False)
             return
@@ -4571,25 +5856,19 @@ class VideoTranslatorGUI(QMainWindow):
         self._selected_segment_index = selected_index
         if hasattr(self, "subtitle_inspector_summary_label"):
             self.subtitle_inspector_summary_label.setText(f"Selected subtitle: Block {selected_index + 1} / {count}")
-        if hasattr(self, "segment_selection_label"):
-            self.segment_selection_label.setText(f"Block {selected_index + 1} / {count}")
-        if hasattr(self, "segment_prev_btn"):
-            self.segment_prev_btn.setEnabled(selected_index > 0)
-        if hasattr(self, "segment_next_btn"):
-            self.segment_next_btn.setEnabled(selected_index < count - 1)
         if hasattr(self, "rewrite_selected_segment_btn"):
             self.rewrite_selected_segment_btn.setEnabled(True)
 
     def set_subtitle_inspector_details_visible(self, visible: bool, *, sync: bool = True):
-        if not visible and self.is_subtitle_inspector_anchored():
+        if not visible and self.is_inspector_anchored():
             visible = True
-        card = getattr(self, "subtitle_inspector_card", None)
+        # The subtitle details widget (segment editor) visibility is
+        # independent from the audio/default cards. The shell collapse
+        # state is managed via `set_inspector_collapsed` (called from the
+        # toggle button handler), not by this function.
         widget = getattr(self, "subtitle_inspector_details_widget", None)
-        if card is not None:
-            card.setVisible(bool(visible))
         if widget is not None:
             widget.setVisible(bool(visible))
-        self._sync_subtitle_inspector_shell_width(bool(visible))
         toggle_btn = getattr(self, "subtitle_inspector_toggle_btn", None)
         if toggle_btn is not None:
             toggle_btn.blockSignals(True)
@@ -4600,33 +5879,83 @@ class VideoTranslatorGUI(QMainWindow):
             else:
                 toggle_btn.setText("Hide details" if visible else "Show details")
             toggle_btn.blockSignals(False)
-        anchor_cb = getattr(self, "anchor_subtitle_inspector_cb", None)
+        anchor_cb = getattr(self, "anchor_inspector_cb", None)
         if anchor_cb is not None:
             toggle_btn = getattr(self, "subtitle_inspector_toggle_btn", None)
             if toggle_btn is not None:
-                toggle_btn.setEnabled(not self.is_subtitle_inspector_anchored())
+                toggle_btn.setEnabled(not self.is_inspector_anchored())
         if not visible:
             self._clear_segment_editor_rows()
             self._segment_editor_rows = []
             self._update_subtitle_inspector_summary()
-            return
-        self._sync_selected_segment_to_playback_position()
-        if sync:
-            self.sync_segment_editor_rows()
+        else:
+            self._sync_selected_segment_to_playback_position()
+            if sync:
+                self.sync_segment_editor_rows()
+        # Do NOT change the inspector collapsed state from here; the
+        # toggle button drives the collapse. Other callers (e.g. media_utils
+        # on Play) just hide the details without collapsing the shell.
+
+    def set_inspector_collapsed(self, collapsed: bool):
+        """Collapse or expand the inspector shell. True = handle only.
+
+        Applies to whichever card is currently shown (subtitle, audio,
+        blur or default). The active card stays in the stack and is
+        re-shown when the user reopens. When collapsed, the entire card
+        stack is hidden so no content leaks past the handle.
+
+        The anchor checkbox (`anchor_inspector_cb`) forces the shell to
+        stay expanded regardless of `collapsed`.
+        """
+        if collapsed and self.is_inspector_anchored():
+            collapsed = False
+        self._inspector_collapsed = bool(collapsed)
+        # Sync shell width
+        try:
+            self._sync_subtitle_inspector_shell_width(visible=not bool(collapsed))
+        except Exception:
+            pass
+        # Hide the entire stack so no card content is visible when collapsed
+        stack = getattr(self, "inspector_stack", None)
+        if stack is not None:
+            stack.setVisible(not bool(collapsed))
+        # Sync subtitle details widget visibility to match
+        widget = getattr(self, "subtitle_inspector_details_widget", None)
+        if widget is not None:
+            widget.setVisible(not bool(collapsed))
+        # Sync toggle button
+        toggle_btn = getattr(self, "subtitle_inspector_toggle_btn", None)
+        if toggle_btn is not None:
+            toggle_btn.blockSignals(True)
+            toggle_btn.setChecked(not bool(collapsed))
+            toggle_btn.setText("▶" if collapsed else "◀")
+            toggle_btn.setToolTip(
+                "Show track inspector" if collapsed else "Hide track inspector"
+            )
+            toggle_btn.blockSignals(False)
 
     def show_subtitle_inspector_details(self):
         self.set_subtitle_inspector_details_visible(True, sync=True)
 
     def toggle_subtitle_inspector_details(self, checked: bool):
-        self.set_subtitle_inspector_details_visible(bool(checked), sync=bool(checked))
+        # checked=True means "show details" (expand the inspector shell).
+        # checked=False means "hide details" (collapse to handle only).
+        self.set_inspector_collapsed(not bool(checked))
+        # Also update the subtitle details widget visibility (so the
+        # segment editor appears/disappears).
+        widget = getattr(self, "subtitle_inspector_details_widget", None)
+        if widget is not None:
+            widget.setVisible(bool(checked))
 
-    def on_anchor_subtitle_inspector_toggled(self, checked: bool):
+    def on_anchor_inspector_toggled(self, checked: bool):
         if checked:
-            self.set_subtitle_inspector_details_visible(True, sync=True)
-        else:
-            toggle_btn = getattr(self, "subtitle_inspector_toggle_btn", None)
-            if toggle_btn is not None:
-                toggle_btn.setEnabled(True)
+            # Anchor means: keep the track inspector shell expanded
+            # (whichever card is currently shown: subtitle, audio, blur
+            # or default).
+            self.set_inspector_collapsed(False)
+        toggle_btn = getattr(self, "subtitle_inspector_toggle_btn", None)
+        if toggle_btn is not None:
+            toggle_btn.setEnabled(not checked)
         self.save_user_settings()
 
     def _sync_selected_segment_to_playback_position(self):
@@ -4692,11 +6021,14 @@ class VideoTranslatorGUI(QMainWindow):
             for row in visible_rows:
                 idx = int(row.get("segment_index", 0))
                 card = QFrame(self.segment_editor_container if hasattr(self, "segment_editor_container") else None)
-                card.setObjectName("segmentInspectorCard")
+                # No border on the subtitle display frame - blends into
+                # the inspector shell.
+                card.setFrameShape(QFrame.NoFrame)
                 card_layout = QVBoxLayout(card)
-                card_layout.setContentsMargins(12, 12, 12, 12)
-                card_layout.setSpacing(8)
+                card_layout.setContentsMargins(4, 4, 4, 4)
+                card_layout.setSpacing(6)
 
+                # Start/End timing chips
                 timing_meta_layout = QHBoxLayout()
                 timing_meta_layout.setContentsMargins(0, 0, 0, 0)
                 timing_meta_layout.setSpacing(12)
@@ -4716,32 +6048,10 @@ class VideoTranslatorGUI(QMainWindow):
                 card_layout.addLayout(timing_meta_layout)
                 card_layout.addWidget(original_label)
 
-                segment_tabs = QTabWidget(card)
-                segment_tabs.setStyleSheet("""
-                    QTabWidget::pane { padding: 0px; border-left: none; border-right: none; border-bottom: none; border-top: 1px solid #27425d; }
-                    QTabBar::tab {
-                        padding: 4px 14px;
-                        font-weight: 700;
-                        font-size: 11px;
-                        color: #8899aa;
-                        background: transparent;
-                        border: none;
-                        border-bottom: 2px solid transparent;
-                    }
-                    QTabBar::tab:selected {
-                        color: #6ee7d6;
-                        border-bottom: 2px solid #6ee7d6;
-                    }
-                    QTabBar::tab:hover { color: #cfe6ff; }
-                """)
-                segment_tabs.setDocumentMode(True)
-                segment_tabs.tabBar().setExpanding(True)
-
-                subtitle_tab_page = QWidget()
-                subtitle_tab_layout = QVBoxLayout(subtitle_tab_page)
-                subtitle_tab_layout.setContentsMargins(0, 0, 0, 0)
-                subtitle_tab_layout.setSpacing(8)
-
+                # The QTabWidget wrapper (with the "Subtitle" tab label
+                # and the horizontal tab bar / "hr" beneath it) has been
+                # removed. The translated editor + highlight actions are
+                # placed directly in the card layout.
                 translated_editor = QTextEdit()
                 translated_editor.setObjectName("segmentInspectorEditor")
                 translated_editor.setAcceptRichText(False)
@@ -4780,49 +6090,9 @@ class VideoTranslatorGUI(QMainWindow):
                 highlight_meta_layout.addWidget(highlight_placeholder)
                 highlight_meta_layout.addWidget(highlight_chip_container, 1)
 
-                subtitle_tab_layout.addWidget(translated_editor, 0)
-                subtitle_tab_layout.addLayout(highlight_action_layout)
-                subtitle_tab_layout.addLayout(highlight_meta_layout)
-
-                voice_tab_page = QWidget()
-                voice_tab_layout = QVBoxLayout(voice_tab_page)
-                voice_tab_layout.setContentsMargins(0, 0, 0, 0)
-                voice_tab_layout.setSpacing(8)
-
-                spoken_status_label = QLabel("")
-                spoken_status_label.setObjectName("helperLabel")
-                spoken_status_label.setWordWrap(True)
-                spoken_status_label.hide()
-                spoken_editor = QTextEdit()
-                spoken_editor.setObjectName("segmentInspectorEditor")
-                spoken_editor.setAcceptRichText(False)
-                spoken_editor.setPlainText(row["spoken"])
-                spoken_editor.setMinimumHeight(96)
-                spoken_editor.setMaximumHeight(96)
-                spoken_editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-                spoken_editor.setPlaceholderText("Text spoken by the voice.")
-                spoken_editor.textChanged.connect(
-                    lambda idx=idx, editor=spoken_editor: self.on_segment_spoken_text_edited(idx, editor)
-                )
-
-                spoken_action_layout = QHBoxLayout()
-                spoken_action_layout.setContentsMargins(0, 0, 0, 0)
-                spoken_action_layout.setSpacing(8)
-                match_subtitle_btn = QPushButton("Use voice for subtitle")
-                match_subtitle_btn.clicked.connect(lambda _=False, idx=idx: self.use_spoken_text_for_subtitle(idx))
-                preview_btn = QPushButton("Regenerate voice")
-                preview_btn.clicked.connect(lambda _=False, idx=idx: self.preview_segment_audio(idx))
-                spoken_action_layout.addWidget(match_subtitle_btn)
-                spoken_action_layout.addWidget(preview_btn)
-                spoken_action_layout.addStretch()
-
-                voice_tab_layout.addWidget(spoken_editor, 0)
-                voice_tab_layout.addLayout(spoken_action_layout)
-                voice_tab_layout.addStretch()
-
-                segment_tabs.addTab(subtitle_tab_page, "Subtitle")
-                segment_tabs.addTab(voice_tab_page, "Voice")
-                card_layout.addWidget(segment_tabs)
+                card_layout.addWidget(translated_editor, 0)
+                card_layout.addLayout(highlight_action_layout)
+                card_layout.addLayout(highlight_meta_layout)
 
                 for label in card.findChildren(QLabel):
                     label_text = label.text().strip()
@@ -4835,10 +6105,6 @@ class VideoTranslatorGUI(QMainWindow):
                         "frame": card,
                         "original_label": original_label,
                         "translated_editor": translated_editor,
-                        "spoken_editor": spoken_editor,
-                        "spoken_status_label": spoken_status_label,
-                        "match_subtitle_button": match_subtitle_btn,
-                        "preview_button": preview_btn,
                         "highlight_button": highlight_btn,
                         "highlight_placeholder": highlight_placeholder,
                         "highlight_chip_layout": highlight_chip_layout,
@@ -4975,7 +6241,11 @@ class VideoTranslatorGUI(QMainWindow):
         )
         video_view.set_blur_edit_enabled(editing_allowed)
         if blur_add_btn is not None:
-            blur_add_btn.setEnabled(has_video and blur_enabled and not is_playing and not bool(getattr(self, "_filter_thumbnail_visible", False)))
+            # The "+" button must be clickable even when the blur effect
+            # toggle is OFF: pressing it should both enable the effect
+            # AND add a region. Requiring the user to toggle first is
+            # unnecessary friction.
+            blur_add_btn.setEnabled(has_video and not is_playing and not bool(getattr(self, "_filter_thumbnail_visible", False)))
 
     def toggle_blur_effect_enabled(self, checked: bool):
         if not hasattr(self, "video_view") or not hasattr(self, "blur_area_btn"):
@@ -5013,6 +6283,12 @@ class VideoTranslatorGUI(QMainWindow):
             self.blur_area_btn.blockSignals(False)
         if hasattr(self.video_view, "add_blur_region"):
             self.video_view.add_blur_region()
+        # Do NOT call on_add_timeline_layer("blur") here. The
+        # blurRegionChanged signal emitted by add_blur_region() will
+        # trigger on_preview_blur_region_changed() which (with the
+        # recent fix) syncs the B1 Blur track from the overlay regions
+        # even when the blur effect is on. Adding a BlurLayer here too
+        # would create a duplicate.
         self._sync_blur_controls()
         self._blur_region_preview_dirty = True
         if hasattr(self, "media_player"):
@@ -5048,9 +6324,24 @@ class VideoTranslatorGUI(QMainWindow):
     def on_preview_blur_region_changed(self):
         if self._blur_effect_enabled():
             self._blur_region_preview_dirty = True
+            # Even when the blur effect is on, the B1 Blur track in the
+            # timeline must stay in sync with the overlay regions. Without
+            # this, deleting a region from the overlay leaves a stale
+            # BlurLayer behind in the timeline.
+            if hasattr(self, "timeline"):
+                try:
+                    regions = self._current_blur_regions_payload() if hasattr(self, "_current_blur_regions_payload") else []
+                    self.timeline.sync_blur_regions(regions)
+                    if hasattr(self, "persist_project_blur_state"):
+                        self.persist_project_blur_state()
+                except Exception:
+                    pass
             return
         self.apply_preview_blur_region()
         self.persist_project_blur_state()
+        if hasattr(self, "timeline"):
+            regions = self._current_blur_regions_payload() if hasattr(self, "_current_blur_regions_payload") else []
+            self.timeline.sync_blur_regions(regions)
 
     def apply_preview_blur_region(self, *, regions=None, force: bool = False):
         if not hasattr(self, "media_player") or not hasattr(self, "video_view"):
@@ -5128,6 +6419,12 @@ class VideoTranslatorGUI(QMainWindow):
             self.blur_area_btn.setChecked(enabled)
             self.blur_area_btn.blockSignals(False)
         self._sync_blur_controls()
+        if hasattr(self, "timeline"):
+            # Always pass the saved regions, even when disabled, so the
+            # B1 Blur track mirrors the overlay. When the project has no
+            # regions, sync_blur_regions([]) removes the track entirely
+            # (so a stale B1 from a previous project is cleaned up).
+            self.timeline.sync_blur_regions(regions)
         if enabled:
             self._blur_region_preview_dirty = True
             if hasattr(self, "media_player"):
@@ -5382,9 +6679,11 @@ class VideoTranslatorGUI(QMainWindow):
             return
         voice_speed = self._parse_voice_speed_value()
         row = self._find_segment_editor_row(index)
-        if row:
-            row["preview_button"].setEnabled(False)
-            row["preview_button"].setText("...")
+        # The per-segment "Regenerate voice" button was moved to the
+        # A2 Dub Audio Track Inspector. Disable that one instead.
+        if getattr(self, "audio_inspector_regenerate_voice_btn", None) is not None:
+            self.audio_inspector_regenerate_voice_btn.setEnabled(False)
+            self.audio_inspector_regenerate_voice_btn.setText("...")
 
         existing = self._segment_preview_threads.get(index)
         if existing and existing.isRunning():
@@ -5404,21 +6703,21 @@ class VideoTranslatorGUI(QMainWindow):
         worker.start()
 
     def on_segment_audio_preview_ready(self, index: int, audio_path: str, error: str):
-        row = self._find_segment_editor_row(index)
-        if row:
-            row["preview_button"].setEnabled(True)
+        btn = getattr(self, "audio_inspector_regenerate_voice_btn", None)
 
         self._segment_preview_threads.pop(index, None)
 
         if error:
-            if row:
-                row["preview_button"].setText("Regenerate voice")
+            if btn is not None:
+                btn.setEnabled(True)
+                btn.setText("Regenerate voice")
             self.show_error("Audio Preview Failed", "Could not generate preview audio for this subtitle.", error)
             return
 
         self._voiceover_force_refresh = True
-        if row:
-            row["preview_button"].setText("Regenerate voice")
+        if btn is not None:
+            btn.setEnabled(True)
+            btn.setText("Regenerate voice")
 
         if getattr(self, "last_voice_vi_path", "") and os.path.exists(self.last_voice_vi_path):
             self.run_voiceover()
@@ -5909,7 +7208,7 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "blur_area_btn"):
             self.blur_area_btn.setEnabled(v_ok)
         if hasattr(self, "blur_add_btn"):
-            self.blur_add_btn.setEnabled(v_ok and self._blur_effect_enabled() and not bool(getattr(self, "_filter_thumbnail_visible", False)))
+            self.blur_add_btn.setEnabled(v_ok and not bool(getattr(self, "_filter_thumbnail_visible", False)))
         if hasattr(self, "ocr_region_btn"):
             self.ocr_region_btn.setEnabled(v_ok)
         self._sync_blur_controls()
@@ -7043,6 +8342,12 @@ class VideoTranslatorGUI(QMainWindow):
             self.current_translated_segment_models = self._dict_segments_to_models(self.current_translated_segments, translated=True)
             self._sync_hidden_translated_text_from_segments()
             self.apply_segments_to_timeline()
+            if hasattr(self, "timeline") and voice_track:
+                self.timeline.sync_tts_track(
+                    voice_track,
+                    segments=self.current_translated_segments or self.current_segments,
+                )
+            self._sync_timeline_mute_to_gui()
             self.persist_current_timeline_project_data()
             self.schedule_live_subtitle_preview_refresh()
             self.sync_segment_editor_rows()
@@ -7434,6 +8739,15 @@ class VideoTranslatorGUI(QMainWindow):
 
     def closeEvent(self, event):
         try:
+            # Persist the current blur state BEFORE clearing the overlay,
+            # otherwise the blurRegionChanged signal emitted by
+            # clear_blur_region() saves an empty regions list and the
+            # user loses their blur rectangles on reopen.
+            if hasattr(self, "persist_project_blur_state"):
+                try:
+                    self.persist_project_blur_state()
+                except Exception:
+                    pass
             if hasattr(self, "video_view"):
                 self.video_view.clear_blur_region()
             self.save_user_settings()
@@ -7468,8 +8782,15 @@ class VideoTranslatorGUI(QMainWindow):
             self.media_player.set_volume(getattr(self, "_preview_volume", 100))
         except Exception:
             pass
+        # Per-track mute is owned by the timeline (A1/A2). Re-apply the
+        # current per-track mute states so the backend reflects them.
         try:
-            self.media_player.set_muted(getattr(self, "_preview_muted", False))
+            mute_original = bool(getattr(self, "_mute_original", False))
+            mute_dubbed = bool(getattr(self, "_mute_dubbed", False))
+            if hasattr(self.media_player, "set_mute_original"):
+                self.media_player.set_mute_original(mute_original)
+            if hasattr(self.media_player, "set_mute_dubbed"):
+                self.media_player.set_mute_dubbed(mute_dubbed)
         except Exception:
             pass
         try:
@@ -7511,10 +8832,10 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "preview_audio_track_combo"):
             combo = self.preview_audio_track_combo
             entries = self._preview_audio_track_choices()
-            current_mode = str(getattr(self, "_preview_audio_track_mode", "original") or "original").strip().lower()
+            current_mode = str(getattr(self, "_preview_audio_track_mode", "both") or "both").strip().lower()
             if current_mode == "dubbed" and not any(value == "dubbed" for _label, value in entries):
-                current_mode = "original"
-                self._preview_audio_track_mode = "original"
+                current_mode = "both"
+                self._preview_audio_track_mode = "both"
             existing = [(combo.itemText(i), str(combo.itemData(i) or "")) for i in range(combo.count())]
             if existing != entries:
                 combo.blockSignals(True)
@@ -7543,8 +8864,27 @@ class VideoTranslatorGUI(QMainWindow):
         self._apply_preview_audio_state()
 
     def toggle_preview_mute(self):
-        self._preview_muted = not bool(getattr(self, "_preview_muted", False))
-        self._apply_preview_audio_state()
+        """Legacy global mute: toggle muting BOTH tracks together."""
+        was_muted = bool(getattr(self, "_mute_original", False)) and bool(getattr(self, "_mute_dubbed", False))
+        new_state = not was_muted
+        self._mute_original = new_state
+        self._mute_dubbed = new_state
+        self._preview_muted = new_state
+        if hasattr(self, "media_player"):
+            try:
+                self.media_player.set_mute_original(new_state)
+                self.media_player.set_mute_dubbed(new_state)
+            except Exception:
+                pass
+        # Sync timeline track mute visuals
+        if hasattr(self, "timeline") and self.timeline._timeline:
+            for t in self.timeline._timeline.tracks:
+                if t.name in ("A1 Original Audio", "A2 Dub Audio"):
+                    t.muted = new_state
+        if hasattr(self, "track_label_bar"):
+            self.track_label_bar.set_muted("A1 Original Audio", new_state)
+            self.track_label_bar.set_muted("A2 Dub Audio", new_state)
+        self._refresh_preview_audio_controls()
 
     def on_preview_speed_changed(self, index: int):
         if not hasattr(self, "preview_speed_combo"):

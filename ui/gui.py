@@ -71,5 +71,12 @@ if __name__ == "__main__":
         window.load_project_context(window.current_project_state)
         window.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
 
+        if hasattr(window, "timeline") and hasattr(window.timeline, "set_video_source"):
+            try:
+                dur = window.media_player.duration() / 1000.0
+            except Exception:
+                dur = 60.0
+            window.timeline.set_video_source(window._current_video_path, dur)
+
     QTimer.singleShot(100, _init_video)
     sys.exit(app.exec())

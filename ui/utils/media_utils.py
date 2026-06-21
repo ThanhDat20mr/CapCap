@@ -54,6 +54,14 @@ def toggle_play(gui):
             if hasattr(gui, "_sync_blur_controls"):
                 gui._sync_blur_controls()
             gui.timeline.set_playing(False)
+            # Do NOT auto-reopen the track inspector on pause. The user
+            # can still re-open it manually with the toggle button. The
+            # anchor checkbox is the only way to keep it open through
+            # play/pause cycles.
+            try:
+                gui._inspector_collapsed_before_play = None
+            except Exception:
+                pass
             if (
                 has_active_video_filters
                 and filter_workflow_active
@@ -97,6 +105,19 @@ def toggle_play(gui):
                 and gui._blur_effect_enabled()
             ):
                 gui.video_view.set_blur_edit_enabled(False)
+            # Auto-collapse the track inspector on play (unless the
+            # user anchored it open). The previous collapsed state is
+            # remembered so we can restore it on pause.
+            try:
+                if (
+                    not getattr(gui, "is_inspector_anchored", lambda: False)()
+                ):
+                    prev = bool(getattr(gui, "_inspector_collapsed", False))
+                    gui._inspector_collapsed_before_play = prev
+                    if hasattr(gui, "set_inspector_collapsed"):
+                        gui.set_inspector_collapsed(True)
+            except Exception:
+                pass
             gui.media_player.play()
             gui.timeline.set_playing(True)
         if hasattr(gui, "_refresh_preview_audio_controls"):

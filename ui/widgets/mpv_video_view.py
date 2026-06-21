@@ -168,11 +168,15 @@ class _BlurRegionOverlayWindow(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, not self._editable)
         self.setCursor(Qt.OpenHandCursor if self._editable else Qt.ArrowCursor)
         if self._editable:
-            if not self._regions:
-                self.add_region(emit_change=False)
-                if callable(self._on_region_changed):
-                    self._on_region_changed()
-            self.sync_to_view()
+            # Only show the overlay if there are regions to edit. Do NOT
+            # auto-add a region here - that previously caused a phantom
+            # blur rectangle to appear on project reopen even when the
+            # user had deleted all blurs. The user must press "+" to add
+            # a region explicitly.
+            if self._regions:
+                self.sync_to_view()
+            else:
+                self.hide()
         else:
             self.hide()
         self.update()
