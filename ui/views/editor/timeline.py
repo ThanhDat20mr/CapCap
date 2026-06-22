@@ -81,8 +81,8 @@ class EditorTimeline(QGraphicsView):
     def _init_default_tracks(self) -> None:
         self._timeline = Timeline(duration=self._duration)
         self._timeline.tracks = [
-            Track(name="V1 Original Video", type=LayerType.VIDEO, height=80),
-            Track(name="A1 Original Audio", type=LayerType.AUDIO, height=80),
+            Track(name="V1 Video", type=LayerType.VIDEO, height=80),
+            Track(name="A1 Audio", type=LayerType.AUDIO, height=80),
         ]
         for t in self._timeline.tracks:
             self._track_heights[t.id] = t.height
@@ -142,9 +142,9 @@ class EditorTimeline(QGraphicsView):
 
         v1 = a1 = None
         for t in self._timeline.tracks:
-            if t.name == "V1 Original Video":
+            if t.name == "V1 Video":
                 v1 = t
-            elif t.name == "A1 Original Audio":
+            elif t.name == "A1 Audio":
                 a1 = t
 
         max_dur = self._duration
@@ -155,7 +155,7 @@ class EditorTimeline(QGraphicsView):
 
         if v1 and not v1.layers:
             v1.layers.append(VideoLayer(
-                name="V1 Original Video", source="",
+                name="V1 Video", source="",
                 start=0.0, end=max_dur,
                 transform=Transform(x=0, y=0, scale_x=1.0, scale_y=1.0),
             ))
@@ -166,7 +166,7 @@ class EditorTimeline(QGraphicsView):
 
         if a1 and not a1.layers:
             a1.layers.append(AudioLayer(
-                name="A1 Original Audio",
+                name="A1 Audio",
                 source="",
                 start=0.0, end=max_dur,
                 volume=1.0,

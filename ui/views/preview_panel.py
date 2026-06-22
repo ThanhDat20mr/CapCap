@@ -581,6 +581,7 @@ def build_preview_panel(gui):
     gui.preview_btn = QPushButton()
     gui.blur_area_btn = QPushButton()
     gui.blur_area_btn.setCheckable(True)
+    gui.blur_area_btn.setChecked(True)
     gui.blur_add_btn = QPushButton()
     gui.ocr_region_btn = QPushButton()
     gui.ocr_region_btn.setCheckable(True)
@@ -588,10 +589,12 @@ def build_preview_panel(gui):
     _set_preview_icon_button(gui.stop_btn, os.path.join(icons_dir, "reset.svg"), "Reset preview to the beginning")
     _set_preview_icon_button(gui.preview_btn, os.path.join(icons_dir, "preview.svg"), "Render a fresh preview using current subtitle and audio")
     _set_preview_icon_button(gui.blur_area_btn, os.path.join(icons_dir, "blur.svg"), "Turn blur effect on or off")
-    gui.blur_add_btn.setText("+")
-    gui.blur_add_btn.setToolTip("Add another blur region")
-    gui.blur_add_btn.setFixedSize(38, 38)
-    gui.blur_add_btn.setStyleSheet("QPushButton { color: #ffc15e; font-weight: bold; font-size: 18px; padding: 0; }")
+    gui.blur_add_btn.setText("Blur")
+    gui.blur_add_btn.setToolTip("Add a blur region")
+    gui.blur_add_btn.setFixedSize(50, 38)
+    gui.blur_add_btn.setStyleSheet(
+        "QPushButton { color: #ffc15e; font-weight: bold; font-size: 13px; padding: 0; }"
+    )
     gui.ocr_region_btn.setText("OCR")
     gui.ocr_region_btn.setToolTip("Edit OCR subtitle region")
     gui.ocr_region_btn.setFixedSize(38, 38)
@@ -622,7 +625,9 @@ def build_preview_panel(gui):
 
     blur_group = QHBoxLayout()
     blur_group.setSpacing(6)
-    blur_group.addWidget(gui.blur_area_btn)
+    # The blur ON/OFF toggle is controlled by clicking the B1
+    # track label in the timeline's left strip (like audio mute).
+    gui.blur_area_btn.setVisible(False)
     blur_group.addWidget(gui.blur_add_btn)
     blur_group.addWidget(gui.ocr_region_btn)
 
@@ -794,6 +799,7 @@ def build_preview_panel(gui):
     from views.editor.track_labels import TrackLabelBar
     gui.track_label_bar = TrackLabelBar()
     gui.track_label_bar.muteToggled.connect(gui.on_track_mute_toggled)
+    gui.track_label_bar.blurToggled.connect(gui.on_track_blur_toggled)
 
     def _sync_labels():
         if hasattr(gui, "timeline") and gui.timeline._timeline:
@@ -924,7 +930,7 @@ def build_preview_panel(gui):
     audio_copy = QVBoxLayout()
     audio_copy.setSpacing(0)
     audio_copy.setContentsMargins(0, 0, 0, 0)
-    audio_title = QLabel("Audio Track")
+    audio_title = QLabel("Audio")
     audio_title.setObjectName("statusHeadline")
     audio_copy.addWidget(audio_title)
     # Information labels (track name, layer count) are kept for
@@ -992,9 +998,9 @@ def build_preview_panel(gui):
     gui.audio_inspector_tip_label.setWordWrap(True)
     audio_layout.addWidget(gui.audio_inspector_tip_label)
 
-    # --- Dub Voice (only shown for A2 Dub Audio) ---
-    # Wrapped in a container so it can be hidden for A1 Original Audio.
-    # Start hidden - revealed when A2 Dub Audio is selected.
+    # --- Dub Voice (only shown for A2 Dub) ---
+    # Wrapped in a container so it can be hidden for A1 Audio.
+    # Start hidden - revealed when A2 Dub is selected.
     gui.audio_inspector_dub_section = QWidget()
     gui.audio_inspector_dub_section.setVisible(False)
     dub_section_layout = QVBoxLayout(gui.audio_inspector_dub_section)
@@ -1074,7 +1080,7 @@ def build_preview_panel(gui):
     blur_layout.setContentsMargins(12, 10, 12, 10)
     blur_layout.setSpacing(6)
 
-    blur_title = QLabel("Blur Track")
+    blur_title = QLabel("Blur")
     blur_title.setObjectName("statusHeadline")
     blur_layout.addWidget(blur_title)
     gui.blur_inspector_track_name_label = QLabel("-")
@@ -1138,7 +1144,7 @@ def build_preview_panel(gui):
     default_layout.addWidget(gui.default_inspector_summary_label)
     default_layout.addStretch(1)
 
-    # --- Video inspector (V1 Original Video track) ---
+    # --- Video inspector (V1 Video track) ---
     video_inspector_card = QFrame()
     video_inspector_card.setObjectName("statusCard")
     video_inspector_card.setMinimumWidth(400)
@@ -1147,7 +1153,7 @@ def build_preview_panel(gui):
     video_layout = QVBoxLayout(video_inspector_card)
     video_layout.setContentsMargins(14, 14, 14, 14)
     video_layout.setSpacing(10)
-    video_title = QLabel("V1 Original Video")
+    video_title = QLabel("V1 Video")
     video_title.setObjectName("statusHeadline")
     video_layout.addWidget(video_title)
     gui.video_inspector_summary_label = QLabel(

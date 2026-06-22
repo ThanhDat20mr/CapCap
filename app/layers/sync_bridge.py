@@ -63,7 +63,7 @@ def sync_segments_to_subtitle_layers(
             t.layers.clear()
             sub_tracks.append(t)
     # Use first subtitle track as primary, create more if needed
-    primary = sub_tracks[0] if sub_tracks else find_or_create_track(timeline, "S1 Subtitle", LayerType.SUBTITLE, 100)
+    primary = sub_tracks[0] if sub_tracks else find_or_create_track(timeline, "S1", LayerType.SUBTITLE, 100)
     if primary not in sub_tracks:
         sub_tracks.append(primary)
     # Remove extra subtitle tracks beyond first
@@ -149,10 +149,10 @@ def sync_blur_regions_to_layers(
 ) -> None:
     """Convert blur region data to BlurLayers on the B1 blur track."""
     if not blur_regions:
-        remove_track(timeline, "B1 Blur")
+        remove_track(timeline, "B1")
         return
 
-    blur_track = find_or_create_track(timeline, "B1 Blur", LayerType.BLUR, 100)
+    blur_track = find_or_create_track(timeline, "B1", LayerType.BLUR, 100)
     blur_track.layers.clear()
 
     for i, br in enumerate(blur_regions):
@@ -186,7 +186,7 @@ def sync_tts_to_audio_layers(
     if not voice_track_path or not os.path.exists(voice_track_path):
         return
 
-    a2 = find_or_create_track(timeline, "A2 Dub Audio", LayerType.AUDIO, 80)
+    a2 = find_or_create_track(timeline, "A2 Dub", LayerType.AUDIO, 80)
     a2.layers.clear()
 
     dub_segs: list[tuple[float, float, int]] = []
@@ -211,7 +211,7 @@ def sync_tts_to_audio_layers(
     if not dub_segs:
         dur = end if end > 0 else timeline.duration if timeline.duration > 0 else 10.0
         a2.layers.append(AudioLayer(
-            name="A2 Dub Audio",
+            name="A2 Dub",
             source=voice_track_path,
             start=start,
             end=dur,
@@ -242,22 +242,22 @@ def ensure_v1_a1_tracks(timeline: Timeline, video_path: str, duration: float) ->
     from app.layers.video import VideoLayer
     from app.layers.transform import Transform
 
-    v1 = find_or_create_track(timeline, "V1 Original Video", LayerType.VIDEO, 80)
+    v1 = find_or_create_track(timeline, "V1 Video", LayerType.VIDEO, 80)
     v1.visible = True
     v1.layers.clear()
     v1.layers.append(VideoLayer(
-        name="V1 Original Video",
+        name="V1 Video",
         source=video_path,
         start=0.0,
         end=duration,
         transform=Transform(x=0, y=0, scale_x=1.0, scale_y=1.0),
     ))
 
-    a1 = find_or_create_track(timeline, "A1 Original Audio", LayerType.AUDIO, 80)
+    a1 = find_or_create_track(timeline, "A1 Audio", LayerType.AUDIO, 80)
     a1.visible = True
     a1.layers.clear()
     a1.layers.append(AudioLayer(
-        name="A1 Original Audio",
+        name="A1 Audio",
         source=video_path,
         start=0.0,
         end=duration,

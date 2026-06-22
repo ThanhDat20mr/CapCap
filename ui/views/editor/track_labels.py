@@ -12,12 +12,14 @@ TRACK_ICONS: dict[str, str] = {
 }
 
 AUDIO_PREFIXES = {"A1", "A2"}
+BLUR_PREFIXES = {"B1"}
 
 
 class TrackLabelBar(QFrame):
     """Fixed left-side label strip showing track names. Pairs with EditorTimeline."""
 
     muteToggled = Signal(str, bool)  # track_name, is_muted
+    blurToggled = Signal(str, bool)  # track_name, is_enabled
 
     TRACK_HEADER_W = 132
     RULER_HEIGHT = 30
@@ -31,12 +33,17 @@ class TrackLabelBar(QFrame):
         self._track_heights: list[int] = []
         self._track_locked: list[bool] = []
         self._track_muted: list[bool] = []
+        self._track_blur_on: list[bool] = []
 
     def set_tracks(self, names: list, heights: list, locked: list = None, muted: list = None):
         self._track_names = names
         self._track_heights = heights
         self._track_locked = locked or [False] * len(names)
         self._track_muted = muted or [False] * len(names)
+        # Default blur effect to ON for B1 tracks
+        self._track_blur_on = [
+            (n.split(" ")[0] in BLUR_PREFIXES) for n in names
+        ]
         self.update()
 
     def set_muted(self, name: str, muted: bool):
@@ -46,8 +53,16 @@ class TrackLabelBar(QFrame):
                 self.update()
                 return
 
+    def set_blur_on(self, name: str, on: bool):
+        for i, n in enumerate(self._track_names):
+            if n == name and i < len(self._track_blur_on):
+                self._track_blur_on[i] = on
+                self.update()
+                return
+
     def mousePressEvent(self, event: QMouseEvent):
         # Click on an audio track label to toggle its mute state.
+        # Click on a blur track label to toggle the blur effect.
         if event.button() == Qt.LeftButton:
             idx = self._track_index_at(event.position().y())
             if 0 <= idx < len(self._track_names):
@@ -60,17 +75,30 @@ class TrackLabelBar(QFrame):
                     self.muteToggled.emit(name, new_muted)
                     event.accept()
                     return
+                if prefix in BLUR_PREFIXES:
+                    new_state = not (
+                        self._track_blur_on[idx]
+                        if idx < len(self._track_blur_on)
+                        else False
+                    )
+                    if idx < len(self._track_blur_on):
+                        self._track_blur_on[idx] = new_state
+                    self.update()
+                    self.blurToggled.emit(name, new_state)
+                    event.accept()
+                    return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
         # Change cursor to a pointing hand when hovering over an audio
-        # track label to signal it is clickable.
+        # or blur track label to signal it is clickable.
         idx = self._track_index_at(event.position().y())
-        is_audio = (
-            0 <= idx < len(self._track_names)
-            and (self._track_names[idx].split(" ")[0] if self._track_names[idx] else "") in AUDIO_PREFIXES
-        )
-        self.setCursor(Qt.PointingHandCursor if is_audio else Qt.ArrowCursor)
+        is_clickable = False
+        if 0 <= idx < len(self._track_names):
+            prefix = self._track_names[idx].split(" ")[0] if self._track_names[idx] else ""
+            if prefix in AUDIO_PREFIXES or prefix in BLUR_PREFIXES:
+                is_clickable = True
+        self.setCursor(Qt.PointingHandCursor if is_clickable else Qt.ArrowCursor)
 
     def leaveEvent(self, event):
         self.setCursor(Qt.ArrowCursor)
@@ -164,8 +192,15 @@ class TrackLabelBar(QFrame):
             icon = _icon(name)
             c = _color(name)
             muted = self._track_muted[i] if i < len(self._track_muted) else False
+            blur_on = self._track_blur_on[i] if i < len(self._track_blur_on) else False
+            prefix = name.split(" ")[0] if name else ""
 
-            bg = QColor("#1a1a2e") if muted else QColor("#142030")
+            if muted:
+                bg = QColor("#1a1a2e")
+            elif prefix in BLUR_PREFIXES and not blur_on:
+                bg = QColor("#1a1a2e")  # dimmed when blur is off
+            else:
+                bg = QColor("#142030")
             painter.fillRect(0, y, self.TRACK_HEADER_W, h, bg)
             painter.setPen(QPen(QColor("#1e2d42"), 1))
             painter.drawRect(0, y, self.TRACK_HEADER_W - 1, h - 1)
@@ -173,7 +208,7 @@ class TrackLabelBar(QFrame):
             painter.setPen(QPen(c, 0))
             painter.fillRect(0, y, 3, h, c)
 
-            text_color = QColor("#555") if muted else QColor("#ffffff")
+            text_color = QColor("#555") if (muted or (prefix in BLUR_PREFIXES and not blur_on)) else QColor("#ffffff")
             painter.setPen(text_color)
             lines = self._label_lines(name, text_w, fm)
             if not lines:
@@ -186,6 +221,8 @@ class TrackLabelBar(QFrame):
                 painter.drawText(text_x, start_y + li * line_h,
                                  text_w, line_h,
                                  Qt.AlignLeft | Qt.AlignVCenter, display)
+
+            # (ON/OFF label removed - blur state is shown by track dimming)
 
             # Lock indicator for locked tracks
             if i < len(self._track_locked) and self._track_locked[i]:

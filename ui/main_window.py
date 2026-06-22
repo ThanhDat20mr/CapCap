@@ -1843,9 +1843,9 @@ class VideoTranslatorGUI(QMainWindow):
         a1_muted = None
         a2_muted = None
         for track in self.timeline._timeline.tracks:
-            if track.name == "A1 Original Audio":
+            if track.name == "A1 Audio":
                 a1_muted = bool(track.muted)
-            elif track.name == "A2 Dub Audio":
+            elif track.name == "A2 Dub":
                 a2_muted = bool(track.muted)
         if a1_muted is None and a2_muted is None:
             return None
@@ -2888,7 +2888,7 @@ class VideoTranslatorGUI(QMainWindow):
             self._enable_post_pipeline_preview_assets(refresh=True)
             self.apply_segments_to_timeline()
             self.set_selected_segment_index(0, sync_ui=True)
-        # Restore A2 Dub Audio track if TTS was generated
+        # Restore A2 Dub track if TTS was generated
         voice_path = context.get("artifacts", {}).get("voice_vi", "")
         if voice_path and os.path.exists(voice_path) and hasattr(self, "timeline"):
             self.timeline.sync_tts_track(voice_path, segments=self.current_translated_segments or self.current_segments)
@@ -4086,7 +4086,7 @@ class VideoTranslatorGUI(QMainWindow):
             segment = self.current_translated_segments[index] or {}
         subtitle_text = " ".join(str(segment.get("text", "") or "").split()).strip()
         spoken_text = " ".join(str(segment.get("tts_text") or segment.get("dubbing_vi") or segment.get("text", "")).split()).strip()
-        # The per-segment status label was moved to the A2 Dub Audio
+        # The per-segment status label was moved to the A2 Dub
         # Track Inspector. Update it there so the inspector reflects
         # whether the spoken text matches the subtitle.
         status_label = getattr(self, "audio_inspector_spoken_status_label", None)
@@ -4392,11 +4392,11 @@ class VideoTranslatorGUI(QMainWindow):
             self._show_subtitle_inspector_for_layer(layer_id)
         elif layer_type == "audio":
             self._show_audio_inspector_for_track(track, layer)
-            # A2 Dub Audio layers store the original subtitle segment
+            # A2 Dub layers store the original subtitle segment
             # index in metadata["_seg_index"]. Use it to update the
             # selected segment so the Dub Voice editor shows the
             # matching content.
-            if track is not None and str(getattr(track, "name", "")) == "A2 Dub Audio":
+            if track is not None and str(getattr(track, "name", "")) == "A2 Dub":
                 seg_idx = None
                 meta = getattr(layer, "metadata", None) or {}
                 raw = meta.get("_seg_index")
@@ -4426,12 +4426,12 @@ class VideoTranslatorGUI(QMainWindow):
     def _show_audio_inspector_for_track(self, track, layer=None):
         """Show audio inspector populated with the selected track's settings."""
         self._switch_inspector("audio")
-        # The Dub Voice section is only for A2 Dub Audio. Hide it for
-        # A1 Original Audio (or any other audio track).
+        # The Dub Voice section is only for A2 Dub. Hide it for
+        # A1 Audio (or any other audio track).
         track_name = str(getattr(track, "name", "") or "")
         dub_section = getattr(self, "audio_inspector_dub_section", None)
         if dub_section is not None:
-            dub_section.setVisible(track_name == "A2 Dub Audio")
+            dub_section.setVisible(track_name == "A2 Dub")
         if track is None:
             return
         track_name = str(getattr(track, "name", "Audio"))
@@ -4543,7 +4543,7 @@ class VideoTranslatorGUI(QMainWindow):
         self._switch_inspector("default")
 
     def _show_video_inspector_for_track(self, track, layer=None):
-        """Show the Video Track Inspector (V1 Original Video)."""
+        """Show the Video Track Inspector (V1 Video)."""
         self._switch_inspector("video")
         if track is None:
             return
@@ -4989,13 +4989,13 @@ class VideoTranslatorGUI(QMainWindow):
         """Apply per-track volume/gain/mute to the underlying media player.
 
         Maps the timeline track name to the media player:
-          "A1 Original Audio" -> QMediaPlayer #1 (original sidecar)
-          "A2 Dub Audio"      -> QMediaPlayer #2 (dubbed sidecar)
+          "A1 Audio" -> QMediaPlayer #1 (original sidecar)
+          "A2 Dub"      -> QMediaPlayer #2 (dubbed sidecar)
         """
         if not hasattr(self, "media_player") or self.media_player is None:
             return
         try:
-            if track_name == "A1 Original Audio":
+            if track_name == "A1 Audio":
                 vol = self._compute_audio_track_volume(track_name, base=100.0)
                 gain_db = self._get_audio_track_gain_db(track_name)
                 effective = vol * (10 ** (gain_db / 20.0))
@@ -5005,7 +5005,7 @@ class VideoTranslatorGUI(QMainWindow):
                 muted = self._is_audio_track_muted(track_name)
                 if hasattr(self.media_player, "set_mute_original"):
                     self.media_player.set_mute_original(muted)
-            elif track_name == "A2 Dub Audio":
+            elif track_name == "A2 Dub":
                 vol = self._compute_audio_track_volume(track_name, base=100.0)
                 gain_db = self._get_audio_track_gain_db(track_name)
                 effective = vol * (10 ** (gain_db / 20.0))
@@ -5080,14 +5080,14 @@ class VideoTranslatorGUI(QMainWindow):
                 t.muted = is_muted
 
         muted = bool(is_muted)
-        if track_name == "A1 Original Audio":
+        if track_name == "A1 Audio":
             self._mute_original = muted
             if hasattr(self, "media_player"):
                 try:
                     self.media_player.set_mute_original(muted)
                 except Exception:
                     pass
-        elif track_name == "A2 Dub Audio":
+        elif track_name == "A2 Dub":
             self._mute_dubbed = muted
             if hasattr(self, "media_player"):
                 try:
@@ -5101,6 +5101,18 @@ class VideoTranslatorGUI(QMainWindow):
         self._refresh_preview_audio_controls()
         self.schedule_timeline_visual_refresh(waveform=True, thumbnails=False)
 
+    def on_track_blur_toggled(self, track_name: str, is_on: bool):
+        """Handle B1 track label click - toggle blur effect."""
+        if not hasattr(self, "blur_area_btn"):
+            return
+        self.blur_area_btn.blockSignals(True)
+        self.blur_area_btn.setChecked(bool(is_on))
+        self.blur_area_btn.blockSignals(False)
+        try:
+            self.toggle_blur_effect_enabled(bool(is_on))
+        except Exception:
+            pass
+
     def _sync_timeline_mute_to_gui(self):
         """Pull the current timeline track mute state into the GUI and backend."""
         if not hasattr(self, "timeline") or not self.timeline._timeline:
@@ -5108,9 +5120,9 @@ class VideoTranslatorGUI(QMainWindow):
         a1_muted = False
         a2_muted = False
         for t in self.timeline._timeline.tracks:
-            if t.name == "A1 Original Audio":
+            if t.name == "A1 Audio":
                 a1_muted = bool(t.muted)
-            elif t.name == "A2 Dub Audio":
+            elif t.name == "A2 Dub":
                 a2_muted = bool(t.muted)
         self._mute_original = a1_muted
         self._mute_dubbed = a2_muted
@@ -5124,8 +5136,8 @@ class VideoTranslatorGUI(QMainWindow):
             except Exception:
                 pass
         if hasattr(self, "track_label_bar"):
-            self.track_label_bar.set_muted("A1 Original Audio", a1_muted)
-            self.track_label_bar.set_muted("A2 Dub Audio", a2_muted)
+            self.track_label_bar.set_muted("A1 Audio", a1_muted)
+            self.track_label_bar.set_muted("A2 Dub", a2_muted)
 
     def _is_active_timeline_audio_track_muted(self) -> bool:
         track_mutes = self._timeline_audio_track_mutes()
@@ -5213,7 +5225,7 @@ class VideoTranslatorGUI(QMainWindow):
 
         elif layer_type == "blur":
             from app.layers.blur import BlurLayer
-            blur_track = find_or_create_track(tl, "B1 Blur", LayerType.BLUR, 60)
+            blur_track = find_or_create_track(tl, "B1", LayerType.BLUR, 60)
             # Register the new track's height in the timeline so it gets a
             # real draw slot (otherwise the track silently uses the default
             # height and may not be visible).
@@ -5242,7 +5254,7 @@ class VideoTranslatorGUI(QMainWindow):
             blur_track.layers.append(layer)
             # Force a redraw so the new track + layer are visible.
             self.timeline._redraw()
-            # Auto-scroll the timeline vertically so the new B1 Blur
+            # Auto-scroll the timeline vertically so the new B1
             # track is in view (it sits below V1 + A1 by default).
             try:
                 if hasattr(self.timeline, "verticalScrollBar"):
@@ -5563,7 +5575,7 @@ class VideoTranslatorGUI(QMainWindow):
 
     def delete_selected_timeline_segment(self):
         # First, if a blur layer is currently selected, remove it from the
-        # B1 Blur track AND remove the corresponding video-view region so
+        # B1 track AND remove the corresponding video-view region so
         # both stay in sync.
         if hasattr(self, "timeline") and self.timeline._timeline:
             selected_id = str(getattr(self.timeline, "_selected_layer_id", "") or "")
@@ -6233,9 +6245,14 @@ class VideoTranslatorGUI(QMainWindow):
                 is_playing = bool(media_player.is_playing())
             except Exception:
                 is_playing = False
+        # The blur overlay (the draggable rectangle) is only shown
+        # when the blur effect is ON. Turning the effect OFF hides
+        # the rectangle; turning it ON shows it again for drag.
+        has_regions = bool(self._current_blur_regions_payload())
         editing_allowed = (
             blur_enabled
             and has_video
+            and has_regions
             and not is_playing
             and not bool(getattr(self, "_filter_thumbnail_visible", False))
         )
@@ -6257,16 +6274,19 @@ class VideoTranslatorGUI(QMainWindow):
             self.blur_area_btn.blockSignals(False)
             QMessageBox.warning(self, "Blur Area", "Please load a video before adding a blur area.")
             return
+        # Only show/hide the blur area (overlay rectangle). The actual
+        # mpv blur effect is NOT applied on toggle - it is only applied
+        # when the video plays, to keep toggling fast and avoid
+        # rendering artifacts at the toggle position.
         self._sync_blur_controls()
-        if checked:
-            self._blur_region_preview_dirty = True
-            if hasattr(self, "media_player"):
-                self.media_player.clear_blur_region()
-        else:
-            if hasattr(self, "media_player"):
-                self.media_player.clear_blur_region()
         self.persist_project_blur_state()
         self._refresh_preview_audio_controls()
+        # Sync the B1 track label so the ON/OFF indicator matches
+        if hasattr(self, "track_label_bar"):
+            try:
+                self.track_label_bar.set_blur_on("B1", bool(checked))
+            except Exception:
+                pass
         if checked:
             self.log("[Blur Area] blur effect enabled.")
 
@@ -6286,7 +6306,7 @@ class VideoTranslatorGUI(QMainWindow):
         # Do NOT call on_add_timeline_layer("blur") here. The
         # blurRegionChanged signal emitted by add_blur_region() will
         # trigger on_preview_blur_region_changed() which (with the
-        # recent fix) syncs the B1 Blur track from the overlay regions
+        # recent fix) syncs the B1 track from the overlay regions
         # even when the blur effect is on. Adding a BlurLayer here too
         # would create a duplicate.
         self._sync_blur_controls()
@@ -6324,10 +6344,12 @@ class VideoTranslatorGUI(QMainWindow):
     def on_preview_blur_region_changed(self):
         if self._blur_effect_enabled():
             self._blur_region_preview_dirty = True
-            # Even when the blur effect is on, the B1 Blur track in the
+            # Even when the blur effect is on, the B1 track in the
             # timeline must stay in sync with the overlay regions. Without
             # this, deleting a region from the overlay leaves a stale
-            # BlurLayer behind in the timeline.
+            # BlurLayer behind in the timeline. The actual mpv blur
+            # effect is only updated when the video plays, to keep
+            # editing fast.
             if hasattr(self, "timeline"):
                 try:
                     regions = self._current_blur_regions_payload() if hasattr(self, "_current_blur_regions_payload") else []
@@ -6351,12 +6373,10 @@ class VideoTranslatorGUI(QMainWindow):
         blur_region = regions if regions is not None else (
             self.video_view.get_blur_region_normalized() if hasattr(self.video_view, "get_blur_region_normalized") else None
         )
-        is_playing = False
-        try:
-            is_playing = bool(self.media_player.is_playing())
-        except Exception:
-            is_playing = False
-        if blur_enabled and blur_region and (force or is_playing):
+        # Always apply the blur when enabled and regions exist, even
+        # when the video is paused, so the user can see the cached
+        # blur effect on the video preview.
+        if blur_enabled and blur_region:
             self.media_player.set_blur_region(blur_region)
         else:
             self.media_player.clear_blur_region()
@@ -6410,27 +6430,27 @@ class VideoTranslatorGUI(QMainWindow):
 
     def _restore_project_blur_state(self, state):
         blur_state = dict(getattr(state, "settings", {}).get("blur_state") or {})
-        enabled = bool(blur_state.get("enabled", False))
         regions = blur_state.get("regions", [])
         if hasattr(self, "video_view") and hasattr(self.video_view, "set_blur_regions_normalized"):
             self.video_view.set_blur_regions_normalized(regions)
+        # Always default the blur toggle to ON on project reopen so the
+        # blur area is displayed by default. The mpv blur effect is
+        # NOT auto-applied on reopen - it is only applied when the
+        # video plays.
         if hasattr(self, "blur_area_btn"):
             self.blur_area_btn.blockSignals(True)
-            self.blur_area_btn.setChecked(enabled)
+            self.blur_area_btn.setChecked(True)
             self.blur_area_btn.blockSignals(False)
         self._sync_blur_controls()
+        if hasattr(self, "track_label_bar"):
+            try:
+                self.track_label_bar.set_blur_on("B1", True)
+            except Exception:
+                pass
         if hasattr(self, "timeline"):
-            # Always pass the saved regions, even when disabled, so the
-            # B1 Blur track mirrors the overlay. When the project has no
-            # regions, sync_blur_regions([]) removes the track entirely
-            # (so a stale B1 from a previous project is cleaned up).
             self.timeline.sync_blur_regions(regions)
-        if enabled:
-            self._blur_region_preview_dirty = True
-            if hasattr(self, "media_player"):
-                self.media_player.clear_blur_region()
-        else:
-            self.apply_preview_blur_region()
+        if hasattr(self, "media_player"):
+            self.media_player.clear_blur_region()
 
     def _resolve_voice_preview_source(self, entry: dict) -> QUrl:
         preview_path = str(entry.get("preview_video_path", "")).strip()
@@ -6680,7 +6700,7 @@ class VideoTranslatorGUI(QMainWindow):
         voice_speed = self._parse_voice_speed_value()
         row = self._find_segment_editor_row(index)
         # The per-segment "Regenerate voice" button was moved to the
-        # A2 Dub Audio Track Inspector. Disable that one instead.
+        # A2 Dub Track Inspector. Disable that one instead.
         if getattr(self, "audio_inspector_regenerate_voice_btn", None) is not None:
             self.audio_inspector_regenerate_voice_btn.setEnabled(False)
             self.audio_inspector_regenerate_voice_btn.setText("...")
@@ -8739,10 +8759,15 @@ class VideoTranslatorGUI(QMainWindow):
 
     def closeEvent(self, event):
         try:
-            # Persist the current blur state BEFORE clearing the overlay,
-            # otherwise the blurRegionChanged signal emitted by
-            # clear_blur_region() saves an empty regions list and the
-            # user loses their blur rectangles on reopen.
+            # Persist the current blur state BEFORE clearing the overlay.
+            # Block the blurRegionChanged signal during the clear so the
+            # signal handler does not overwrite the saved state with an
+            # empty regions list.
+            if hasattr(self, "video_view"):
+                try:
+                    self.video_view.blurRegionChanged.disconnect(self.on_preview_blur_region_changed)
+                except Exception:
+                    pass
             if hasattr(self, "persist_project_blur_state"):
                 try:
                     self.persist_project_blur_state()
@@ -8879,11 +8904,11 @@ class VideoTranslatorGUI(QMainWindow):
         # Sync timeline track mute visuals
         if hasattr(self, "timeline") and self.timeline._timeline:
             for t in self.timeline._timeline.tracks:
-                if t.name in ("A1 Original Audio", "A2 Dub Audio"):
+                if t.name in ("A1 Audio", "A2 Dub"):
                     t.muted = new_state
         if hasattr(self, "track_label_bar"):
-            self.track_label_bar.set_muted("A1 Original Audio", new_state)
-            self.track_label_bar.set_muted("A2 Dub Audio", new_state)
+            self.track_label_bar.set_muted("A1 Audio", new_state)
+            self.track_label_bar.set_muted("A2 Dub", new_state)
         self._refresh_preview_audio_controls()
 
     def on_preview_speed_changed(self, index: int):
