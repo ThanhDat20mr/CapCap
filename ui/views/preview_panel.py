@@ -628,7 +628,18 @@ def build_preview_panel(gui):
     # The blur ON/OFF toggle is controlled by clicking the B1
     # track label in the timeline's left strip (like audio mute).
     gui.blur_area_btn.setVisible(False)
+    # Dedicated Logo / Watermark button (beside the Blur button)
+    gui.add_logo_btn = QPushButton("Logo")
+    gui.add_logo_btn.setFixedSize(50, 38)
+    gui.add_logo_btn.setStyleSheet(
+        "QPushButton { color: #6ee7d6; font-weight: bold; font-size: 13px; padding: 0; }"
+    )
+    gui.add_logo_btn.setToolTip("Add a logo or watermark image to the video")
+    gui.add_logo_btn.clicked.connect(
+        lambda: gui.on_add_timeline_layer("logo") if hasattr(gui, "on_add_timeline_layer") else None
+    )
     blur_group.addWidget(gui.blur_add_btn)
+    blur_group.addWidget(gui.add_logo_btn)
     blur_group.addWidget(gui.ocr_region_btn)
 
     volume_group = QHBoxLayout()
@@ -767,6 +778,7 @@ def build_preview_panel(gui):
     gui._layer_menu.addAction("Subtitle", lambda: gui.on_add_timeline_layer("subtitle"))
     gui._layer_menu.addAction("Text", lambda: gui.on_add_timeline_layer("text"))
     gui._layer_menu.addAction("Image", lambda: gui.on_add_timeline_layer("image"))
+    gui._layer_menu.addAction("Logo / Watermark", lambda: gui.on_add_timeline_layer("logo"))
     gui._layer_menu.addAction("Blur", lambda: gui.on_add_timeline_layer("blur"))
     gui.add_layer_btn.setMenu(gui._layer_menu)
 
@@ -897,17 +909,16 @@ def build_preview_panel(gui):
     inspector_nav_row.setSpacing(8)
     inspector_layout.addLayout(inspector_nav_row)
 
-    gui.segment_editor_scroll = QScrollArea()
-    gui.segment_editor_scroll.setObjectName("segmentEditorScroll")
-    gui.segment_editor_scroll.setWidgetResizable(True)
-    gui.segment_editor_scroll.setFrameShape(QFrame.NoFrame)
+    # The segment editor container is a plain widget (no inner
+    # QScrollArea) so the outer inspector QScrollArea provides the
+    # single scroll layer. This avoids the nested-scroll confusion
+    # the user reported.
     gui.segment_editor_container = QWidget()
     gui.segment_editor_container.setObjectName("segmentEditorContainer")
     gui.segment_editor_layout = QVBoxLayout(gui.segment_editor_container)
     gui.segment_editor_layout.setContentsMargins(0, 0, 0, 0)
     gui.segment_editor_layout.setSpacing(10)
-    gui.segment_editor_scroll.setWidget(gui.segment_editor_container)
-    inspector_details_layout.addWidget(gui.segment_editor_scroll, 1)
+    inspector_details_layout.addWidget(gui.segment_editor_container, 1)
     inspector_layout.addWidget(gui.subtitle_inspector_details_widget, 1)
     gui.subtitle_inspector_details_widget.setVisible(False)
 
@@ -984,6 +995,33 @@ def build_preview_panel(gui):
     gui.audio_inspector_volume_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
     volume_row.addWidget(gui.audio_inspector_volume_label)
     audio_layout.addLayout(volume_row)
+
+    # Fade-in / Fade-out row
+    fade_row = QHBoxLayout()
+    fade_row.setSpacing(6)
+    fade_row.setContentsMargins(0, 0, 0, 0)
+    fade_in_label = QLabel("Fade In")
+    fade_in_label.setMinimumWidth(50)
+    fade_row.addWidget(fade_in_label)
+    gui.audio_inspector_fade_in_spin = QDoubleSpinBox()
+    gui.audio_inspector_fade_in_spin.setRange(0.0, 30.0)
+    gui.audio_inspector_fade_in_spin.setSingleStep(0.1)
+    gui.audio_inspector_fade_in_spin.setValue(0.0)
+    gui.audio_inspector_fade_in_spin.setSuffix(" s")
+    gui.audio_inspector_fade_in_spin.setMaximumWidth(80)
+    fade_row.addWidget(gui.audio_inspector_fade_in_spin)
+    fade_out_label = QLabel("Fade Out")
+    fade_out_label.setMinimumWidth(60)
+    fade_row.addWidget(fade_out_label)
+    gui.audio_inspector_fade_out_spin = QDoubleSpinBox()
+    gui.audio_inspector_fade_out_spin.setRange(0.0, 30.0)
+    gui.audio_inspector_fade_out_spin.setSingleStep(0.1)
+    gui.audio_inspector_fade_out_spin.setValue(0.0)
+    gui.audio_inspector_fade_out_spin.setSuffix(" s")
+    gui.audio_inspector_fade_out_spin.setMaximumWidth(80)
+    fade_row.addWidget(gui.audio_inspector_fade_out_spin)
+    fade_row.addStretch(1)
+    audio_layout.addLayout(fade_row)
 
     # (dB gain and Speed sections were removed - too much clutter)
     # (Mute/Solo buttons removed - mute now toggled by clicking the
@@ -1236,6 +1274,10 @@ def build_preview_panel(gui):
     # content (audio sliders, blur settings, etc.) can scroll instead
     # of being clipped by the fixed shell width.
     def _wrap_in_scroll(card_widget):
+        # Wrap each card in a QScrollArea so the inspector content
+        # is scrollable when it exceeds the available height. The
+        # subtitle card's own internal scroll area is flattened
+        # (see below) to avoid nested scroll layers.
         scroll = QScrollArea()
         scroll.setObjectName("inspectorCardScroll")
         scroll.setWidgetResizable(True)
@@ -1261,45 +1303,13 @@ def build_preview_panel(gui):
         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
     )
 
-    inspector_handle = QFrame()
-    inspector_handle.setObjectName("subtitleInspectorHandle")
-    inspector_handle.setFixedWidth(48)
-    inspector_handle_layout = QVBoxLayout(inspector_handle)
-    inspector_handle_layout.setContentsMargins(0, 0, 0, 0)
-    inspector_handle_layout.setSpacing(4)
-    inspector_handle_layout.addStretch(1)
-    gui.subtitle_inspector_toggle_btn = QPushButton("◀")
-    gui.subtitle_inspector_toggle_btn.setCheckable(True)
-    gui.subtitle_inspector_toggle_btn.setChecked(False)
-    gui.subtitle_inspector_toggle_btn.setObjectName("subtitleInspectorHandleBtn")
-    gui.subtitle_inspector_toggle_btn.setFixedSize(40, 110)
-    gui.subtitle_inspector_toggle_btn.clicked.connect(lambda checked: gui.toggle_subtitle_inspector_details(bool(checked)))
-    inspector_handle_layout.addWidget(gui.subtitle_inspector_toggle_btn, 0, Qt.AlignHCenter)
-    gui.anchor_inspector_cb = QToolButton()
-    gui.anchor_inspector_cb.setText("📌")
-    gui.anchor_inspector_cb.setCheckable(True)
-    gui.anchor_inspector_cb.setChecked(False)
-    gui.anchor_inspector_cb.setFixedSize(40, 28)
-    gui.anchor_inspector_cb.setToolTip(
-        "Anchor Track Inspector\n"
-        "Keep the Track Inspector open (subtitle, audio, blur or default card) "
-        "while previewing and editing."
-    )
-    gui.anchor_inspector_cb.setStyleSheet(
-        "QToolButton { color: #8aa0bd; font-size: 14px; padding: 0; border: 1px solid #2a3a52; "
-        "border-radius: 4px; background: #142030; }"
-        "QToolButton:hover { background: #1d2c44; color: #c0d4ee; }"
-        "QToolButton:checked { color: #ffc15e; border-color: #ffc15e; background: #2a2418; }"
-    )
-    inspector_handle_layout.addWidget(gui.anchor_inspector_cb, 0, Qt.AlignHCenter)
-    inspector_handle_layout.addStretch(1)
-
+    # Collapse handle strip removed - the track inspector is always
+    # expanded. Previously this contained a toggle button and a pin
+    # icon; both are now hidden and the empty strip has been removed.
     inspector_shell_layout.addWidget(gui.inspector_stack, 1)
-    inspector_shell_layout.addWidget(inspector_handle, 0)
 
     gui.subtitle_inspector_details_widget.setVisible(False)
     gui.subtitle_inspector_shell = inspector_shell
-    gui.subtitle_inspector_handle = inspector_handle
     # Initial width; the actual value is recomputed by
     # `_sync_subtitle_inspector_shell_width` based on the active card.
     inspector_shell.setMinimumWidth(34)

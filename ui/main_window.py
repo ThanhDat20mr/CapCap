@@ -3761,14 +3761,13 @@ class VideoTranslatorGUI(QMainWindow):
         super().keyPressEvent(event)
 
     def toggle_controls_panel(self):
-        currently_visible = bool(getattr(self, "left_panel_scroll_area", None) and self.left_panel_scroll_area.isVisible())
-        self.set_controls_panel_visible(not currently_visible)
+        # Hide-controls is disabled - the workflow panel is always visible.
+        self.set_controls_panel_visible(True)
 
     def set_controls_panel_visible(self, visible: bool):
+        # The workflow panel is always visible. Hide-controls is disabled.
         if hasattr(self, "left_panel_scroll_area"):
-            self.left_panel_scroll_area.setVisible(visible)
-        if hasattr(self, "toggle_panel_btn"):
-            self.toggle_panel_btn.setText("Hide Controls" if visible else "Show Controls")
+            self.left_panel_scroll_area.setVisible(True)
         QTimer.singleShot(0, self._resync_preview_region_overlays)
 
     def _resync_preview_region_overlays(self):
@@ -4386,6 +4385,8 @@ class VideoTranslatorGUI(QMainWindow):
                 break
         if not layer:
             self._show_default_inspector()
+            if hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
+                self.video_view.clear_logo()
             return
         layer_type = str(getattr(layer.type, "value", layer.type)).lower()
         if layer_type == "subtitle":
@@ -4411,9 +4412,112 @@ class VideoTranslatorGUI(QMainWindow):
             self._show_blur_inspector_for_track(track, layer)
         elif layer_type == "video":
             self._show_video_inspector_for_track(track, layer)
+        elif layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo":
+            self._show_logo_overlay(track, layer)
+            self._show_default_inspector_for_layer(track, layer)
         else:
             # Text, image, sticker: show default with info
             self._show_default_inspector_for_layer(track, layer)
+            if hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
+                self.video_view.clear_logo()
+
+    def _show_logo_overlay(self, track, layer):
+        """Show the draggable logo overlay for the selected logo layer."""
+        if not hasattr(self, "video_view"):
+            return
+        path = str(getattr(layer, "source", "") or "")
+        if not path:
+            return
+        try:
+            from app.layers.transform import Transform
+            transform = getattr(layer, "transform", None) or Transform()
+        except Exception:
+            transform = None
+        # Get position/size from the layer (use transform or defaults)
+        if transform is not None and hasattr(transform, "x"):
+            x = float(getattr(transform, "x", 0.1)) / 100.0
+            y = float(getattr(transform, "y", 0.1)) / 100.0
+            scale_x = float(getattr(transform, "scale_x", 1.0))
+            scale_y = float(getattr(transform, "scale_y", 1.0))
+            w = 0.2 * scale_x
+            h = 0.2 * scale_y
+        else:
+            x, y, w, h = 0.1, 0.1, 0.2, 0.2
+
+        # Store the handler lambdas as attributes so we can disconnect
+        # them by reference. This avoids the libpyside RuntimeWarning
+        # that occurs when calling disconnect() with no args or with
+        # a lambda that was never connected.
+        prev_moved = getattr(self, "_logo_moved_handler", None)
+        if prev_moved is not None:
+            try:
+                self.video_view.logoMoved.disconnect(prev_moved)
+            except (RuntimeError, TypeError, Exception):
+                pass
+        prev_deleted = getattr(self, "_logo_deleted_handler", None)
+        if prev_deleted is not None:
+            try:
+                self.video_view.logoDeleted.disconnect(prev_deleted)
+            except (RuntimeError, TypeError, Exception):
+                pass
+
+        self._logo_overlay_layer = layer
+
+        def _moved_handler(nx, ny, nw, nh, l=layer):
+            self._on_logo_moved(l, nx, ny, nw, nh)
+
+        def _deleted_handler(l=layer):
+            self._delete_logo_layer(l)
+
+        self._logo_moved_handler = _moved_handler
+        self._logo_deleted_handler = _deleted_handler
+
+        self.video_view.logoMoved.connect(_moved_handler)
+        self.video_view.logoDeleted.connect(_deleted_handler)
+        self.video_view.set_logo(path, x, y, w, h)
+
+    def _delete_logo_layer(self, layer):
+        """Remove the logo layer from the L1 track and clean up."""
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return
+        for track in self.timeline._timeline.tracks:
+            if layer in track.layers:
+                track.layers.remove(layer)
+                if not track.layers:
+                    try:
+                        self.timeline._timeline.tracks.remove(track)
+                    except ValueError:
+                        pass
+                    if hasattr(self.timeline, "_track_heights") and track.id in self.timeline._track_heights:
+                        del self.timeline._track_heights[track.id]
+                break
+        try:
+            self.timeline._selected_layer_id = ""
+        except Exception:
+            pass
+        if hasattr(self.timeline, "_redraw"):
+            self.timeline._redraw()
+        if hasattr(self.timeline, "viewport"):
+            self.timeline.viewport().update()
+        if hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
+            self.video_view.clear_logo()
+        if hasattr(self, "_show_default_inspector"):
+            self._show_default_inspector()
+
+    def _on_logo_moved(self, layer, x, y, w, h):
+        """Update the ImageLayer's transform from the logo overlay drag."""
+        try:
+            from app.layers.transform import Transform
+            transform = Transform(
+                x=float(x) * 100.0,
+                y=float(y) * 100.0,
+                scale_x=float(w) / 0.2 if 0.2 > 0 else 1.0,
+                scale_y=float(h) / 0.2 if 0.2 > 0 else 1.0,
+            )
+            layer.transform = transform
+        except Exception:
+            pass
+        pass
 
     def _show_subtitle_inspector_for_layer(self, layer_id: str):
         """Show subtitle inspector and select the matching segment."""
@@ -4467,6 +4571,14 @@ class VideoTranslatorGUI(QMainWindow):
             speed = 1.0
         muted = bool(meta.get("_muted", False))
         solo = bool(meta.get("_solo", False))
+        try:
+            fade_in = float(meta.get("_fade_in", 0.0))
+        except (TypeError, ValueError):
+            fade_in = 0.0
+        try:
+            fade_out = float(meta.get("_fade_out", 0.0))
+        except (TypeError, ValueError):
+            fade_out = 0.0
         if hasattr(self, "audio_inspector_volume_slider"):
             self.audio_inspector_volume_slider.blockSignals(True)
             self.audio_inspector_volume_slider.setValue(int(max(0, min(200, volume))))
@@ -4490,6 +4602,14 @@ class VideoTranslatorGUI(QMainWindow):
             self.audio_inspector_solo_btn.blockSignals(True)
             self.audio_inspector_solo_btn.setChecked(solo)
             self.audio_inspector_solo_btn.blockSignals(False)
+        if hasattr(self, "audio_inspector_fade_in_spin"):
+            self.audio_inspector_fade_in_spin.blockSignals(True)
+            self.audio_inspector_fade_in_spin.setValue(fade_in)
+            self.audio_inspector_fade_in_spin.blockSignals(False)
+        if hasattr(self, "audio_inspector_fade_out_spin"):
+            self.audio_inspector_fade_out_spin.blockSignals(True)
+            self.audio_inspector_fade_out_spin.setValue(fade_out)
+            self.audio_inspector_fade_out_spin.blockSignals(False)
         if hasattr(self, "_refresh_audio_inspector_dub_voice_buttons"):
             try:
                 self._refresh_audio_inspector_dub_voice_buttons()
@@ -4789,10 +4909,8 @@ class VideoTranslatorGUI(QMainWindow):
         if self.inspector_stack.currentIndex() != target:
             self.inspector_stack.setCurrentIndex(target)
         # The handle/toggle button is always visible so the user can
-        # collapse/expand ANY inspector (subtitle, audio, blur, video,
-        # default).
-        if hasattr(self, "subtitle_inspector_handle"):
-            self.subtitle_inspector_handle.setVisible(True)
+        # The handle/toggle UI was removed - the track inspector is
+        # always expanded. No need to show/hide a handle.
         # Clicking a track layer opens the inspector (auto-expand shell).
         if kind in ("subtitle", "audio", "blur", "video"):
             self.set_inspector_collapsed(False)
@@ -4854,6 +4972,24 @@ class VideoTranslatorGUI(QMainWindow):
         if not isinstance(track.metadata, dict):
             track.metadata = {}
         track.metadata["_speed"] = float(value)
+        self._apply_audio_track_settings(track_name)
+
+    def on_audio_inspector_fade_in_changed(self, value: float):
+        track, track_name = self._current_audio_track_for_inspector()
+        if track is None:
+            return
+        if not isinstance(track.metadata, dict):
+            track.metadata = {}
+        track.metadata["_fade_in"] = float(value)
+        self._apply_audio_track_settings(track_name)
+
+    def on_audio_inspector_fade_out_changed(self, value: float):
+        track, track_name = self._current_audio_track_for_inspector()
+        if track is None:
+            return
+        if not isinstance(track.metadata, dict):
+            track.metadata = {}
+        track.metadata["_fade_out"] = float(value)
         self._apply_audio_track_settings(track_name)
 
     def on_audio_inspector_mute_toggled(self, checked: bool):
@@ -5223,6 +5359,42 @@ class VideoTranslatorGUI(QMainWindow):
             img_track.layers.append(layer)
             self.timeline._redraw()
 
+        elif layer_type == "logo":
+            from app.layers.image import ImageLayer
+            from PySide6.QtWidgets import QFileDialog
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select Logo / Watermark Image", "",
+                "Images (*.png *.jpg *.jpeg *.bmp *.gif *.svg);;All Files (*)"
+            )
+            if not path:
+                return
+            img_track = find_or_create_track(tl, "L1 Logo", LayerType.IMAGE, 80)
+            idx = len(img_track.layers)
+            dur = tl.duration if tl.duration > 0 else 10.0
+            layer = ImageLayer(
+                name=f"Logo {idx + 1}",
+                source=path,
+                start=0.0,
+                end=dur,
+            )
+            layer.z_index = idx
+            # Mark as watermark so the preview positions it correctly
+            layer.metadata["_is_watermark"] = True
+            img_track.layers.append(layer)
+            # Register the new track's height in the timeline so it gets
+            # a real draw slot.
+            if hasattr(self.timeline, "_track_heights"):
+                self.timeline._track_heights[img_track.id] = (
+                    img_track.height or 80
+                )
+            self.timeline._redraw()
+            # Show the logo overlay immediately (no need to click the
+            # layer first) and persist the logo state.
+            try:
+                self._show_logo_overlay(img_track, layer)
+            except Exception:
+                pass
+
         elif layer_type == "blur":
             from app.layers.blur import BlurLayer
             blur_track = find_or_create_track(tl, "B1", LayerType.BLUR, 60)
@@ -5574,64 +5746,84 @@ class VideoTranslatorGUI(QMainWindow):
         self.refresh_ui_state()
 
     def delete_selected_timeline_segment(self):
-        # First, if a blur layer is currently selected, remove it from the
-        # B1 track AND remove the corresponding video-view region so
-        # both stay in sync.
+        # If a layer is currently selected in the timeline, remove it
+        # from its track. Handles blur (with overlay sync), image/logo,
+        # text, and any other layer type.
         if hasattr(self, "timeline") and self.timeline._timeline:
             selected_id = str(getattr(self.timeline, "_selected_layer_id", "") or "")
-            for track in self.timeline._timeline.tracks:
-                if track.type.value == "blur":
-                    for layer_idx, layer in enumerate(list(track.layers)):
-                        if layer.id == selected_id:
-                            # Pop the corresponding overlay region (same
-                            # index) SILENTLY so the on_region_changed
-                            # signal does not fire and re-sync B1 with
-                            # the now-stale region count. We then sync
-                            # B1 manually from the new (smaller) overlay
-                            # list.
-                            try:
-                                overlay = getattr(self.video_view, "blur_overlay", None)
-                                if overlay is not None and 0 <= layer_idx < len(overlay._regions):
-                                    overlay._regions.pop(layer_idx)
-                                    overlay._active_index = min(
-                                        layer_idx, len(overlay._regions) - 1
-                                    )
-                                    overlay.update()
-                                    if hasattr(overlay, "sync_to_view"):
-                                        overlay.sync_to_view()
-                            except Exception:
-                                pass
-                            # Remove the layer only if it is still in
-                            # the track (the manual sync below clears
-                            # and recreates, which can race with this
-                            # branch).
-                            try:
-                                if layer in track.layers:
-                                    track.layers.remove(layer)
-                            except ValueError:
-                                pass
-                            # Sync the video view + preview to the new state
-                            try:
-                                if hasattr(self, "_current_blur_regions_payload"):
-                                    regions = self._current_blur_regions_payload()
-                                else:
-                                    regions = []
-                                if hasattr(self.timeline, "sync_blur_regions"):
-                                    self.timeline.sync_blur_regions(regions)
-                                if hasattr(self, "apply_preview_blur_region"):
-                                    self.apply_preview_blur_region(force=True)
-                            except Exception:
-                                pass
-                            if hasattr(self.timeline, "_redraw"):
-                                self.timeline._redraw()
-                            if hasattr(self.timeline, "viewport"):
-                                self.timeline.viewport().update()
-                            try:
-                                if hasattr(self, "persist_project_blur_state"):
-                                    self.persist_project_blur_state()
-                            except Exception:
-                                pass
-                            return
+            if selected_id:
+                for track in self.timeline._timeline.tracks:
+                    layer = None
+                    layer_idx = -1
+                    for li, l in enumerate(track.layers):
+                        if l.id == selected_id:
+                            layer = l
+                            layer_idx = li
+                            break
+                    if layer is None:
+                        continue
+                    # Blur: pop the corresponding overlay region first
+                    if track.type.value == "blur":
+                        try:
+                            overlay = getattr(self.video_view, "blur_overlay", None)
+                            if overlay is not None and 0 <= layer_idx < len(overlay._regions):
+                                overlay._regions.pop(layer_idx)
+                                overlay._active_index = min(
+                                    layer_idx, len(overlay._regions) - 1
+                                )
+                                overlay.update()
+                                if hasattr(overlay, "sync_to_view"):
+                                    overlay.sync_to_view()
+                        except Exception:
+                            pass
+                    # Remove the layer from the track
+                    try:
+                        if layer in track.layers:
+                            track.layers.remove(layer)
+                    except ValueError:
+                        pass
+                    # If the track is now empty, remove it (B1, L1, etc.)
+                    if not track.layers:
+                        try:
+                            self.timeline._timeline.tracks.remove(track)
+                        except ValueError:
+                            pass
+                        if hasattr(self.timeline, "_track_heights") and track.id in self.timeline._track_heights:
+                            del self.timeline._track_heights[track.id]
+                    # Sync blur overlay if needed
+                    if track.type.value == "blur":
+                        try:
+                            regions = self._current_blur_regions_payload() if hasattr(self, "_current_blur_regions_payload") else []
+                            if hasattr(self.timeline, "sync_blur_regions"):
+                                self.timeline.sync_blur_regions(regions)
+                            if hasattr(self, "apply_preview_blur_region"):
+                                self.apply_preview_blur_region(force=True)
+                            if hasattr(self, "persist_project_blur_state"):
+                                self.persist_project_blur_state()
+                        except Exception:
+                            pass
+                    # Clear selection and redraw
+                    try:
+                        self.timeline._selected_layer_id = ""
+                    except Exception:
+                        pass
+                    if hasattr(self.timeline, "_redraw"):
+                        self.timeline._redraw()
+                    if hasattr(self.timeline, "viewport"):
+                        self.timeline.viewport().update()
+                    # Show default inspector
+                    if hasattr(self, "_show_default_inspector"):
+                        self._show_default_inspector()
+                    # If the deleted layer was a logo, clear the logo
+                    # overlay so it does not remain on the preview.
+                    if str(getattr(track, "name", "")) == "L1 Logo":
+                        if hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
+                            self.video_view.clear_logo()
+                        try:
+                            self.timeline._selected_layer_id = ""
+                        except Exception:
+                            pass
+                    return
         segments = list(self.get_active_segments() or [])
         if not segments:
             return
@@ -5817,13 +6009,8 @@ class VideoTranslatorGUI(QMainWindow):
         shell = getattr(self, "subtitle_inspector_shell", None)
         if shell is None:
             return
-        handle_width = 48
-        handle = getattr(self, "subtitle_inspector_handle", None)
-        if handle is not None:
-            try:
-                handle_width = max(handle_width, int(handle.sizeHint().width() or handle.width() or 48))
-            except Exception:
-                pass
+        # The handle was removed - no extra handle width to add.
+        handle_width = 0
 
         if bool(getattr(self, "_inspector_collapsed", False)):
             target_width = handle_width
@@ -5909,19 +6096,11 @@ class VideoTranslatorGUI(QMainWindow):
         # on Play) just hide the details without collapsing the shell.
 
     def set_inspector_collapsed(self, collapsed: bool):
-        """Collapse or expand the inspector shell. True = handle only.
-
-        Applies to whichever card is currently shown (subtitle, audio,
-        blur or default). The active card stays in the stack and is
-        re-shown when the user reopens. When collapsed, the entire card
-        stack is hidden so no content leaks past the handle.
-
-        The anchor checkbox (`anchor_inspector_cb`) forces the shell to
-        stay expanded regardless of `collapsed`.
+        """Collapse or expand the inspector shell. The track layer
+        inspector is always expanded - collapse is disabled.
         """
-        if collapsed and self.is_inspector_anchored():
-            collapsed = False
-        self._inspector_collapsed = bool(collapsed)
+        collapsed = False
+        self._inspector_collapsed = False
         # Sync shell width
         try:
             self._sync_subtitle_inspector_shell_width(visible=not bool(collapsed))
@@ -6193,13 +6372,24 @@ class VideoTranslatorGUI(QMainWindow):
 
     def _set_segment_editor_highlight(self, active_index: int):
         rows = getattr(self, "_segment_editor_rows", [])
+        target_frame = None
         for row in rows:
             row_index = int(row.get("segment_index", -1))
             if row_index == active_index:
                 row["frame"].setStyleSheet("QFrame#statusCard { background-color: #153149; border: 1px solid #5fb9ff; border-radius: 14px; }")
-                self.segment_editor_scroll.ensureWidgetVisible(row["frame"], 0, 36)
+                target_frame = row["frame"]
             else:
                 row["frame"].setStyleSheet("")
+        # Scroll the outer inspector card so the highlighted segment
+        # is visible. The inner segment_editor_scroll was flattened;
+        # the QScrollArea wrapping the subtitle card is at stack index 0.
+        if target_frame is not None and hasattr(self, "inspector_stack"):
+            try:
+                scroll = self.inspector_stack.widget(0)
+                if scroll is not None and hasattr(scroll, "ensureWidgetVisible"):
+                    scroll.ensureWidgetVisible(target_frame, 0, 36)
+            except Exception:
+                pass
 
     def play_audio_preview_file(self, audio_path: str):
         if not audio_path or not os.path.exists(audio_path):
@@ -6427,6 +6617,8 @@ class VideoTranslatorGUI(QMainWindow):
             return
         state.set_setting("blur_state", blur_state)
         self.project_service.save_project(state)
+
+
 
     def _restore_project_blur_state(self, state):
         blur_state = dict(getattr(state, "settings", {}).get("blur_state") or {})

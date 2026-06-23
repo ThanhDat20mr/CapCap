@@ -54,14 +54,6 @@ def toggle_play(gui):
             if hasattr(gui, "_sync_blur_controls"):
                 gui._sync_blur_controls()
             gui.timeline.set_playing(False)
-            # Do NOT auto-reopen the track inspector on pause. The user
-            # can still re-open it manually with the toggle button. The
-            # anchor checkbox is the only way to keep it open through
-            # play/pause cycles.
-            try:
-                gui._inspector_collapsed_before_play = None
-            except Exception:
-                pass
             if (
                 has_active_video_filters
                 and filter_workflow_active
@@ -92,8 +84,6 @@ def toggle_play(gui):
                     gui.preview_video()
                     return
             gui.seek_frame_preview_timer.stop()
-            if hasattr(gui, "set_subtitle_inspector_details_visible"):
-                gui.set_subtitle_inspector_details_visible(False, sync=False)
             if hasattr(gui, "hide_filter_thumbnail_preview"):
                 gui.hide_filter_thumbnail_preview()
             if hasattr(gui, "apply_preview_blur_region"):
@@ -105,19 +95,7 @@ def toggle_play(gui):
                 and gui._blur_effect_enabled()
             ):
                 gui.video_view.set_blur_edit_enabled(False)
-            # Auto-collapse the track inspector on play (unless the
-            # user anchored it open). The previous collapsed state is
-            # remembered so we can restore it on pause.
-            try:
-                if (
-                    not getattr(gui, "is_inspector_anchored", lambda: False)()
-                ):
-                    prev = bool(getattr(gui, "_inspector_collapsed", False))
-                    gui._inspector_collapsed_before_play = prev
-                    if hasattr(gui, "set_inspector_collapsed"):
-                        gui.set_inspector_collapsed(True)
-            except Exception:
-                pass
+            # The track inspector is always expanded - no auto-collapse.
             gui.media_player.play()
             gui.timeline.set_playing(True)
         if hasattr(gui, "_refresh_preview_audio_controls"):
@@ -153,6 +131,77 @@ def position_changed(gui, position):
     except Exception as exc:
         if hasattr(gui, "log"):
             gui.log(f"[Preview] position highlight error: {exc}")
+    # Apply audio fade-in/fade-out during playback
+    try:
+        _apply_audio_fade(gui, position)
+    except Exception:
+        pass
+
+
+def _apply_audio_fade(gui, position_ms: int):
+    """Apply fade-in/fade-out to audio track volumes during playback.
+
+    The fade values are stored in each track's metadata. During the
+    fade-in window the volume ramps from 0 to the set volume; during
+    the fade-out window it ramps from the set volume down to 0.
+    """
+    if not getattr(gui, "media_player", None):
+        return
+    try:
+        duration_ms = int(gui.media_player.duration())
+    except Exception:
+        duration_ms = 0
+    if duration_ms <= 0:
+        return
+    pos_s = position_ms / 1000.0
+    for track_name in ("A1 Audio", "A2 Dub"):
+        track, _ = _find_audio_track(gui, track_name)
+        if track is None:
+            continue
+        meta = getattr(track, "metadata", None) or {}
+        try:
+            fade_in = float(meta.get("_fade_in", 0.0))
+            fade_out = float(meta.get("_fade_out", 0.0))
+        except (TypeError, ValueError):
+            fade_in = fade_out = 0.0
+        base_vol = _compute_base_volume(gui, track, meta)
+        # Compute fade multiplier
+        mult = 1.0
+        if fade_in > 0 and pos_s < fade_in:
+            mult = min(mult, pos_s / fade_in if fade_in > 0 else 1.0)
+        if fade_out > 0:
+            remaining = (duration_ms - position_ms) / 1000.0
+            if remaining < fade_out:
+                mult = min(mult, max(0.0, remaining / fade_out) if fade_out > 0 else 1.0)
+        effective = base_vol * mult
+        if track_name == "A1 Audio":
+            if hasattr(gui.media_player, "set_original_volume"):
+                gui.media_player.set_original_volume(effective)
+        elif track_name == "A2 Dub":
+            if hasattr(gui.media_player, "set_dubbed_volume"):
+                gui.media_player.set_dubbed_volume(effective)
+
+
+def _find_audio_track(gui, name: str):
+    if not getattr(gui, "timeline", None) or not gui.timeline._timeline:
+        return None, None
+    for t in gui.timeline._timeline.tracks:
+        if t.name == name:
+            return t, name
+    return None, None
+
+
+def _compute_base_volume(gui, track, meta) -> float:
+    try:
+        vol = float(meta.get("_volume", 100.0))
+    except (TypeError, ValueError):
+        vol = 100.0
+    try:
+        gain_db = float(meta.get("_gain_db", 0.0))
+    except (TypeError, ValueError):
+        gain_db = 0.0
+    effective = vol * (10 ** (gain_db / 20.0))
+    return max(0.0, min(200.0, effective))
 
 
 def duration_changed(gui, duration):

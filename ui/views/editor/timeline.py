@@ -354,12 +354,12 @@ class EditorTimeline(QGraphicsView):
 
         tracks = [t for t in self._timeline.tracks if t.visible]
         scroll_x = self.horizontalScrollBar().value()
+        # Apply the vertical scroll offset so the tracks scroll within
+        # the viewport while the ruler stays sticky at the top.
+        scroll_y = self.verticalScrollBar().value()
         view_w = self.viewport().width()
 
-        y = 0
-
-        self._draw_ruler_sticky(painter, scroll_x, view_w)
-        y = self.RULER_HEIGHT
+        y = self.RULER_HEIGHT - scroll_y
 
         for track in tracks:
             th = self._track_heights.get(track.id, self.TRACK_DEFAULT_H)
@@ -367,14 +367,22 @@ class EditorTimeline(QGraphicsView):
             self._draw_track_layers(painter, track, scroll_x, y, th)
             y += th
 
+        # Playhead spans the full scene height (uses scene coords)
         self._draw_playhead(painter, scroll_x)
+
+        # Draw the sticky ruler LAST so it stays on top of any
+        # scrolled tracks that might overlap the ruler area.
+        self._draw_ruler_sticky(painter, scroll_x, view_w)
 
         painter.end()
 
-    def _draw_ruler_sticky(self, painter: QPainter, scroll_x: int, view_w: int) -> None:
-        painter.fillRect(0, 0, view_w, self.RULER_HEIGHT, QColor("#0a0f1a"))
+    def _draw_ruler_sticky(self, painter: QPainter, scroll_x: int, view_w: int, scroll_y: int = 0) -> None:
+        # The ruler is sticky at the top of the viewport (scroll_y
+        # is accepted for API compatibility but not applied here).
+        ruler_y = 0
+        painter.fillRect(0, ruler_y, view_w, self.RULER_HEIGHT, QColor("#0a0f1a"))
         painter.setPen(QColor("#35506f"))
-        painter.drawLine(0, self.RULER_HEIGHT - 1, view_w, self.RULER_HEIGHT - 1)
+        painter.drawLine(0, ruler_y + self.RULER_HEIGHT - 1, view_w, ruler_y + self.RULER_HEIGHT - 1)
 
         font = QFont("Segoe UI", 9)
         painter.setFont(font)
@@ -388,13 +396,13 @@ class EditorTimeline(QGraphicsView):
             if x > -10:
                 if int(t) % int(max(major_interval, 1)) < 0.5:
                     painter.setPen(QColor("#35506f"))
-                    painter.drawLine(x, self.RULER_HEIGHT - 10, x, self.RULER_HEIGHT)
+                    painter.drawLine(x, ruler_y + self.RULER_HEIGHT - 10, x, ruler_y + self.RULER_HEIGHT)
                     ts = f"{int(t // 60)}:{int(t % 60):02d}"
                     painter.setPen(QColor("#6b8cb8"))
-                    painter.drawText(int(x) + 2, 16, ts)
+                    painter.drawText(int(x) + 2, ruler_y + 16, ts)
                 else:
                     painter.setPen(QColor("#1e2d42"))
-                    painter.drawLine(x, self.RULER_HEIGHT - 5, x, self.RULER_HEIGHT)
+                    painter.drawLine(x, ruler_y + self.RULER_HEIGHT - 5, x, ruler_y + self.RULER_HEIGHT)
             t += 1.0
 
     def _draw_track_header(self, painter: QPainter, track: Track,
@@ -557,6 +565,7 @@ class EditorTimeline(QGraphicsView):
         if event.button() == Qt.LeftButton:
             pos = event.position()
             scroll_x = self.horizontalScrollBar().value()
+            scroll_y = self.verticalScrollBar().value()
             in_ruler = pos.y() < self.RULER_HEIGHT
             if in_ruler:
                 t = self._pos_to_time(pos.x(), scroll_x)
@@ -565,7 +574,7 @@ class EditorTimeline(QGraphicsView):
                     self.seekRequested.emit(t)
                     self.seekRequestedMs.emit(int(t * 1000))
 
-            clicked_layer = self._hit_test_layer(pos, scroll_x)
+            clicked_layer = self._hit_test_layer(pos, scroll_x, scroll_y)
             if clicked_layer:
                 self._selected_layer_id = clicked_layer
                 self.layerSelected.emit(clicked_layer)
@@ -605,15 +614,19 @@ class EditorTimeline(QGraphicsView):
         t = (x + scroll_x - self.TRACK_HEADER_W) / self.pixels_per_second
         return max(0.0, min(t, self._duration))
 
-    def _hit_test_layer(self, pos, scroll_x: int) -> str:
+    def _hit_test_layer(self, pos, scroll_x: int, scroll_y: int = 0) -> str:
         if not self._timeline:
             return ""
+        # The paintEvent applies the vertical scroll offset, so the
+        # click position from the viewport (pos.y()) must be converted
+        # to scene coordinates by adding scroll_y before comparing.
+        click_y = pos.y() + scroll_y
         y = self.RULER_HEIGHT
         for track in self._timeline.tracks:
             if not track.visible:
                 continue
             th = self._track_heights.get(track.id, self.TRACK_DEFAULT_H)
-            if y <= pos.y() <= y + th:
+            if y <= click_y <= y + th:
                 # Iterate in REVERSE so the topmost stacked layer (highest
                 # z_index) is selected first. This matches the visual order
                 # used by `_draw_blur_layer_bar`.

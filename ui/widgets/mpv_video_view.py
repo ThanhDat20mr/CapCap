@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+import os
+
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 
@@ -480,12 +482,152 @@ class _BlurRegionOverlayWindow(QWidget):
                     close_rect.bottom() - pad,
                 )
 
+
+class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
+    """Logo overlay that reuses the blur overlay's full structure.
+
+    Inherits move, resize, corner-handle drag, and the X close button
+    (which deletes the logo by popping the single region). Renders the
+    logo image inside the rect instead of a colored blur fill.
+    """
+
+    logoMoved = Signal(float, float, float, float)
+    logoDeleted = Signal()
+    logoEditFinished = Signal()
+
+    def __init__(self, on_region_changed=None, on_edit_finished=None):
+        super().__init__(on_region_changed=on_region_changed, on_edit_finished=on_edit_finished)
+        self._pixmap = None
+        self._sync_timer = None
+
+    def attach_to_view(self, view: QWidget):
+        # Inherit the base behavior (event filter on main window,
+        # initial sync).
+        super().attach_to_view(view)
+        # Also install an event filter on the target view so the
+        # overlay follows it on Resize/Move (the base blur overlay
+        # only filters the main window).
+        if view is not None:
+            try:
+                view.installEventFilter(self)
+            except Exception:
+                pass
+        # Periodic sync as a fallback to keep the overlay aligned
+        # with the target view (covers missed resize/move events,
+        # e.g. when the dock is resized by the splitter).
+        if self._sync_timer is None:
+            self._sync_timer = QTimer(self)
+            self._sync_timer.setInterval(300)
+            self._sync_timer.timeout.connect(self.sync_to_view)
+        self._sync_timer.start()
+
+    def eventFilter(self, watched, event):
+        if watched is self._target_view and event.type() in (
+            QEvent.Resize, QEvent.Move,
+        ):
+            # Re-sync the overlay to the target view's new position/size.
+            QTimer.singleShot(0, self.sync_to_view)
+        return super().eventFilter(watched, event)
+
+    def set_pixmap(self, path):
+        if path and os.path.exists(path):
+            self._pixmap = QPixmap(path)
+        else:
+            self._pixmap = None
+        self.update()
+
+    def set_logo_rect(self, x, y, w, h):
+        if not self._regions:
+            self._regions.append(QRectF(0.0, 0.0, 1.0, 1.0))
+        self._regions[0] = QRectF(
+            max(0.0, min(1.0, x)),
+            max(0.0, min(1.0, y)),
+            max(0.01, min(1.0, w)),
+            max(0.01, min(1.0, h)),
+        )
+        self._active_index = 0
+        self.update()
+
+    def get_logo_rect(self):
+        if not self._regions:
+            return QRectF(0.0, 0.0, 0.0, 0.0)
+        return QRectF(self._regions[0])
+
+    def add_logo(self, x=0.1, y=0.1, w=0.2, h=0.2):
+        self._regions = [QRectF(x, y, w, h)]
+        self._active_index = 0
+
+    def set_regions(self, regions):
+        if isinstance(regions, QRectF):
+            self._regions = [QRectF(regions)]
+        elif isinstance(regions, list) and regions:
+            self._regions = [QRectF(regions[0])]
+        else:
+            self._regions = []
+        self._active_index = 0 if self._regions else -1
+
+    def paintEvent(self, event):
+        if not self.isVisible():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        for index, _region in enumerate(self._regions):
+            rect = self.region_rect(index)
+            if rect.width() <= 0 or rect.height() <= 0:
+                continue
+            if self._pixmap is not None and not self._pixmap.isNull():
+                painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+                painter.drawPixmap(rect, self._pixmap, self._pixmap.rect())
+            pen = QPen(QColor(110, 231, 214), 2, Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(rect)
+            if self._editable:
+                painter.setBrush(QColor(110, 231, 214))
+                painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
+                for handle_rect in self._handle_rects(rect).values():
+                    painter.drawEllipse(handle_rect)
+                close_rect = self._close_rect(rect)
+                painter.setBrush(QColor(12, 24, 38, 230))
+                painter.setPen(QPen(QColor(110, 231, 214), 1))
+                painter.drawEllipse(close_rect)
+                painter.setPen(QPen(QColor(255, 255, 255, 235), 1.5))
+                pad = 5
+                painter.drawLine(close_rect.left() + pad, close_rect.top() + pad, close_rect.right() - pad, close_rect.bottom() - pad)
+                painter.drawLine(close_rect.right() - pad, close_rect.top() + pad, close_rect.left() + pad, close_rect.bottom() - pad)
+
+    def mousePressEvent(self, event):
+        if not self._editable or event.button() != Qt.LeftButton:
+            event.ignore()
+            return
+        pos = QPointF(event.position())
+        for index, _region in enumerate(self._regions):
+            close_rect = self._close_rect(self.region_rect(index))
+            if close_rect.contains(pos):
+                if 0 <= index < len(self._regions):
+                    self._regions.pop(index)
+                if self._sync_timer is not None:
+                    self._sync_timer.stop()
+                self.logoDeleted.emit()
+                if callable(self._on_region_changed):
+                    self._on_region_changed()
+                if callable(self._on_edit_finished):
+                    self._on_edit_finished()
+                self.sync_to_view()
+                self.update()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
 class MpvVideoView(QWidget):
     """Hosts an MPV video surface and overlays."""
     blurRegionChanged = Signal()
     blurEditFinished = Signal()
     subtitlePositionChanged = Signal(int, int)  # x_percent, y_percent
     framingChanged = Signal(float, float)
+    logoMoved = Signal(float, float, float, float)  # x, y, w, h
+    logoDeleted = Signal()
+    logoEditFinished = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -830,6 +972,47 @@ class MpvVideoView(QWidget):
     def clear_blur_region(self):
         self.blur_overlay.clear_region()
         self.blurRegionChanged.emit()
+
+    # --- Logo / Watermark overlay ---
+    def set_logo(self, path: str, x: float, y: float, w: float, h: float):
+        """Show the logo overlay at the given normalized position/size.
+
+        The overlay reuses the blur overlay structure, so it supports
+        drag-to-move, corner-resize, and an X close button to delete
+        the logo. Connect to logoMoved / logoDeleted to react to
+        changes.
+        """
+        if not hasattr(self, "logo_overlay") or self.logo_overlay is None:
+            def _on_logo_region_changed():
+                if not hasattr(self, "logo_overlay") or self.logo_overlay is None:
+                    return
+                r = self.logo_overlay.get_logo_rect()
+                if r.width() > 0 and r.height() > 0:
+                    self.logoMoved.emit(r.x(), r.y(), r.width(), r.height())
+            self.logo_overlay = _LogoRegionOverlayWindow(
+                on_region_changed=_on_logo_region_changed,
+                on_edit_finished=self.logoEditFinished.emit,
+            )
+            self.logo_overlay.logoDeleted.connect(self.logoDeleted.emit)
+        self.logo_overlay.set_pixmap(path)
+        self.logo_overlay.add_logo(x, y, w, h)
+        self.logo_overlay.set_editable(True)
+        self.logo_overlay.attach_to_view(self)
+        self.logo_overlay.sync_to_view()
+        # Delayed syncs in case the view geometry isn't ready yet
+        QTimer.singleShot(50, self.logo_overlay.sync_to_view)
+        QTimer.singleShot(200, self.logo_overlay.sync_to_view)
+        QTimer.singleShot(500, self.logo_overlay.sync_to_view)
+
+    def update_logo_rect(self, x: float, y: float, w: float, h: float):
+        if hasattr(self, "logo_overlay") and self.logo_overlay is not None:
+            self.logo_overlay.set_logo_rect(x, y, w, h)
+            self.logo_overlay.sync_to_view()
+
+    def clear_logo(self):
+        if hasattr(self, "logo_overlay") and self.logo_overlay is not None:
+            self.logo_overlay.set_editable(False)
+            self.logo_overlay.clear_region()
 
     def has_blur_region(self) -> bool:
         return self.blur_overlay.has_region()

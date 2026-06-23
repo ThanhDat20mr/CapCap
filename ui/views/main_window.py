@@ -87,6 +87,8 @@ def _build_header_bar(gui):
     gui.toggle_panel_btn.setToolTip("Toggle side panel")
     gui.toggle_panel_btn.setText("Controls")
     gui.toggle_panel_btn.clicked.connect(gui.toggle_controls_panel)
+    # Hide the toggle button - the workflow panel is always visible.
+    gui.toggle_panel_btn.setVisible(False)
     layout.addWidget(gui.toggle_panel_btn)
     layout.addSpacing(6)
 
@@ -221,6 +223,14 @@ def _connect_ui_signals(gui):
     if hasattr(gui, "audio_inspector_speed_spin"):
         gui.audio_inspector_speed_spin.valueChanged.connect(
             gui.on_audio_inspector_speed_changed
+        )
+    if hasattr(gui, "audio_inspector_fade_in_spin"):
+        gui.audio_inspector_fade_in_spin.valueChanged.connect(
+            gui.on_audio_inspector_fade_in_changed
+        )
+    if hasattr(gui, "audio_inspector_fade_out_spin"):
+        gui.audio_inspector_fade_out_spin.valueChanged.connect(
+            gui.on_audio_inspector_fade_out_changed
         )
     if hasattr(gui, "audio_inspector_mute_btn"):
         gui.audio_inspector_mute_btn.toggled.connect(
