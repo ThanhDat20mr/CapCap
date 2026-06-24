@@ -102,10 +102,11 @@ class EditorTimeline(QGraphicsView):
 
         sync_segments_to_subtitle_layers(self._timeline, seg_dicts)
 
-        # Register any new tracks in _track_heights
+        # Register any new tracks in _track_heights (height adapts
+        # to the number of layers in the track).
         for t in self._timeline.tracks:
             if t.id not in self._track_heights:
-                self._track_heights[t.id] = t.height or self.TRACK_DEFAULT_H
+                self._track_heights[t.id] = self._compute_track_height(t)
 
         self._segment_indices.clear()
         for t in self._timeline.tracks:
@@ -272,10 +273,10 @@ class EditorTimeline(QGraphicsView):
             self._init_default_tracks()
         dur = duration if duration > 0 else self._duration
         sync_tts_to_audio_layers(self._timeline, voice_track_path, 0.0, dur, segments=segments)
-        # Register track height
+        # Register track height (adapts to the number of layers)
         for t in self._timeline.tracks:
             if t.id not in self._track_heights:
-                self._track_heights[t.id] = t.height or self.TRACK_DEFAULT_H
+                self._track_heights[t.id] = self._compute_track_height(t)
         self._redraw()
 
     # ---- End legacy API ----
@@ -322,6 +323,10 @@ class EditorTimeline(QGraphicsView):
             return
         tl = self._timeline
         tracks = [t for t in tl.tracks if t.visible]
+        # Recompute each track's height based on its layer count so
+        # tracks with more layers (e.g. multiple blur regions) expand.
+        for t in tracks:
+            self._track_heights[t.id] = self._compute_track_height(t)
         total_h = self.RULER_HEIGHT + sum(
             self._track_heights.get(t.id, self.TRACK_DEFAULT_H) for t in tracks
         )
@@ -341,8 +346,29 @@ class EditorTimeline(QGraphicsView):
         if not self._timeline:
             return
         for track in self._timeline.tracks:
-            if track.id not in self._track_heights:
-                self._track_heights[track.id] = track.height or self.TRACK_DEFAULT_H
+            self._track_heights[track.id] = self._compute_track_height(track)
+
+    def _compute_track_height(self, track) -> int:
+        """Compute a track's height. Blur tracks give each layer
+        the full base height as its own row (Blur 1 and Blur 2 can
+        overlap in time, so they need vertical separation). Other
+        tracks use a single base row; their layers are drawn as
+        side-by-side segments in that row.
+        """
+        base = int(getattr(track, "height", None) or self.TRACK_DEFAULT_H)
+        if self._is_blur_track(track):
+            num_layers = max(1, len([l for l in track.layers if l.visible]))
+            return base * num_layers
+        return base
+
+    @staticmethod
+    def _is_blur_track(track) -> bool:
+        name = (track.name or "").lower()
+        prefix = name.split(" ")[0] if name else ""
+        if prefix == "b1":
+            return True
+        return any(getattr(l, "type", None) == LayerType.BLUR
+                   for l in getattr(track, "layers", []))
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -455,23 +481,30 @@ class EditorTimeline(QGraphicsView):
     def _draw_track_layers(self, painter: QPainter, track: Track,
                            scroll_x: int, y: int, h: int) -> None:
         margin = 4
-        bar_h = h - margin * 2
         view_w = self.viewport().width()
-
-        for layer in track.layers:
+        is_blur = self._is_blur_track(track)
+        visible_layers = [l for l in track.layers if l.visible]
+        num_layers = max(1, len(visible_layers))
+        row_h = (h - margin * 2) / num_layers if num_layers > 0 else h
+        for row_index, layer in enumerate(track.layers):
             if not layer.visible:
                 continue
             x = int(layer.start * self.pixels_per_second) - scroll_x
             w = max(int(layer.duration * self.pixels_per_second), 20)
-            bar_y = y + margin
-
+            if is_blur:
+                visible_count = sum(1 for l in track.layers[:track.layers.index(layer) + 1] if l.visible)
+                z = max(0, visible_count - 1)
+                z = min(z, num_layers - 1)
+                bar_y = y + margin + z * row_h
+                bar_h = max(row_h - 2, 8)
+            else:
+                bar_y = y + margin
+                bar_h = h - margin * 2
             clip_x = max(x, 0)
             clip_w = min(x + w, view_w) - clip_x
             if clip_w <= 0:
                 continue
-
             is_selected = layer.id == self._selected_layer_id
-
             if layer.type == LayerType.BLUR:
                 self._draw_blur_layer_bar(painter, layer, x, bar_y, w, bar_h, is_selected)
             else:
@@ -508,19 +541,10 @@ class EditorTimeline(QGraphicsView):
         if is_selected:
             color = color.lighter(130)
 
-        # Stack multiple BlurLayers vertically inside the same track so
-        # the user can see every region instead of only the topmost one.
-        try:
-            z = int(getattr(layer, "z_index", 0) or 0)
-        except (TypeError, ValueError):
-            z = 0
-        row_h = 14
-        max_rows = max(1, (h - 4) // row_h)
-        row = min(z, max_rows - 1)
-        y_offset = 2 + row * row_h
-        sub_h = max(8, row_h - 4)
-        sub_y = y + y_offset
-        rect = QRectF(x, sub_y, w, sub_h)
+        # Each child layer fills the full track height (passed as h)
+        # so Blur 1 and Blur 2 both span the entire B1 track. The
+        # bar is drawn at the given y/h without splitting into rows.
+        rect = QRectF(x, y, w, h)
         painter.fillRect(rect, QColor(color.red(), color.green(), color.blue(), 60))
         pen = QPen(QColor("#9b8bae"), 1.5, Qt.DashLine)
         painter.setPen(pen)
@@ -530,7 +554,7 @@ class EditorTimeline(QGraphicsView):
         font = QFont("Segoe UI", 8)
         painter.setFont(font)
         label = layer.name or "Blur"
-        painter.drawText(QRectF(x + 4, sub_y, max(w - 8, 0), sub_h),
+        painter.drawText(QRectF(x + 4, y, max(w - 8, 0), h),
                          Qt.AlignVCenter | Qt.AlignLeft, label)
 
         if is_selected:
@@ -617,49 +641,42 @@ class EditorTimeline(QGraphicsView):
     def _hit_test_layer(self, pos, scroll_x: int, scroll_y: int = 0) -> str:
         if not self._timeline:
             return ""
-        # The paintEvent applies the vertical scroll offset, so the
-        # click position from the viewport (pos.y()) must be converted
-        # to scene coordinates by adding scroll_y before comparing.
         click_y = pos.y() + scroll_y
         y = self.RULER_HEIGHT
+        margin = 4
         for track in self._timeline.tracks:
             if not track.visible:
                 continue
             th = self._track_heights.get(track.id, self.TRACK_DEFAULT_H)
-            if y <= click_y <= y + th:
-                # Iterate in REVERSE so the topmost stacked layer (highest
-                # z_index) is selected first. This matches the visual order
-                # used by `_draw_blur_layer_bar`.
-                row_h = 14
-                max_rows = max(1, (th - 4) // row_h)
-                layers = list(track.layers)
-                for layer in reversed(layers):
+            if not (y <= click_y <= y + th):
+                y += th
+                continue
+            visible_layers = [l for l in track.layers if l.visible]
+            num_layers = max(1, len(visible_layers))
+            is_blur = self._is_blur_track(track)
+            if is_blur and num_layers > 1:
+                row_h = (th - margin * 2) / num_layers
+                rel_y = click_y - y - margin
+                row = max(0, min(int(rel_y / row_h), num_layers - 1))
+                # Find the layer in that row
+                visible_count = 0
+                for layer in track.layers:
                     if not layer.visible:
                         continue
-                    lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
-                    lw = max(int(layer.duration * self.pixels_per_second), 20)
-                    if not (lx - 4 <= pos.x() <= lx + lw + 4):
-                        continue
-                    # Account for the vertical stacking in the B1 Blur
-                    # track so clicks on a specific row select the right
-                    # layer.
-                    try:
-                        z = int(getattr(layer, "z_index", 0) or 0)
-                    except (TypeError, ValueError):
-                        z = 0
-                    row = min(z, max_rows - 1)
-                    y_offset = 2 + row * row_h
-                    sub_y = y + y_offset
-                    sub_h = max(8, row_h - 4)
-                    if sub_y <= pos.y() <= sub_y + sub_h:
-                        return layer.id
-                # Fallback: any layer in the x range
-                for layer in layers:
-                    if not layer.visible:
-                        continue
-                    lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
-                    lw = max(int(layer.duration * self.pixels_per_second), 20)
-                    if lx - 4 <= pos.x() <= lx + lw + 4:
-                        return layer.id
-            y += th
+                    if visible_count == row:
+                        lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
+                        lw = max(int(layer.duration * self.pixels_per_second), 20)
+                        if lx - 4 <= pos.x() <= lx + lw + 4:
+                            return layer.id
+                        break
+                    visible_count += 1
+                return ""
+            for layer in track.layers:
+                if not layer.visible:
+                    continue
+                lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
+                lw = max(int(layer.duration * self.pixels_per_second), 20)
+                if lx - 4 <= pos.x() <= lx + lw + 4:
+                    return layer.id
+            return ""
         return ""

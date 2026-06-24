@@ -43,12 +43,18 @@ class TrackLabelBar(QFrame):
         """Store a reference to the timeline so the labels can be
         scrolled in sync with the timeline's vertical scrollbar."""
         self._timeline_widget = timeline
-        # Repaint the labels whenever the timeline scrolls so the
-        # track label positions follow the layer content.
+        # Repaint the labels whenever the timeline scrolls or its
+        # geometry changes so the track label positions follow the
+        # layer content.
         try:
             sb = timeline.verticalScrollBar()
             if sb is not None:
                 sb.valueChanged.connect(self.update)
+        except Exception:
+            pass
+        try:
+            # Repaint on horizontal scroll and viewport changes too
+            timeline.horizontalScrollBar().valueChanged.connect(self.update)
         except Exception:
             pass
 
@@ -66,6 +72,19 @@ class TrackLabelBar(QFrame):
             (n.split(" ")[0] in LOGO_PREFIXES) for n in names
         ]
         self.update()
+
+    def _get_track_heights(self) -> list:
+        """Return the current track heights, preferring the timeline's
+        live values so the labels stay in sync with dynamic heights."""
+        if self._timeline_widget is not None and hasattr(
+            self._timeline_widget, "_track_heights"
+        ):
+            tl_heights = self._timeline_widget._track_heights
+            if self._track_names and tl_heights:
+                # Use timeline's heights, falling back to our cached
+                # values for any track not in the timeline's dict.
+                return [tl_heights.get(n, h) for n, h in zip(self._track_names, self._track_heights)]
+        return self._track_heights
 
     def set_muted(self, name: str, muted: bool):
         for i, n in enumerate(self._track_names):
@@ -230,6 +249,10 @@ class TrackLabelBar(QFrame):
 
         y = self.RULER_HEIGHT - scroll_y
 
+        # Use the timeline's live track heights so the labels expand
+        # or shrink with the layer count.
+        track_heights = self._get_track_heights()
+
         def _icon(name: str) -> str:
             prefix = name.split(" ")[0] if name else ""
             return TRACK_ICONS.get(prefix, "?")
@@ -250,7 +273,7 @@ class TrackLabelBar(QFrame):
         text_w = self.TRACK_HEADER_W - text_x - icon_col_w - 4
 
         for i, name in enumerate(self._track_names):
-            h = self._track_heights[i] if i < len(self._track_heights) else 60
+            h = track_heights[i] if i < len(track_heights) else 60
             icon = _icon(name)
             c = _color(name)
             muted = self._track_muted[i] if i < len(self._track_muted) else False
