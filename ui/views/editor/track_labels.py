@@ -13,6 +13,7 @@ TRACK_ICONS: dict[str, str] = {
 
 AUDIO_PREFIXES = {"A1", "A2"}
 BLUR_PREFIXES = {"B1"}
+LOGO_PREFIXES = {"L1"}
 
 
 class TrackLabelBar(QFrame):
@@ -20,6 +21,7 @@ class TrackLabelBar(QFrame):
 
     muteToggled = Signal(str, bool)  # track_name, is_muted
     blurToggled = Signal(str, bool)  # track_name, is_enabled
+    logoToggled = Signal(str, bool)  # track_name, is_shown
 
     TRACK_HEADER_W = 132
     RULER_HEIGHT = 30
@@ -34,6 +36,21 @@ class TrackLabelBar(QFrame):
         self._track_locked: list[bool] = []
         self._track_muted: list[bool] = []
         self._track_blur_on: list[bool] = []
+        self._track_logo_shown: list[bool] = []
+        self._timeline_widget = None  # for vertical scroll sync
+
+    def set_timeline(self, timeline):
+        """Store a reference to the timeline so the labels can be
+        scrolled in sync with the timeline's vertical scrollbar."""
+        self._timeline_widget = timeline
+        # Repaint the labels whenever the timeline scrolls so the
+        # track label positions follow the layer content.
+        try:
+            sb = timeline.verticalScrollBar()
+            if sb is not None:
+                sb.valueChanged.connect(self.update)
+        except Exception:
+            pass
 
     def set_tracks(self, names: list, heights: list, locked: list = None, muted: list = None):
         self._track_names = names
@@ -43,6 +60,10 @@ class TrackLabelBar(QFrame):
         # Default blur effect to ON for B1 tracks
         self._track_blur_on = [
             (n.split(" ")[0] in BLUR_PREFIXES) for n in names
+        ]
+        # Default logo visibility to ON for L1 tracks
+        self._track_logo_shown = [
+            (n.split(" ")[0] in LOGO_PREFIXES) for n in names
         ]
         self.update()
 
@@ -60,9 +81,17 @@ class TrackLabelBar(QFrame):
                 self.update()
                 return
 
+    def set_logo_shown(self, name: str, shown: bool):
+        for i, n in enumerate(self._track_names):
+            if n == name and i < len(self._track_logo_shown):
+                self._track_logo_shown[i] = shown
+                self.update()
+                return
+
     def mousePressEvent(self, event: QMouseEvent):
         # Click on an audio track label to toggle its mute state.
         # Click on a blur track label to toggle the blur effect.
+        # Click on a logo track label to hide/show the logo.
         if event.button() == Qt.LeftButton:
             idx = self._track_index_at(event.position().y())
             if 0 <= idx < len(self._track_names):
@@ -87,16 +116,28 @@ class TrackLabelBar(QFrame):
                     self.blurToggled.emit(name, new_state)
                     event.accept()
                     return
+                if prefix in LOGO_PREFIXES:
+                    new_state = not (
+                        self._track_logo_shown[idx]
+                        if idx < len(self._track_logo_shown)
+                        else False
+                    )
+                    if idx < len(self._track_logo_shown):
+                        self._track_logo_shown[idx] = new_state
+                    self.update()
+                    self.logoToggled.emit(name, new_state)
+                    event.accept()
+                    return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        # Change cursor to a pointing hand when hovering over an audio
-        # or blur track label to signal it is clickable.
+        # Change cursor to a pointing hand when hovering over an audio,
+        # blur, or logo track label to signal it is clickable.
         idx = self._track_index_at(event.position().y())
         is_clickable = False
         if 0 <= idx < len(self._track_names):
             prefix = self._track_names[idx].split(" ")[0] if self._track_names[idx] else ""
-            if prefix in AUDIO_PREFIXES or prefix in BLUR_PREFIXES:
+            if prefix in AUDIO_PREFIXES or prefix in BLUR_PREFIXES or prefix in LOGO_PREFIXES:
                 is_clickable = True
         self.setCursor(Qt.PointingHandCursor if is_clickable else Qt.ArrowCursor)
 
@@ -105,7 +146,17 @@ class TrackLabelBar(QFrame):
         super().leaveEvent(event)
 
     def _track_index_at(self, y: float) -> int:
-        yp = y - self.RULER_HEIGHT
+        # Add the timeline's vertical scroll offset so the click
+        # position is converted to the un-scrolled label space.
+        scroll_y = 0
+        if self._timeline_widget is not None:
+            try:
+                sb = self._timeline_widget.verticalScrollBar()
+                if sb is not None:
+                    scroll_y = int(sb.value())
+            except Exception:
+                pass
+        yp = (y + scroll_y) - self.RULER_HEIGHT
         if yp < 0:
             return -1
         for i, h in enumerate(self._track_heights):
@@ -166,7 +217,18 @@ class TrackLabelBar(QFrame):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
-        y = self.RULER_HEIGHT
+        # Apply the timeline's vertical scroll offset so the labels
+        # scroll in sync with the layer content (stays aligned).
+        scroll_y = 0
+        if self._timeline_widget is not None:
+            try:
+                sb = self._timeline_widget.verticalScrollBar()
+                if sb is not None:
+                    scroll_y = int(sb.value())
+            except Exception:
+                pass
+
+        y = self.RULER_HEIGHT - scroll_y
 
         def _icon(name: str) -> str:
             prefix = name.split(" ")[0] if name else ""
@@ -195,7 +257,10 @@ class TrackLabelBar(QFrame):
             blur_on = self._track_blur_on[i] if i < len(self._track_blur_on) else False
             prefix = name.split(" ")[0] if name else ""
 
-            if muted:
+            logo_hidden = (prefix in LOGO_PREFIXES
+                           and i < len(self._track_logo_shown)
+                           and not self._track_logo_shown[i])
+            if muted or logo_hidden:
                 bg = QColor("#1a1a2e")
             elif prefix in BLUR_PREFIXES and not blur_on:
                 bg = QColor("#1a1a2e")  # dimmed when blur is off
@@ -208,7 +273,7 @@ class TrackLabelBar(QFrame):
             painter.setPen(QPen(c, 0))
             painter.fillRect(0, y, 3, h, c)
 
-            text_color = QColor("#555") if (muted or (prefix in BLUR_PREFIXES and not blur_on)) else QColor("#ffffff")
+            text_color = QColor("#555") if (muted or logo_hidden or (prefix in BLUR_PREFIXES and not blur_on)) else QColor("#ffffff")
             painter.setPen(text_color)
             lines = self._label_lines(name, text_w, fm)
             if not lines:

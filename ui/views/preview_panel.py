@@ -810,8 +810,11 @@ def build_preview_panel(gui):
 
     from views.editor.track_labels import TrackLabelBar
     gui.track_label_bar = TrackLabelBar()
+    if hasattr(gui, "timeline"):
+        gui.track_label_bar.set_timeline(gui.timeline)
     gui.track_label_bar.muteToggled.connect(gui.on_track_mute_toggled)
     gui.track_label_bar.blurToggled.connect(gui.on_track_blur_toggled)
+    gui.track_label_bar.logoToggled.connect(gui.on_track_logo_toggled)
 
     def _sync_labels():
         if hasattr(gui, "timeline") and gui.timeline._timeline:

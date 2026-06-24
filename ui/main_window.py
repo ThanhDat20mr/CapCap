@@ -5249,6 +5249,29 @@ class VideoTranslatorGUI(QMainWindow):
         except Exception:
             pass
 
+    def on_track_logo_toggled(self, track_name: str, is_shown: bool):
+        """Handle L1 track label click - hide or show the logo overlay."""
+        if not hasattr(self, "video_view"):
+            return
+        if is_shown:
+            # Re-show the logo by finding the L1 Logo track layer and
+            # re-displaying the overlay.
+            if hasattr(self, "timeline") and self.timeline._timeline:
+                for track in self.timeline._timeline.tracks:
+                    if track.name == "L1 Logo" and track.layers:
+                        try:
+                            self._show_logo_overlay(track, track.layers[0])
+                        except Exception:
+                            pass
+                        return
+            # No layer found - nothing to show
+            if hasattr(self.video_view, "clear_logo"):
+                self.video_view.clear_logo()
+        else:
+            # Hide the logo overlay
+            if hasattr(self.video_view, "clear_logo"):
+                self.video_view.clear_logo()
+
     def _sync_timeline_mute_to_gui(self):
         """Pull the current timeline track mute state into the GUI and backend."""
         if not hasattr(self, "timeline") or not self.timeline._timeline:
