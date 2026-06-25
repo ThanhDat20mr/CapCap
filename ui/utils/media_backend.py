@@ -170,6 +170,7 @@ class MpvMediaPlayerBackend(QObject):
         self._applied_subtitle_path = ""
         self._sub_track_id = -1
         self._blur_region = None
+        self._mask_region = None
         self._mute_original = False
         self._mute_dubbed = False
 
