@@ -4655,15 +4655,13 @@ class VideoTranslatorGUI(QMainWindow):
             pass
 
     def _on_mask_overlay_changed(self, track, layer):
-        """Read the current overlay region and push it to the layer +
-        mpv filter. Called continuously while the user drags the
-        overlay so the green mask follows the overlay in real time.
+        """Read the current overlay region and update the layer
+        position. The mpv filter is NOT re-applied here — it is
+        only applied while the video is playing, to avoid lag
+        during the drag. When the user presses play, the latest
+        layer position is pushed to mpv via `_apply_mask_to_preview`
+        (called from `toggle_play` and the stateChanged handler).
         """
-        if hasattr(self, "log"):
-            try:
-                self.log(f"[Mask] overlay changed handler called for layer {layer.id}")
-            except Exception:
-                pass
         if not hasattr(self, "video_view"):
             return
         overlay = getattr(self.video_view, "mask_overlay", None)
@@ -4684,88 +4682,6 @@ class VideoTranslatorGUI(QMainWindow):
             layer.height = h
         except Exception:
             return
-        if hasattr(self, "log"):
-            try:
-                self.log(
-                    f"[Mask] layer updated: x={layer.position_x:.3f} "
-                    f"y={layer.position_y:.3f} w={layer.width:.3f} "
-                    f"h={layer.height:.3f}"
-                )
-            except Exception:
-                pass
-        try:
-            # Read the layer back from the timeline (not the captured
-            # `layer` arg) to make sure we update the actual layer
-            # that's in the timeline and that the payload reflects
-            # the move when play is pressed.
-            if hasattr(self, "timeline") and self.timeline._timeline:
-                for tr in self.timeline._timeline.tracks:
-                    if layer in tr.layers:
-                        idx = tr.layers.index(layer)
-                        tr.layers[idx] = layer
-                        break
-        except Exception:
-            pass
-        try:
-            self._apply_mask_to_preview(force=True)
-        except Exception:
-            pass
-        # Sync the inspector spinboxes too so they follow the drag.
-        try:
-            if (hasattr(self, "mask_inspector_x_spin")
-                    and hasattr(self, "timeline")
-                    and self.timeline._selected_layer_id == layer.id):
-                self.mask_inspector_x_spin.blockSignals(True)
-                self.mask_inspector_x_spin.setValue(x)
-                self.mask_inspector_x_spin.blockSignals(False)
-                self.mask_inspector_y_spin.blockSignals(True)
-                self.mask_inspector_y_spin.setValue(y)
-                self.mask_inspector_y_spin.blockSignals(False)
-                self.mask_inspector_w_spin.blockSignals(True)
-                self.mask_inspector_w_spin.setValue(w)
-                self.mask_inspector_w_spin.blockSignals(False)
-                self.mask_inspector_h_spin.blockSignals(True)
-                self.mask_inspector_h_spin.setValue(h)
-                self.mask_inspector_h_spin.blockSignals(False)
-        except Exception:
-            pass
-
-    def _delete_mask_layer(self, layer):
-        try:
-            layer.position_x = float(x)
-            layer.position_y = float(y)
-            layer.width = float(w)
-            layer.height = float(h)
-        except Exception:
-            return
-        try:
-            self._apply_mask_to_preview()
-        except Exception:
-            pass
-        try:
-            if hasattr(self, "persist_project_mask_state"):
-                self.persist_project_mask_state()
-        except Exception:
-            pass
-        # Keep the spinboxes in sync so the inspector shows the new
-        # values as the user drags the overlay.
-        try:
-            if (hasattr(self, "mask_inspector_x_spin")
-                    and self.timeline._selected_layer_id == layer.id):
-                self.mask_inspector_x_spin.blockSignals(True)
-                self.mask_inspector_x_spin.setValue(float(x))
-                self.mask_inspector_x_spin.blockSignals(False)
-                self.mask_inspector_y_spin.blockSignals(True)
-                self.mask_inspector_y_spin.setValue(float(y))
-                self.mask_inspector_y_spin.blockSignals(False)
-                self.mask_inspector_w_spin.blockSignals(True)
-                self.mask_inspector_w_spin.setValue(float(w))
-                self.mask_inspector_w_spin.blockSignals(False)
-                self.mask_inspector_h_spin.blockSignals(True)
-                self.mask_inspector_h_spin.setValue(float(h))
-                self.mask_inspector_h_spin.blockSignals(False)
-        except Exception:
-            pass
 
     def _delete_mask_layer(self, layer):
         """Remove the mask layer from the M1 track and clean up."""
@@ -7428,7 +7344,7 @@ class VideoTranslatorGUI(QMainWindow):
         else:
             self.media_player.clear_mask_region()
 
-    def _on_preview_state_changed(self, state: int):
+    def _on_preview_state_changed(self, _state: int):
         """Re-apply the M1 mask filter when the player state changes.
 
         The mask is only applied to the video while the player is
@@ -7437,17 +7353,7 @@ class VideoTranslatorGUI(QMainWindow):
         play / pause / stop.
         """
         try:
-            from PySide6.QtMultimedia import QMediaPlayer
-            is_playing = (state == int(QMediaPlayer.PlayingState.value))
-        except Exception:
-            is_playing = False
-        if hasattr(self, "log"):
-            try:
-                self.log(f"[Preview] state changed to {state} (is_playing={is_playing})")
-            except Exception:
-                pass
-        try:
-            self._apply_mask_to_preview(force=True)
+            self._apply_mask_to_preview()
         except Exception:
             pass
 
