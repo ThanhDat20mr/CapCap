@@ -638,8 +638,20 @@ def build_preview_panel(gui):
     gui.add_logo_btn.clicked.connect(
         lambda: gui.on_add_timeline_layer("logo") if hasattr(gui, "on_add_timeline_layer") else None
     )
+    # Dedicated Mask button (beside the Logo button). Adds a new
+    # rectangular mask to the M1 track.
+    gui.add_mask_btn = QPushButton("Mask")
+    gui.add_mask_btn.setFixedSize(50, 38)
+    gui.add_mask_btn.setStyleSheet(
+        "QPushButton { color: #c98c5a; font-weight: bold; font-size: 13px; padding: 0; }"
+    )
+    gui.add_mask_btn.setToolTip("Add a rectangular mask to the video")
+    gui.add_mask_btn.clicked.connect(
+        lambda: gui.on_add_timeline_layer("mask") if hasattr(gui, "on_add_timeline_layer") else None
+    )
     blur_group.addWidget(gui.blur_add_btn)
     blur_group.addWidget(gui.add_logo_btn)
+    blur_group.addWidget(gui.add_mask_btn)
     blur_group.addWidget(gui.ocr_region_btn)
 
     volume_group = QHBoxLayout()
