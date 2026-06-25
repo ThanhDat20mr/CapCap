@@ -745,12 +745,13 @@ class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
             rect = self.region_rect(index)
             if rect.width() <= 0 or rect.height() <= 0:
                 continue
-            # Translucent fill of the mask colour so the user can see
-            # the region outline, plus a solid border + dashed inner
-            # stroke matching the M1 accent colour.
+            # Translucent fill of the M1 accent colour (NOT the mask
+            # colour) so the user can see the region outline while
+            # positioning, regardless of the mask's actual colour.
+            # The actual mask colour is only applied to the video via
+            # the mpv filter when the layer is set to visible.
             accent = QColor(self.ACCENT)
-            fill = QColor(self._fill_color)
-            painter.fillRect(rect, QColor(fill.red(), fill.green(), fill.blue(), 60))
+            painter.fillRect(rect, QColor(accent.red(), accent.green(), accent.blue(), 60))
             pen = QPen(accent, 2, Qt.DashLine)
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
@@ -802,6 +803,7 @@ class MpvVideoView(QWidget):
     logoMoved = Signal(float, float, float, float)  # x, y, w, h
     logoDeleted = Signal()
     logoEditFinished = Signal()
+    maskRegionChanged = Signal()
     maskMoved = Signal(float, float, float, float)  # x, y, w, h
     maskDeleted = Signal()
     maskEditFinished = Signal()

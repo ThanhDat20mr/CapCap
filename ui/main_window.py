@@ -4554,6 +4554,12 @@ class VideoTranslatorGUI(QMainWindow):
                 self.video_view.maskMoved.disconnect(prev_moved)
             except (RuntimeError, TypeError, Exception):
                 pass
+        prev_changed = getattr(self, "_mask_region_changed_handler", None)
+        if prev_changed is not None:
+            try:
+                self.video_view.maskRegionChanged.disconnect(prev_changed)
+            except (RuntimeError, TypeError, Exception):
+                pass
         prev_deleted = getattr(self, "_mask_deleted_handler", None)
         if prev_deleted is not None:
             try:
@@ -4566,13 +4572,21 @@ class VideoTranslatorGUI(QMainWindow):
         def _moved_handler(nx, ny, nw, nh, l=layer):
             self._on_mask_moved(l, nx, ny, nw, nh)
 
+        def _region_changed_handler(t=track, l=layer):
+            # Fired continuously while the user drags the overlay. Push
+            # the new region back to the layer + mpv filter so the
+            # green mask follows the overlay in real time.
+            self._on_mask_overlay_changed(t, l)
+
         def _deleted_handler(l=layer):
             self._delete_mask_layer(l)
 
         self._mask_moved_handler = _moved_handler
+        self._mask_region_changed_handler = _region_changed_handler
         self._mask_deleted_handler = _deleted_handler
 
         self.video_view.maskMoved.connect(_moved_handler)
+        self.video_view.maskRegionChanged.connect(_region_changed_handler)
         self.video_view.maskDeleted.connect(_deleted_handler)
 
         x = float(getattr(layer, "position_x", 0.3))
@@ -4604,6 +4618,92 @@ class VideoTranslatorGUI(QMainWindow):
 
         Then push the change into the mpv filter chain and persist it.
         """
+        try:
+            layer.position_x = float(x)
+            layer.position_y = float(y)
+            layer.width = float(w)
+            layer.height = float(h)
+        except Exception:
+            return
+        try:
+            self._apply_mask_to_preview()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "persist_project_mask_state"):
+                self.persist_project_mask_state()
+        except Exception:
+            pass
+        # Keep the spinboxes in sync so the inspector shows the new
+        # values as the user drags the overlay.
+        try:
+            if (hasattr(self, "mask_inspector_x_spin")
+                    and self.timeline._selected_layer_id == layer.id):
+                self.mask_inspector_x_spin.blockSignals(True)
+                self.mask_inspector_x_spin.setValue(float(x))
+                self.mask_inspector_x_spin.blockSignals(False)
+                self.mask_inspector_y_spin.blockSignals(True)
+                self.mask_inspector_y_spin.setValue(float(y))
+                self.mask_inspector_y_spin.blockSignals(False)
+                self.mask_inspector_w_spin.blockSignals(True)
+                self.mask_inspector_w_spin.setValue(float(w))
+                self.mask_inspector_w_spin.blockSignals(False)
+                self.mask_inspector_h_spin.blockSignals(True)
+                self.mask_inspector_h_spin.setValue(float(h))
+                self.mask_inspector_h_spin.blockSignals(False)
+        except Exception:
+            pass
+
+    def _on_mask_overlay_changed(self, track, layer):
+        """Read the current overlay region and push it to the layer +
+        mpv filter. Called continuously while the user drags the
+        overlay so the green mask follows the overlay in real time.
+        """
+        if not hasattr(self, "video_view"):
+            return
+        overlay = getattr(self.video_view, "mask_overlay", None)
+        if overlay is None or not overlay._regions:
+            return
+        try:
+            rect = overlay._regions[0]
+            x = float(rect.x())
+            y = float(rect.y())
+            w = float(rect.width())
+            h = float(rect.height())
+        except Exception:
+            return
+        try:
+            layer.position_x = x
+            layer.position_y = y
+            layer.width = w
+            layer.height = h
+        except Exception:
+            return
+        try:
+            self._apply_mask_to_preview()
+        except Exception:
+            pass
+        # Sync the inspector spinboxes too so they follow the drag.
+        try:
+            if (hasattr(self, "mask_inspector_x_spin")
+                    and hasattr(self, "timeline")
+                    and self.timeline._selected_layer_id == layer.id):
+                self.mask_inspector_x_spin.blockSignals(True)
+                self.mask_inspector_x_spin.setValue(x)
+                self.mask_inspector_x_spin.blockSignals(False)
+                self.mask_inspector_y_spin.blockSignals(True)
+                self.mask_inspector_y_spin.setValue(y)
+                self.mask_inspector_y_spin.blockSignals(False)
+                self.mask_inspector_w_spin.blockSignals(True)
+                self.mask_inspector_w_spin.setValue(w)
+                self.mask_inspector_w_spin.blockSignals(False)
+                self.mask_inspector_h_spin.blockSignals(True)
+                self.mask_inspector_h_spin.setValue(h)
+                self.mask_inspector_h_spin.blockSignals(False)
+        except Exception:
+            pass
+
+    def _delete_mask_layer(self, layer):
         try:
             layer.position_x = float(x)
             layer.position_y = float(y)
@@ -6024,6 +6124,11 @@ class VideoTranslatorGUI(QMainWindow):
                 end=min(tl.duration, 5.0) if tl.duration > 0 else 5.0,
             )
             layer.z_index = idx
+            # New masks start hidden so the user can position / resize
+            # the region via the overlay without a black rectangle
+            # being drawn on the video. The 'Show on preview' checkbox
+            # in the Mask Inspector toggles layer.visible.
+            layer.visible = False
             mask_track.layers.append(layer)
             self.timeline._redraw()
             # Push the new mask into the mpv filter chain and persist
@@ -7260,15 +7365,41 @@ class VideoTranslatorGUI(QMainWindow):
         return items
 
     def _apply_mask_to_preview(self, *, regions=None, force: bool = False):
-        """Push the M1 mask track into the mpv filter chain."""
+        """Push the M1 mask track into the mpv filter chain.
+
+        The mask is only applied to the video while the player is
+        playing. When the video is paused / stopped, the mask is
+        cleared from the mpv filter chain so the original frame shows
+        through. The draggable overlay remains visible either way so
+        the user can position / resize the region while paused.
+        """
         if not hasattr(self, "media_player"):
             return
         if regions is None:
             regions = self._current_mask_regions_payload()
-        if regions:
+        # Gate by playback state: only apply while playing.
+        is_playing = False
+        try:
+            is_playing = bool(self.media_player.is_playing())
+        except Exception:
+            is_playing = False
+        if regions and is_playing:
             self.media_player.set_mask_region(regions)
         else:
             self.media_player.clear_mask_region()
+
+    def _on_preview_state_changed(self, _state: int):
+        """Re-apply the M1 mask filter when the player state changes.
+
+        The mask is only applied to the video while the player is
+        playing. Hooked from `media_player.stateChanged` in
+        `setup_media_player` so the mpv filter chain is updated on
+        play / pause / stop.
+        """
+        try:
+            self._apply_mask_to_preview()
+        except Exception:
+            pass
 
     def persist_project_mask_state(self, *, regions=None):
         state = getattr(self, "current_project_state", None)
@@ -7325,40 +7456,25 @@ class VideoTranslatorGUI(QMainWindow):
                 pass
 
     def _show_mask_inspector_for_track(self, track, layer=None):
-        """Show the Mask Track Inspector populated with the selected M1 layer."""
+        """Show the Mask Track Inspector populated with the selected M1 layer.
+
+        The inspector only exposes the mask's colour + opacity. Position,
+        size and mode are not configurable here — the user positions /
+        resizes the region via the draggable overlay on the video. The
+        mask is only applied to the video while the player is playing.
+        """
         self._switch_inspector("mask")
         self._wire_mask_inspector_controls()
         if layer is None:
             return
-        if hasattr(self, "mask_inspector_x_spin"):
-            self.mask_inspector_x_spin.blockSignals(True)
-            self.mask_inspector_x_spin.setValue(float(getattr(layer, "position_x", 0.3)))
-            self.mask_inspector_x_spin.blockSignals(False)
-        if hasattr(self, "mask_inspector_y_spin"):
-            self.mask_inspector_y_spin.blockSignals(True)
-            self.mask_inspector_y_spin.setValue(float(getattr(layer, "position_y", 0.4)))
-            self.mask_inspector_y_spin.blockSignals(False)
-        if hasattr(self, "mask_inspector_w_spin"):
-            self.mask_inspector_w_spin.blockSignals(True)
-            self.mask_inspector_w_spin.setValue(float(getattr(layer, "width", 0.4)))
-            self.mask_inspector_w_spin.blockSignals(False)
-        if hasattr(self, "mask_inspector_h_spin"):
-            self.mask_inspector_h_spin.blockSignals(True)
-            self.mask_inspector_h_spin.setValue(float(getattr(layer, "height", 0.2)))
-            self.mask_inspector_h_spin.blockSignals(False)
-        mode = str(getattr(layer, "mode", "solid"))
-        if hasattr(self, "mask_inspector_mode_combo"):
-            self.mask_inspector_mode_combo.blockSignals(True)
-            idx = self.mask_inspector_mode_combo.findData(mode)
-            if idx >= 0:
-                self.mask_inspector_mode_combo.setCurrentIndex(idx)
-            self.mask_inspector_mode_combo.blockSignals(False)
         color = str(getattr(layer, "color", "#000000"))
         if hasattr(self, "mask_inspector_color_btn"):
+            self.mask_inspector_color_btn.blockSignals(True)
             self.mask_inspector_color_btn.setText(color)
             self.mask_inspector_color_btn.setStyleSheet(
                 f"background-color: {color}; color: #fff;"
             )
+            self.mask_inspector_color_btn.blockSignals(False)
         try:
             opacity = float(getattr(layer, "opacity", 1.0))
         except (TypeError, ValueError):
@@ -7370,38 +7486,22 @@ class VideoTranslatorGUI(QMainWindow):
             self.mask_inspector_opacity_slider.blockSignals(False)
         if hasattr(self, "mask_inspector_opacity_value_label"):
             self.mask_inspector_opacity_value_label.setText(f"{int(round(opacity * 100))}%")
-        try:
-            pixel_size = int(getattr(layer, "pixelate_size", 12))
-        except (TypeError, ValueError):
-            pixel_size = 12
-        pixel_size = max(2, min(60, pixel_size))
-        if hasattr(self, "mask_inspector_pixel_slider"):
-            self.mask_inspector_pixel_slider.blockSignals(True)
-            self.mask_inspector_pixel_slider.setValue(pixel_size)
-            self.mask_inspector_pixel_slider.blockSignals(False)
-        if hasattr(self, "mask_inspector_pixel_value_label"):
-            self.mask_inspector_pixel_value_label.setText(str(pixel_size))
-        try:
-            strength = int(getattr(layer, "blur_strength", 20))
-        except (TypeError, ValueError):
-            strength = 20
-        strength = max(1, min(20, strength))
-        if hasattr(self, "mask_inspector_strength_slider"):
-            self.mask_inspector_strength_slider.blockSignals(True)
-            self.mask_inspector_strength_slider.setValue(strength)
-            self.mask_inspector_strength_slider.blockSignals(False)
-        if hasattr(self, "mask_inspector_strength_value_label"):
-            self.mask_inspector_strength_value_label.setText(str(strength))
         if hasattr(self, "mask_inspector_summary_label"):
             tname = getattr(track, "name", "M1")
             lname = getattr(layer, "name", "Mask")
             self.mask_inspector_summary_label.setText(
-                f"Selected: {tname} → {lname}. Adjust position, size, "
-                "colour, mode and opacity below."
+                f"Selected: {tname} → {lname}. Drag the mask on the video "
+                "to move it. Drag a corner to resize. The X button deletes "
+                "the mask. The mask is applied while the video is playing."
             )
 
     def _wire_mask_inspector_controls(self):
-        """One-time wiring of the Mask Inspector controls."""
+        """One-time wiring of the Mask Inspector controls.
+
+        Only colour + opacity are wired here. Position / size / mode
+        are not configurable in the inspector; the user positions and
+        resizes the mask via the draggable overlay on the video.
+        """
         if getattr(self, "_mask_inspector_wired", False):
             return
         self._mask_inspector_wired = True
@@ -7427,39 +7527,6 @@ class VideoTranslatorGUI(QMainWindow):
             except Exception:
                 pass
 
-        def _on_x_changed(v):
-            layer, _ = _selected_mask_layer()
-            if layer is None:
-                return
-            layer.position_x = float(v)
-            _sync_preview(layer)
-        def _on_y_changed(v):
-            layer, _ = _selected_mask_layer()
-            if layer is None:
-                return
-            layer.position_y = float(v)
-            _sync_preview(layer)
-        def _on_w_changed(v):
-            layer, _ = _selected_mask_layer()
-            if layer is None:
-                return
-            layer.width = float(v)
-            _sync_preview(layer)
-        def _on_h_changed(v):
-            layer, _ = _selected_mask_layer()
-            if layer is None:
-                return
-            layer.height = float(v)
-            _sync_preview(layer)
-        def _on_mode_changed(index):
-            layer, _ = _selected_mask_layer()
-            if layer is None:
-                return
-            try:
-                layer.mode = str(self.mask_inspector_mode_combo.itemData(index) or "solid")
-            except Exception:
-                layer.mode = "solid"
-            _sync_preview(layer)
         def _on_opacity_changed(v):
             layer, _ = _selected_mask_layer()
             if layer is None:
@@ -7472,54 +7539,10 @@ class VideoTranslatorGUI(QMainWindow):
             if hasattr(self, "mask_inspector_opacity_value_label"):
                 self.mask_inspector_opacity_value_label.setText(f"{int(v)}%")
             _sync_preview(layer)
-        def _on_pixel_changed(v):
-            layer, _ = _selected_mask_layer()
-            if layer is None:
-                return
-            try:
-                layer.pixelate_size = int(v)
-            except Exception:
-                return
-            if hasattr(self, "mask_inspector_pixel_value_label"):
-                self.mask_inspector_pixel_value_label.setText(str(int(v)))
-            _sync_preview(layer)
-        def _on_strength_changed(v):
-            layer, _ = _selected_mask_layer()
-            if layer is None:
-                return
-            try:
-                layer.blur_strength = int(v)
-            except Exception:
-                return
-            if hasattr(self, "mask_inspector_strength_value_label"):
-                self.mask_inspector_strength_value_label.setText(str(int(v)))
-            _sync_preview(layer)
 
-        self._mask_x_handler = _on_x_changed
-        self._mask_y_handler = _on_y_changed
-        self._mask_w_handler = _on_w_changed
-        self._mask_h_handler = _on_h_changed
-        self._mask_mode_handler = _on_mode_changed
         self._mask_opacity_handler = _on_opacity_changed
-        self._mask_pixel_handler = _on_pixel_changed
-        self._mask_strength_handler = _on_strength_changed
-
-        if hasattr(self, "mask_inspector_x_spin"):
-            self.mask_inspector_x_spin.valueChanged.connect(_on_x_changed)
-        if hasattr(self, "mask_inspector_y_spin"):
-            self.mask_inspector_y_spin.valueChanged.connect(_on_y_changed)
-        if hasattr(self, "mask_inspector_w_spin"):
-            self.mask_inspector_w_spin.valueChanged.connect(_on_w_changed)
-        if hasattr(self, "mask_inspector_h_spin"):
-            self.mask_inspector_h_spin.valueChanged.connect(_on_h_changed)
-        if hasattr(self, "mask_inspector_mode_combo"):
-            self.mask_inspector_mode_combo.currentIndexChanged.connect(_on_mode_changed)
         if hasattr(self, "mask_inspector_opacity_slider"):
             self.mask_inspector_opacity_slider.valueChanged.connect(_on_opacity_changed)
-        if hasattr(self, "mask_inspector_pixel_slider"):
-            self.mask_inspector_pixel_slider.valueChanged.connect(_on_pixel_changed)
-        if hasattr(self, "mask_inspector_strength_slider"):
-            self.mask_inspector_strength_slider.valueChanged.connect(_on_strength_changed)
 
         # Color picker
         from PySide6.QtWidgets import QColorDialog

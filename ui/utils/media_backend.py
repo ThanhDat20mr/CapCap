@@ -155,6 +155,7 @@ class MpvMediaPlayerBackend(QObject):
 
     positionChanged = Signal(int)
     durationChanged = Signal(int)
+    stateChanged = Signal(int)  # QMediaPlayer.PlaybackState
 
     def __init__(self, video_view):
         super().__init__(video_view)
@@ -338,6 +339,10 @@ class MpvMediaPlayerBackend(QObject):
             except Exception:
                 pass
         self._state = QMediaPlayer.PlayingState
+        try:
+            self.stateChanged.emit(int(self._state))
+        except Exception:
+            pass
 
     def pause(self):
         self._player.pause = True
@@ -352,6 +357,10 @@ class MpvMediaPlayerBackend(QObject):
             except Exception:
                 pass
         self._state = QMediaPlayer.PausedState
+        try:
+            self.stateChanged.emit(int(self._state))
+        except Exception:
+            pass
 
     def stop(self):
         self._player.pause = True
@@ -566,10 +575,9 @@ class MpvMediaPlayerBackend(QObject):
     def _build_mask_filter(self):
         """Build the lavfi filter chain for the M1 mask track.
 
-        Mask modes:
-        - solid  : draw a coloured rectangle on top of the video.
-        - pixelate: pixelate the cropped region then overlay it.
-        - blur   : blur the cropped region then overlay it.
+        The mask is always a solid-colour rectangle. Pixelate and blur
+        modes were removed; the only effect is changing the colour of
+        the selected region.
         """
         raw = self._mask_region or []
         if isinstance(raw, dict):
@@ -591,92 +599,41 @@ class MpvMediaPlayerBackend(QObject):
                 h = max(2, min(video_height - y, int(round(float(mask.get("height", 0.0)) * video_height))))
             except (TypeError, ValueError):
                 continue
-            mode = str(mask.get("mode", "solid")).lower()
             color = str(mask.get("color", "#000000") or "#000000")
             try:
                 opacity = float(mask.get("opacity", mask.get("mask_opacity", 1.0)))
             except (TypeError, ValueError):
                 opacity = 1.0
             opacity = max(0.0, min(1.0, opacity))
-            try:
-                pixel_size = max(2, min(60, int(mask.get("pixelate_size", 12))))
-            except (TypeError, ValueError):
-                pixel_size = 12
-            try:
-                strength = max(1, min(20, int(mask.get("blur_strength", 20))))
-            except (TypeError, ValueError):
-                strength = 20
-            items.append((x, y, w, h, mode, color, opacity, pixel_size, strength))
+            items.append((x, y, w, h, color, opacity))
         if not items:
             return ""
 
         chain_parts: list[str] = []
-        for i, (x, y, w, h, mode, color, opacity, pixel_size, strength) in enumerate(items):
-            if mode == "pixelate":
-                cell_w = max(1, w // pixel_size)
-                cell_h = max(1, h // pixel_size)
-                effect = (
-                    f"[tmp{i}]crop=w={w}:h={h}:x={x}:y={y},"
-                    f"scale={cell_w}:{cell_h}:flags=neighbor,"
-                    f"scale={w}:{h}:flags=neighbor"
-                )
-                if opacity < 0.999:
-                    effect = f"{effect},format=yuva420p,colorchannelmixer=aa={opacity:.3f}"
-                effect = f"{effect}[effect{i}]"
-                base_label = "main" if i == 0 else f"b{i - 1}"
-                out_label = "" if i == len(items) - 1 else f"[b{i}]"
-                chain_parts.append(effect)
-                chain_parts.append(
-                    f"[{base_label}][effect{i}]overlay={x}:{y}{out_label}"
-                )
-            elif mode == "blur":
-                chroma = max(0, strength // 2)
-                effect = (
-                    f"[tmp{i}]crop=w={w}:h={h}:x={x}:y={y},"
-                    f"boxblur={strength}:3:{chroma}:3"
-                )
-                if opacity < 0.999:
-                    effect = f"{effect},format=yuva420p,colorchannelmixer=aa={opacity:.3f}"
-                effect = f"{effect}[effect{i}]"
-                base_label = "main" if i == 0 else f"b{i - 1}"
-                out_label = "" if i == len(items) - 1 else f"[b{i}]"
-                chain_parts.append(effect)
-                chain_parts.append(
-                    f"[{base_label}][effect{i}]overlay={x}:{y}{out_label}"
+        for i, (x, y, w, h, color, opacity) in enumerate(items):
+            # Solid colour rectangle. We synthesise the colour with
+            # lavfi's `color` filter, scale it to the region size and
+            # overlay with the chosen opacity.
+            hex_color = color.lstrip("#")
+            if len(hex_color) == 3:
+                hex_color = "".join(c * 2 for c in hex_color)
+            if len(hex_color) != 6:
+                hex_color = "000000"
+            if opacity < 0.999:
+                synth = (
+                    f"color=0x{hex_color}:s={w}x{h}:d=1,"
+                    f"format=yuva420p,colorchannelmixer=aa={opacity:.3f}"
                 )
             else:
-                # Solid colour rectangle. We synthesise the colour with
-                # lavfi's `color` filter, scale it to the region size and
-                # overlay with the chosen opacity.
-                # Strip leading '#' from the colour for ffmpeg.
-                hex_color = color.lstrip("#")
-                if len(hex_color) == 3:
-                    hex_color = "".join(c * 2 for c in hex_color)
-                if len(hex_color) != 6:
-                    hex_color = "000000"
-                if opacity < 0.999:
-                    synth = (
-                        f"color=0x{hex_color}:s={w}x{h}:d=1,"
-                        f"format=yuva420p,colorchannelmixer=aa={opacity:.3f}"
-                    )
-                else:
-                    synth = f"color=0x{hex_color}:s={w}x{h}:d=1,format=yuva420p"
-                synth = f"{synth},loop=loop=-1:size=1:start=0[rect{i}]"
-                chain_parts.append(synth)
-                base_label = "main" if i == 0 else f"b{i - 1}"
-                out_label = "" if i == len(items) - 1 else f"[b{i}]"
-                chain_parts.append(
-                    f"[{base_label}][rect{i}]overlay={x}:{y}{out_label}"
-                )
-
-        split_outputs = "[main]" + "".join(f"[tmp{i}]" for i in range(len(items)))
-        # Pixelate + blur paths need split (they crop from main). Solid
-        # does NOT need split (it synthesises its own colour stream).
-        if any(it[4] != "solid" for it in items):
-            prefix = f"split={len(items) + 1}{split_outputs};"
-        else:
-            prefix = ""
-        return "lavfi=[" + prefix + ";".join(chain_parts) + "]"
+                synth = f"color=0x{hex_color}:s={w}x{h}:d=1,format=yuva420p"
+            synth = f"{synth},loop=loop=-1:size=1:start=0[rect{i}]"
+            chain_parts.append(synth)
+            base_label = "main" if i == 0 else f"b{i - 1}"
+            out_label = "" if i == len(items) - 1 else f"[b{i}]"
+            chain_parts.append(
+                f"[{base_label}][rect{i}]overlay={x}:{y}{out_label}"
+            )
+        return "lavfi=[" + ";".join(chain_parts) + "]"
 
     def _apply_mask_filter(self):
         try:

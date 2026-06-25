@@ -1317,6 +1317,13 @@ def build_preview_panel(gui):
     logo_layout.addStretch(1)
 
     # --- Mask Track Inspector ---
+    # The mask is a rectangular region that changes the colour of the
+    # underlying video. The user positions / resizes the region via
+    # the draggable overlay (move = drag middle, resize = drag
+    # corners, delete = X button). The inspector only exposes the
+    # colour + opacity; position, size, and mode are not configurable
+    # here. The mask is only applied to the video while the player
+    # is playing (it is cleared on pause / stop).
     mask_inspector_card = QFrame()
     mask_inspector_card.setObjectName("statusCard")
     mask_inspector_card.setMinimumWidth(400)
@@ -1330,31 +1337,15 @@ def build_preview_panel(gui):
     mask_title.setObjectName("statusHeadline")
     mask_layout.addWidget(mask_title)
     gui.mask_inspector_summary_label = QLabel(
-        "Add a rectangular mask to hide or transform a region of the video. "
-        "Pick a solid colour, or a pixelate/blur effect, then adjust its "
-        "position, size and colour below."
+        "Drag the mask on the video to move it. Drag a corner to "
+        "resize. The X button deletes the mask. The mask is applied "
+        "while the video is playing."
     )
     gui.mask_inspector_summary_label.setObjectName("helperLabel")
     gui.mask_inspector_summary_label.setWordWrap(True)
     mask_layout.addWidget(gui.mask_inspector_summary_label)
 
-    # --- Mode ---
-    mode_row = QHBoxLayout()
-    mode_label = QLabel("Mode")
-    mode_label.setObjectName("sectionTitle")
-    mode_label.setFixedWidth(90)
-    mode_row.addWidget(mode_label)
-    gui.mask_inspector_mode_combo = QComboBox()
-    gui.mask_inspector_mode_combo.addItem("Solid colour", "solid")
-    gui.mask_inspector_mode_combo.addItem("Pixelate (mosaic)", "pixelate")
-    gui.mask_inspector_mode_combo.addItem("Blur", "blur")
-    gui.mask_inspector_mode_combo.setToolTip(
-        "How the mask covers the region: solid colour, pixelate, or blur."
-    )
-    mode_row.addWidget(gui.mask_inspector_mode_combo, 1)
-    mask_layout.addLayout(mode_row)
-
-    # --- Color (only used in solid mode) ---
+    # --- Colour ---
     color_row = QHBoxLayout()
     color_label = QLabel("Colour")
     color_label.setObjectName("sectionTitle")
@@ -1363,71 +1354,12 @@ def build_preview_panel(gui):
     gui.mask_inspector_color_btn = QPushButton("#000000")
     gui.mask_inspector_color_btn.setFixedWidth(110)
     gui.mask_inspector_color_btn.setToolTip(
-        "Pick the mask colour (only used in solid mode)."
+        "Pick the colour that the mask will paint over the selected "
+        "region while the video is playing."
     )
     color_row.addWidget(gui.mask_inspector_color_btn)
     color_row.addStretch(1)
     mask_layout.addLayout(color_row)
-
-    # --- Position / size (normalized 0..1) ---
-    def _make_spin_row(label_text, attr_name, lo, hi, step, suffix=""):
-        row = QHBoxLayout()
-        lbl = QLabel(label_text)
-        lbl.setObjectName("sectionTitle")
-        lbl.setFixedWidth(90)
-        row.addWidget(lbl)
-        spin = QDoubleSpinBox()
-        spin.setRange(lo, hi)
-        spin.setSingleStep(step)
-        spin.setDecimals(3)
-        spin.setSuffix(suffix)
-        spin.setFixedWidth(110)
-        row.addWidget(spin)
-        row.addStretch(1)
-        setattr(gui, attr_name, spin)
-        mask_layout.addLayout(row)
-        return spin
-
-    _make_spin_row("Position X", "mask_inspector_x_spin", 0.0, 1.0, 0.01)
-    _make_spin_row("Position Y", "mask_inspector_y_spin", 0.0, 1.0, 0.01)
-    _make_spin_row("Width",      "mask_inspector_w_spin", 0.01, 1.0, 0.01)
-    _make_spin_row("Height",     "mask_inspector_h_spin", 0.01, 1.0, 0.01)
-
-    # --- Pixel size (pixelate mode) ---
-    pixel_row = QHBoxLayout()
-    pixel_label = QLabel("Pixel size")
-    pixel_label.setObjectName("sectionTitle")
-    pixel_label.setFixedWidth(90)
-    pixel_row.addWidget(pixel_label)
-    gui.mask_inspector_pixel_slider = QSlider(Qt.Horizontal)
-    gui.mask_inspector_pixel_slider.setRange(2, 60)
-    gui.mask_inspector_pixel_slider.setValue(12)
-    gui.mask_inspector_pixel_slider.setToolTip(
-        "Mosaic cell size in pixels (only used in pixelate mode)."
-    )
-    pixel_row.addWidget(gui.mask_inspector_pixel_slider, 1)
-    gui.mask_inspector_pixel_value_label = QLabel("12")
-    gui.mask_inspector_pixel_value_label.setFixedWidth(28)
-    pixel_row.addWidget(gui.mask_inspector_pixel_value_label)
-    mask_layout.addLayout(pixel_row)
-
-    # --- Blur strength (blur mode) ---
-    strength_row = QHBoxLayout()
-    strength_label = QLabel("Blur radius")
-    strength_label.setObjectName("sectionTitle")
-    strength_label.setFixedWidth(90)
-    strength_row.addWidget(strength_label)
-    gui.mask_inspector_strength_slider = QSlider(Qt.Horizontal)
-    gui.mask_inspector_strength_slider.setRange(1, 20)
-    gui.mask_inspector_strength_slider.setValue(20)
-    gui.mask_inspector_strength_slider.setToolTip(
-        "Blur radius (only used in blur mode)."
-    )
-    strength_row.addWidget(gui.mask_inspector_strength_slider, 1)
-    gui.mask_inspector_strength_value_label = QLabel("20")
-    gui.mask_inspector_strength_value_label.setFixedWidth(28)
-    strength_row.addWidget(gui.mask_inspector_strength_value_label)
-    mask_layout.addLayout(strength_row)
 
     # --- Opacity ---
     m_opacity_row = QHBoxLayout()
@@ -1448,9 +1380,9 @@ def build_preview_panel(gui):
     mask_layout.addLayout(m_opacity_row)
 
     gui.mask_inspector_tip_label = QLabel(
-        "Tip: in solid mode the mask fully covers the region with the "
-        "selected colour. In pixelate/blur mode the mask reveals the "
-        "video underneath and applies the chosen effect to it."
+        "Tip: position and resize the mask on the video preview. The "
+        "mask effect is only applied while the player is playing; it "
+        "is cleared on pause / stop."
     )
     gui.mask_inspector_tip_label.setObjectName("helperLabel")
     gui.mask_inspector_tip_label.setWordWrap(True)

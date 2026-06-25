@@ -17,6 +17,11 @@ def setup_media_player(gui):
     gui.media_player.positionChanged.connect(gui.position_changed)
     gui.media_player.durationChanged.connect(gui.duration_changed)
 
+    # Re-apply the M1 mask filter on play / pause / stop so the mask
+    # only shows while the video is playing.
+    if hasattr(gui.media_player, "stateChanged"):
+        gui.media_player.stateChanged.connect(gui._on_preview_state_changed)
+
 
 def refresh_video_dimensions(gui, path: str, get_video_dimensions):
     try:
