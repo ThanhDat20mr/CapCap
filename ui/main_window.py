@@ -6124,11 +6124,10 @@ class VideoTranslatorGUI(QMainWindow):
                 end=min(tl.duration, 5.0) if tl.duration > 0 else 5.0,
             )
             layer.z_index = idx
-            # New masks start hidden so the user can position / resize
-            # the region via the overlay without a black rectangle
-            # being drawn on the video. The 'Show on preview' checkbox
-            # in the Mask Inspector toggles layer.visible.
-            layer.visible = False
+            # Visibility is gated by the play state in
+            # _apply_mask_to_preview: the mask filter is only pushed
+            # to mpv while the video is playing, so a freshly added
+            # mask does not draw on the paused preview.
             mask_track.layers.append(layer)
             self.timeline._redraw()
             # Push the new mask into the mpv filter chain and persist
@@ -7338,7 +7337,14 @@ class VideoTranslatorGUI(QMainWindow):
 
     # ---- Mask layer (M1) ----
     def _current_mask_regions_payload(self):
-        """Build the mask payload from the M1 track's MaskLayers."""
+        """Build the mask payload from the M1 track's MaskLayers.
+
+        Visibility is NOT checked here — the play-state gate in
+        _apply_mask_to_preview is the single source of truth for
+        whether the mask is shown on the video. The payload always
+        includes every M1 layer so the mask is ready the moment the
+        user presses play.
+        """
         if not hasattr(self, "timeline") or not self.timeline._timeline:
             return []
         items: list[dict] = []
@@ -7346,8 +7352,6 @@ class VideoTranslatorGUI(QMainWindow):
             if tr.name != "M1":
                 continue
             for layer in tr.layers:
-                if not getattr(layer, "visible", True):
-                    continue
                 try:
                     items.append({
                         "x": float(getattr(layer, "position_x", 0.3)),
