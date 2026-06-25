@@ -648,6 +648,151 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
                 return
         super().mousePressEvent(event)
 
+
+class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
+    """Mask overlay that reuses the blur overlay's full structure.
+
+    Inherits move (drag the middle), corner-resize, and the X close
+    button. Renders a single rectangular region with the active mask
+    colour so the user can see what they are editing.
+
+    The mask mpv filter itself never applies a blur between solid and
+    pixelate modes — it draws a coloured rectangle (solid) or
+    pixelates the cropped region (pixelate). The overlay here is only
+    a UI affordance for the user to position the region.
+    """
+
+    maskMoved = Signal(float, float, float, float)
+    maskDeleted = Signal()
+    maskEditFinished = Signal()
+
+    # Mask overlay accent colour (used for the border + handles).
+    ACCENT = QColor(201, 140, 90)  # M1 mask colour
+
+    def __init__(self, on_region_changed=None, on_edit_finished=None):
+        super().__init__(on_region_changed=on_region_changed, on_edit_finished=on_edit_finished)
+        self._fill_color = QColor(201, 140, 90)
+        self._sync_timer = None
+
+    def set_fill_color(self, color: str | QColor):
+        """Set the fill colour used to draw the overlay rectangle."""
+        if isinstance(color, QColor):
+            self._fill_color = QColor(color)
+        else:
+            try:
+                self._fill_color = QColor(str(color))
+            except Exception:
+                self._fill_color = QColor(201, 140, 90)
+        self.update()
+
+    def get_mask_rect(self) -> QRectF:
+        if not self._regions:
+            return QRectF(0.0, 0.0, 0.0, 0.0)
+        return QRectF(self._regions[0])
+
+    def add_mask(self, x: float = 0.3, y: float = 0.3, w: float = 0.4, h: float = 0.2):
+        self._regions = [QRectF(x, y, w, h)]
+        self._active_index = 0
+
+    def set_mask_rect(self, x: float, y: float, w: float, h: float):
+        self._regions = [QRectF(
+            max(0.0, min(1.0, x)),
+            max(0.0, min(1.0, y)),
+            max(0.01, min(1.0, w)),
+            max(0.01, min(1.0, h)),
+        )]
+        self._active_index = 0
+        self.update()
+
+    def set_regions(self, regions):
+        if isinstance(regions, QRectF):
+            self._regions = [QRectF(regions)]
+        elif isinstance(regions, list) and regions:
+            self._regions = [QRectF(regions[0])]
+        else:
+            self._regions = []
+        self._active_index = 0 if self._regions else -1
+
+    def attach_to_view(self, view: QWidget):
+        super().attach_to_view(view)
+        # Re-sync on view resize/move (the blur overlay already filters
+        # the main window; we additionally filter the target view so
+        # the mask follows when only the view is resized).
+        if view is not None:
+            try:
+                view.installEventFilter(self)
+            except Exception:
+                pass
+        if self._sync_timer is None:
+            self._sync_timer = QTimer(self)
+            self._sync_timer.setInterval(300)
+            self._sync_timer.timeout.connect(self.sync_to_view)
+        self._sync_timer.start()
+
+    def eventFilter(self, watched, event):
+        if watched is self._target_view and event.type() in (
+            QEvent.Resize, QEvent.Move,
+        ):
+            QTimer.singleShot(0, self.sync_to_view)
+        return super().eventFilter(watched, event)
+
+    def paintEvent(self, event):
+        if not self.isVisible():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        for index, _region in enumerate(self._regions):
+            rect = self.region_rect(index)
+            if rect.width() <= 0 or rect.height() <= 0:
+                continue
+            # Translucent fill of the mask colour so the user can see
+            # the region outline, plus a solid border + dashed inner
+            # stroke matching the M1 accent colour.
+            accent = QColor(self.ACCENT)
+            fill = QColor(self._fill_color)
+            painter.fillRect(rect, QColor(fill.red(), fill.green(), fill.blue(), 60))
+            pen = QPen(accent, 2, Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(rect)
+            if self._editable:
+                painter.setBrush(accent)
+                painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
+                for handle_rect in self._handle_rects(rect).values():
+                    painter.drawEllipse(handle_rect)
+                close_rect = self._close_rect(rect)
+                painter.setBrush(QColor(12, 24, 38, 230))
+                painter.setPen(QPen(accent, 1))
+                painter.drawEllipse(close_rect)
+                painter.setPen(QPen(QColor(255, 255, 255, 235), 1.5))
+                pad = 5
+                painter.drawLine(close_rect.left() + pad, close_rect.top() + pad, close_rect.right() - pad, close_rect.bottom() - pad)
+                painter.drawLine(close_rect.right() - pad, close_rect.top() + pad, close_rect.left() + pad, close_rect.bottom() - pad)
+
+    def mousePressEvent(self, event):
+        if not self._editable or event.button() != Qt.LeftButton:
+            event.ignore()
+            return
+        pos = QPointF(event.position())
+        for index, _region in enumerate(self._regions):
+            close_rect = self._close_rect(self.region_rect(index))
+            if close_rect.contains(pos):
+                if 0 <= index < len(self._regions):
+                    self._regions.pop(index)
+                if self._sync_timer is not None:
+                    self._sync_timer.stop()
+                self.maskDeleted.emit()
+                if callable(self._on_region_changed):
+                    self._on_region_changed()
+                if callable(self._on_edit_finished):
+                    self._on_edit_finished()
+                self.sync_to_view()
+                self.update()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+
 class MpvVideoView(QWidget):
     """Hosts an MPV video surface and overlays."""
     blurRegionChanged = Signal()
@@ -657,6 +802,9 @@ class MpvVideoView(QWidget):
     logoMoved = Signal(float, float, float, float)  # x, y, w, h
     logoDeleted = Signal()
     logoEditFinished = Signal()
+    maskMoved = Signal(float, float, float, float)  # x, y, w, h
+    maskDeleted = Signal()
+    maskEditFinished = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -682,6 +830,10 @@ class MpvVideoView(QWidget):
             on_edit_finished=self.blurEditFinished.emit,
         )
         self._blur_event_filter_installed = False
+        self.mask_overlay = _MaskRegionOverlayWindow(
+            on_region_changed=self.maskRegionChanged.emit,
+            on_edit_finished=self.maskEditFinished.emit,
+        )
         self.ratio_badge = QLabel(self)
         self.ratio_badge.setObjectName("previewRatioBadge")
         self.ratio_badge.setAlignment(Qt.AlignCenter)
@@ -721,11 +873,13 @@ class MpvVideoView(QWidget):
         self.reposition_subtitle()
         self._update_ratio_badge()
         self.blur_overlay.sync_to_view()
+        self.mask_overlay.sync_to_view()
         self.update()
 
     def moveEvent(self, event):
         super().moveEvent(event)
         self.blur_overlay.sync_to_view()
+        self.mask_overlay.sync_to_view()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -738,10 +892,12 @@ class MpvVideoView(QWidget):
         self._sync_preview_stack()
         self._update_ratio_badge()
         self.blur_overlay.sync_to_view()
+        self.mask_overlay.sync_to_view()
 
     def hideEvent(self, event):
         super().hideEvent(event)
         self.blur_overlay.hide()
+        self.mask_overlay.hide()
 
     def set_preview_aspect_ratio(self, aspect_key: str):
         self.preview_aspect_key = str(aspect_key or "source").strip().lower() or "source"
@@ -750,6 +906,7 @@ class MpvVideoView(QWidget):
         self._update_ratio_badge()
         self.reposition_subtitle()
         self.blur_overlay.sync_to_view()
+        self.mask_overlay.sync_to_view()
         self.update()
 
     def set_preview_scale_mode(self, scale_mode: str):
@@ -757,6 +914,10 @@ class MpvVideoView(QWidget):
         self.video_surface.setGeometry(self.get_video_content_rect().toRect())
         self._sync_preview_stack()
         self._update_ratio_badge()
+        self.reposition_subtitle()
+        self.blur_overlay.sync_to_view()
+        self.mask_overlay.sync_to_view()
+        self.update()
         self.reposition_subtitle()
         self.blur_overlay.sync_to_view()
         self.update()
@@ -1001,6 +1162,30 @@ class MpvVideoView(QWidget):
     def clear_blur_region(self):
         self.blur_overlay.clear_region()
         self.blurRegionChanged.emit()
+
+    # --- Mask / M1 overlay ---
+    def add_mask_region(self, *, x: float = 0.3, y: float = 0.3,
+                        w: float = 0.4, h: float = 0.2,
+                        color: str | QColor = "#c98c5a"):
+        self.mask_overlay.attach_to_view(self)
+        self.mask_overlay.add_mask(x, y, w, h)
+        self.mask_overlay.set_fill_color(color)
+        self.mask_overlay.set_editable(True)
+        self.mask_overlay.sync_to_view()
+
+    def set_mask_region(self, *, x: float, y: float, w: float, h: float,
+                        color: str | QColor | None = None,
+                        editable: bool = True):
+        self.mask_overlay.attach_to_view(self)
+        self.mask_overlay.set_mask_rect(x, y, w, h)
+        if color is not None:
+            self.mask_overlay.set_fill_color(color)
+        self.mask_overlay.set_editable(bool(editable))
+        self.mask_overlay.sync_to_view()
+
+    def clear_mask_region(self):
+        self.mask_overlay.set_editable(False)
+        self.mask_overlay.clear_region()
 
     # --- Logo / Watermark overlay ---
     def set_logo(self, path: str, x: float, y: float, w: float, h: float):

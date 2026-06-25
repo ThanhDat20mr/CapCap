@@ -4421,12 +4421,15 @@ class VideoTranslatorGUI(QMainWindow):
             self._show_logo_overlay(track, layer)
             self._show_logo_inspector_for_track(track, layer)
         elif layer_type == "mask" or str(getattr(track, "name", "")) == "M1":
+            self._show_mask_overlay(track, layer)
             self._show_mask_inspector_for_track(track, layer)
         else:
             # Text, image, sticker: show default with info
             self._show_default_inspector_for_layer(track, layer)
             if hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
                 self.video_view.clear_logo()
+            if hasattr(self, "video_view") and hasattr(self.video_view, "clear_mask_region"):
+                self.video_view.clear_mask_region()
 
     def _show_logo_overlay(self, track, layer):
         """Show the draggable logo overlay for the selected logo layer."""
@@ -4537,6 +4540,143 @@ class VideoTranslatorGUI(QMainWindow):
         except Exception:
             pass
         pass
+
+    def _show_mask_overlay(self, track, layer):
+        """Show the draggable mask overlay for the selected mask layer."""
+        if not hasattr(self, "video_view"):
+            return
+        # Disconnect any previous handlers to avoid the libpyside
+        # RuntimeWarning that occurs when calling disconnect() with no
+        # args or a lambda that was never connected.
+        prev_moved = getattr(self, "_mask_moved_handler", None)
+        if prev_moved is not None:
+            try:
+                self.video_view.maskMoved.disconnect(prev_moved)
+            except (RuntimeError, TypeError, Exception):
+                pass
+        prev_deleted = getattr(self, "_mask_deleted_handler", None)
+        if prev_deleted is not None:
+            try:
+                self.video_view.maskDeleted.disconnect(prev_deleted)
+            except (RuntimeError, TypeError, Exception):
+                pass
+
+        self._mask_overlay_layer = layer
+
+        def _moved_handler(nx, ny, nw, nh, l=layer):
+            self._on_mask_moved(l, nx, ny, nw, nh)
+
+        def _deleted_handler(l=layer):
+            self._delete_mask_layer(l)
+
+        self._mask_moved_handler = _moved_handler
+        self._mask_deleted_handler = _deleted_handler
+
+        self.video_view.maskMoved.connect(_moved_handler)
+        self.video_view.maskDeleted.connect(_deleted_handler)
+
+        x = float(getattr(layer, "position_x", 0.3))
+        y = float(getattr(layer, "position_y", 0.4))
+        w = float(getattr(layer, "width", 0.4))
+        h = float(getattr(layer, "height", 0.2))
+        color = str(getattr(layer, "color", "#000000"))
+        # Show the overlay only when the M1 track is enabled (the
+        # user toggled it on via the track label).
+        if hasattr(self, "track_label_bar"):
+            shown = True
+            try:
+                for i, n in enumerate(self.track_label_bar._track_names):
+                    if n.startswith("M1"):
+                        shown = bool(self.track_label_bar._track_mask_shown[i])
+                        break
+            except Exception:
+                shown = True
+            if not shown:
+                if hasattr(self.video_view, "clear_mask_region"):
+                    self.video_view.clear_mask_region()
+                return
+        self.video_view.set_mask_region(
+            x=x, y=y, w=w, h=h, color=color, editable=True,
+        )
+
+    def _on_mask_moved(self, layer, x, y, w, h):
+        """Update the MaskLayer's geometry from the mask overlay drag.
+
+        Then push the change into the mpv filter chain and persist it.
+        """
+        try:
+            layer.position_x = float(x)
+            layer.position_y = float(y)
+            layer.width = float(w)
+            layer.height = float(h)
+        except Exception:
+            return
+        try:
+            self._apply_mask_to_preview()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "persist_project_mask_state"):
+                self.persist_project_mask_state()
+        except Exception:
+            pass
+        # Keep the spinboxes in sync so the inspector shows the new
+        # values as the user drags the overlay.
+        try:
+            if (hasattr(self, "mask_inspector_x_spin")
+                    and self.timeline._selected_layer_id == layer.id):
+                self.mask_inspector_x_spin.blockSignals(True)
+                self.mask_inspector_x_spin.setValue(float(x))
+                self.mask_inspector_x_spin.blockSignals(False)
+                self.mask_inspector_y_spin.blockSignals(True)
+                self.mask_inspector_y_spin.setValue(float(y))
+                self.mask_inspector_y_spin.blockSignals(False)
+                self.mask_inspector_w_spin.blockSignals(True)
+                self.mask_inspector_w_spin.setValue(float(w))
+                self.mask_inspector_w_spin.blockSignals(False)
+                self.mask_inspector_h_spin.blockSignals(True)
+                self.mask_inspector_h_spin.setValue(float(h))
+                self.mask_inspector_h_spin.blockSignals(False)
+        except Exception:
+            pass
+
+    def _delete_mask_layer(self, layer):
+        """Remove the mask layer from the M1 track and clean up."""
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return
+        for track in self.timeline._timeline.tracks:
+            if layer in track.layers:
+                track.layers.remove(layer)
+                if not track.layers:
+                    try:
+                        self.timeline._timeline.tracks.remove(track)
+                    except ValueError:
+                        pass
+                    if hasattr(self.timeline, "_track_heights") and track.id in self.timeline._track_heights:
+                        del self.timeline._track_heights[track.id]
+                break
+        try:
+            self.timeline._selected_layer_id = ""
+        except Exception:
+            pass
+        if hasattr(self.timeline, "_redraw"):
+            self.timeline._redraw()
+        if hasattr(self.timeline, "viewport"):
+            self.timeline.viewport().update()
+        if hasattr(self, "video_view") and hasattr(self.video_view, "clear_mask_region"):
+            self.video_view.clear_mask_region()
+        try:
+            if hasattr(self, "_apply_mask_to_preview"):
+                self._apply_mask_to_preview()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "persist_project_mask_state"):
+                self.persist_project_mask_state()
+        except Exception:
+            pass
+        if hasattr(self, "_show_default_inspector"):
+            self._show_default_inspector()
 
     def _show_subtitle_inspector_for_layer(self, layer_id: str):
         """Show subtitle inspector and select the matching segment."""
@@ -5584,11 +5724,29 @@ class VideoTranslatorGUI(QMainWindow):
                 self._apply_mask_to_preview()
             except Exception:
                 pass
+            # Re-show the mask overlay (if a layer is currently selected
+            # and the timeline has an M1 track).
+            try:
+                if (hasattr(self, "timeline") and self.timeline._timeline
+                        and self.timeline._selected_layer_id):
+                    sid = self.timeline._selected_layer_id
+                    for tr in self.timeline._timeline.tracks:
+                        for l in tr.layers:
+                            if l.id == sid and tr.name == "M1":
+                                self._show_mask_overlay(tr, l)
+                                return
+            except Exception:
+                pass
         else:
             try:
                 self.media_player.clear_mask_region()
             except Exception:
                 pass
+            if hasattr(self, "video_view") and hasattr(self.video_view, "clear_mask_region"):
+                try:
+                    self.video_view.clear_mask_region()
+                except Exception:
+                    pass
 
     def _sync_timeline_mute_to_gui(self):
         """Pull the current timeline track mute state into the GUI and backend."""
@@ -5885,6 +6043,10 @@ class VideoTranslatorGUI(QMainWindow):
                 self.timeline._selected_layer_id = layer.id
                 self.timeline._redraw()
                 self._show_mask_inspector_for_track(mask_track, layer)
+                # Show the draggable mask overlay (move + resize handles)
+                # immediately so the user can position the mask without
+                # having to click the timeline first.
+                self._show_mask_overlay(mask_track, layer)
             except Exception:
                 pass
 
@@ -6211,6 +6373,20 @@ class VideoTranslatorGUI(QMainWindow):
                             self.video_view.clear_logo()
                         try:
                             self.timeline._selected_layer_id = ""
+                        except Exception:
+                            pass
+                    # Same for the M1 mask overlay.
+                    if str(getattr(track, "name", "")) == "M1":
+                        if hasattr(self, "video_view") and hasattr(self.video_view, "clear_mask_region"):
+                            self.video_view.clear_mask_region()
+                        try:
+                            if hasattr(self, "_apply_mask_to_preview"):
+                                self._apply_mask_to_preview()
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(self, "persist_project_mask_state"):
+                                self.persist_project_mask_state()
                         except Exception:
                             pass
                     return
