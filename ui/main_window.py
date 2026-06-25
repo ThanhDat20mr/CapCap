@@ -4659,6 +4659,11 @@ class VideoTranslatorGUI(QMainWindow):
         mpv filter. Called continuously while the user drags the
         overlay so the green mask follows the overlay in real time.
         """
+        if hasattr(self, "log"):
+            try:
+                self.log(f"[Mask] overlay changed handler called for layer {layer.id}")
+            except Exception:
+                pass
         if not hasattr(self, "video_view"):
             return
         overlay = getattr(self.video_view, "mask_overlay", None)
@@ -4679,8 +4684,30 @@ class VideoTranslatorGUI(QMainWindow):
             layer.height = h
         except Exception:
             return
+        if hasattr(self, "log"):
+            try:
+                self.log(
+                    f"[Mask] layer updated: x={layer.position_x:.3f} "
+                    f"y={layer.position_y:.3f} w={layer.width:.3f} "
+                    f"h={layer.height:.3f}"
+                )
+            except Exception:
+                pass
         try:
-            self._apply_mask_to_preview()
+            # Read the layer back from the timeline (not the captured
+            # `layer` arg) to make sure we update the actual layer
+            # that's in the timeline and that the payload reflects
+            # the move when play is pressed.
+            if hasattr(self, "timeline") and self.timeline._timeline:
+                for tr in self.timeline._timeline.tracks:
+                    if layer in tr.layers:
+                        idx = tr.layers.index(layer)
+                        tr.layers[idx] = layer
+                        break
+        except Exception:
+            pass
+        try:
+            self._apply_mask_to_preview(force=True)
         except Exception:
             pass
         # Sync the inspector spinboxes too so they follow the drag.
