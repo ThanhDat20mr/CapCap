@@ -60,10 +60,15 @@ def toggle_play(gui):
                 gui._sync_blur_controls()
             gui.timeline.set_playing(False)
             # Clear the M1 mask filter on pause so the video shows
-            # through (the mask only renders while playing).
-            if hasattr(gui, "_apply_mask_to_preview"):
+            # through (the mask only renders while playing). We call
+            # clear_mask_region directly instead of
+            # _apply_mask_to_preview(force=True) because the latter
+            # would re-apply the mask when regions exist.
+            if hasattr(gui, "media_player") and hasattr(
+                gui.media_player, "clear_mask_region"
+            ):
                 try:
-                    gui._apply_mask_to_preview(force=True)
+                    gui.media_player.clear_mask_region()
                 except Exception:
                     pass
             if (
