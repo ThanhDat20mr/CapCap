@@ -221,6 +221,27 @@ class MpvMediaPlayerBackend(QObject):
             self._apply_current_subtitle()
             self._apply_blur_filter()
 
+        @self._player.event_callback("end-file")
+        def _on_end_file(event):
+            # mpv emits this when the source reaches EOF. With
+            # `keep_open="always"` the player self-pauses instead of
+            # quitting, but the event still fires. Surface it as a
+            # PausedState so the timeline stops running (Bug 2).
+            try:
+                reason = None
+                if isinstance(event, dict):
+                    reason = event.get("reason")
+                else:
+                    reason = getattr(event, "reason", None)
+                if reason == "eof":
+                    self._state = QMediaPlayer.PausedState
+                    try:
+                        self.stateChanged.emit(int(QMediaPlayer.PausedState.value))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
         # --- Original audio sidecar ---
         self._original_output = QAudioOutput()
         self._original_output.setVolume(1.0)
@@ -283,6 +304,12 @@ class MpvMediaPlayerBackend(QObject):
             time_pos = self._read_property("time-pos", "time_pos", 0.0)
             duration = self._read_property("duration", default=0.0)
             pause = bool(self._read_property("pause", default=True))
+            # `eof-reached` is mpv's authoritative end-of-stream flag.
+            # It stays reliable even when a vf change transiently
+            # zeroes the `duration` property (e.g. after applying a
+            # mask filter) — Bug 2 / "video plays past duration".
+            eof = bool(self._read_property("eof-reached", "eof_reached", False))
+            core_idle = bool(self._read_property("core-idle", "core_idle", False))
         except Exception:
             return
 
@@ -298,19 +325,19 @@ class MpvMediaPlayerBackend(QObject):
         if next_duration != self._duration_ms:
             self._duration_ms = next_duration
             self.durationChanged.emit(next_duration)
-        # Detect EOF: mpv self-pauses (keep_open="always") once the
-        # clip reaches the end. Only then do we surface a state change
-        # from the poller — emitting on every transient Playing/Paused
-        # reading would race the explicit play()/pause() calls and
-        # could prematurely pause the audio sidecars (killing audio
-        # right after the user presses Play). Bug 2.
         prev_state = self._state
         self._state = next_state
+        # Surface EOF per the end-file event handler as well, but the
+        # poller also catches the transition here as a safety net. We
+        # only emit when we were actively Playing and mpv now reports
+        # EOF (or paused *at* the duration) — not on transient
+        # pause readings immediately after play() to avoid racing
+        # the explicit state change and killing the audio sidecars.
         if (
             prev_state == QMediaPlayer.PlayingState
             and next_state == QMediaPlayer.PausedState
-            and self._duration_ms > 0
-            and self._position_ms >= self._duration_ms - 250
+            and (eof or core_idle or self._duration_ms <= 0
+                 or self._position_ms >= self._duration_ms - 250)
         ):
             try:
                 self.stateChanged.emit(int(next_state.value))
