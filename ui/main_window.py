@@ -4609,8 +4609,16 @@ class VideoTranslatorGUI(QMainWindow):
                 if hasattr(self.video_view, "clear_mask_region"):
                     self.video_view.clear_mask_region()
                 return
+        # Lock the overlay if the video is currently playing so the
+        # user cannot accidentally drag or resize the region during
+        # playback.
+        is_playing = False
+        try:
+            is_playing = bool(self.media_player.is_playing())
+        except Exception:
+            is_playing = False
         self.video_view.set_mask_region(
-            x=x, y=y, w=w, h=h, color=color, editable=True,
+            x=x, y=y, w=w, h=h, color=color, editable=not is_playing,
         )
 
     def _on_mask_moved(self, layer, x, y, w, h):
@@ -6064,7 +6072,10 @@ class VideoTranslatorGUI(QMainWindow):
                 pixelate_size=12,
                 blur_strength=20,
                 start=0.0,
-                end=min(tl.duration, 5.0) if tl.duration > 0 else 5.0,
+                # Span the full timeline so the mask track is visible
+                # across the whole video (like the audio track layers),
+                # not a short 5-second segment.
+                end=tl.duration if tl.duration > 0 else 5.0,
             )
             layer.z_index = idx
             # Visibility is gated by the play state in
@@ -7350,8 +7361,22 @@ class VideoTranslatorGUI(QMainWindow):
         The mask is only applied to the video while the player is
         playing. Hooked from `media_player.stateChanged` in
         `setup_media_player` so the mpv filter chain is updated on
-        play / pause / stop.
+        play / pause / stop. The mask overlay is also locked
+        (`set_editable(False)`) while the video is playing so the
+        user cannot accidentally drag or resize the region during
+        playback.
         """
+        try:
+            is_playing = bool(self.media_player.is_playing())
+        except Exception:
+            is_playing = False
+        # Lock / unlock the mask overlay based on play state.
+        try:
+            overlay = getattr(self.video_view, "mask_overlay", None)
+            if overlay is not None and overlay._regions:
+                overlay.set_editable(not is_playing)
+        except Exception:
+            pass
         try:
             self._apply_mask_to_preview()
         except Exception:
