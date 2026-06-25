@@ -32,6 +32,11 @@
 - Translation-to-TTS cache prefetch to reduce voice generation wait time
 - Subtitle + voice export with FFmpeg
 - **TTS speed highlighting** — audio timeline segments show predicted voice-over timing fit via 5 color levels (green/cyan/yellow/orange/red)
+- **Per-track inspectors** — clicking a layer on any track opens a dedicated inspector card (Subtitle, Audio, Blur, Logo, Mask, Video) with controls tailored to the track
+- **Drag-to-position overlay regions** — Blur, Logo, and Mask regions share the same overlay UX: drag the middle to move, drag corner handles to resize, X to delete
+- **Logo / Watermark track (L1)** — add an image and place it on the video; pick colour / opacity / rotation from the inspector. The overlay stays in sync with the layer position.
+- **Mask track (M1)** — paint a solid-colour rectangle on the video to recolour a region (e.g. hide a watermark, redact a face). The colour is only applied while the video is playing to keep the drag smooth and avoid preview lag.
+- **Blur inspector** — per-region blur radius (1-20), opacity, and pixelate (mosaic) toggle
 - **Vietnamese normalizer dictionary manager** (More → Normalizer Dictionary) — CRUD editor for custom acronym/non-Vietnamese word mappings
 - **GGUF translator improvements** — automatic enable when provider is local, absolute model paths, smarter CJK quality validation, increased token limit
 
@@ -101,32 +106,39 @@ Videos over 2 hours are blocked from opening. Use the **Split Video** button to 
 ### Center Preview
 - Video player with live subtitle overlay
 - Play/Pause, Reset, Preview
-- Blur controls split into:
-  - `Blur` — effect on/off
-  - `BOX` — show/hide blur edit region
-- `OCR` button — show/hide OCR region in OCR mode
+- Overlay toolbar:
+  - `Blur` — add / show / hide a blur region (drag-to-place on the video)
+  - `Logo` — add a Logo / Watermark image to the video
+  - `Mask` — add a solid-colour mask region (see the M1 Mask track below)
+  - `OCR` button — show/hide OCR region in OCR mode
 - Speed and audio track selection
 
-### Subtitle Inspector (Right Panel)
-- `Rewrite` — open dialog with style presets and AI prompt for full script
-- `Rewrite Selected Subtitle` — open dialog with style presets for current segment only
-- `Import SRT`
-- `Show original` checkbox
-- Prev/Next navigation with block counter
-- Card with timing info, original text, and tabbed editor:
-  - `Subtitle` tab — text editor, highlight selection
-  - `Voice` tab — spoken text editor, `Use voice for subtitle`, `Regenerate voice`
+### Track Inspector (Right Panel)
+The inspector always stays expanded and swaps its card to match the track type you click. Each card is wrapped in a scroll view so tall content doesn't clip.
 
-Behavior note:
+- **Subtitle** (idx 0) — `Rewrite`, `Rewrite Selected Subtitle`, `Import SRT`, `Show original`, prev/next navigation, timing info, original text, tabbed editor (`Subtitle` / `Voice`).
+- **Audio** (idx 1) — per-track volume (0-200%), gain in dB, speed, fade-in / fade-out, mute / solo, A1 vs A2 (Dub) selection. The Dub track also exposes a per-segment voice editor (`Use voice for subtitle`, `Regenerate voice`).
+- **Blur** (idx 2) — B1 Blur track on/off toggle + per-region controls: `Blur radius` (1-20), `Opacity` (0-100%), `Pixelate` (mosaic) + `Pixel size` (2-60). Multiple regions stack vertically in the timeline so overlapping blurs stay visible.
+- **Video** (idx 3) — V1 Video track filter. Preset + intensity sliders, plus per-channel adjust sliders (brightness, contrast, saturation, temperature, gamma, hue), Apply / Revert.
+- **Default** (idx 4) — fallback card when no track layer is selected.
+- **Logo (L1)** (idx 5) — `Colour` (background swatch), `Opacity` (0-100%), `Rotation` (-180 to 180°). Drag the logo on the video to move; drag a corner to resize; X to delete.
+- **Mask (M1)** (idx 6) — `Colour` (background swatch), `Opacity` (0-100%). Drag the mask on the video to move; drag a corner to resize; X to delete. The colour is **only applied while the video is playing** — moving the mask does not trigger any mpv filter update, so dragging stays smooth. The overlay is locked (`set_editable(False)`) while playing so you cannot accidentally move a region during playback.
+
+Behavior notes:
 - By default, TTS reads the same text shown in the subtitle.
 - A separate voice text is only used when you explicitly edit it in the inspector and regenerate voice.
+- The Logo, Blur, and Mask overlay regions use the same drag/resize/delete UX inherited from the blur overlay.
+- Timeline track labels (left strip) are clickable: A1 / A2 toggle mute, B1 toggles the blur effect, L1 toggles the logo, M1 toggles the mask.
 
 ### Timeline
-- Multi-lane: Subtitle, Audio, Video
+- Multi-lane: V1 Video, A1 Audio, A2 Dub, B1 Blur, L1 Logo, M1 Mask, S1 Subtitle
+- **Track label bar** (left strip) — fixed-width column with the track name + icon (▶ V1, ♪ A1/A2, ▣ B1, ■ M1, T S1, etc.) and mute / effect toggle on click. The label bar scrolls in sync with the timeline's vertical scroll.
 - Undo/Redo, Split, Delete, Nudge, Ripple controls
 - Zoom and Fit controls
 - **Voice timing sync** combo (Off/Smart/Force Fit)
 - Time display
+- Blur layers are stacked vertically in the B1 row (one full-height row per region) so overlapping regions are all visible. Other tracks (Subtitle, Audio) draw side-by-side segments in a single row.
+- Mask layers span the full timeline duration (like the audio track) so the M1 row matches the video length.
 
 ## Technical Stack
 
@@ -250,13 +262,15 @@ CapCap/
 │   │   ├── launcher.py               # Startup launcher (CPU/GPU, recent projects)
 │   │   ├── main_window.py            # Main window layout + signal connections
 │   │   ├── start_panel.py            # Left panel (media, voice, style, etc.)
-│   │   ├── preview_panel.py          # Right panel (preview + inspector + timeline)
+│   │   ├── preview_panel.py          # Right panel (preview + per-track inspector + timeline)
 │   │   ├── resource_manager.py       # Hugging Face resource download dialog
-│   │   └── advanced_tabs.py          # Advanced settings tab
+│   │   ├── advanced_tabs.py          # Advanced settings tab
+│   │   └── editor/                   # Timeline + track label bar
+│   │       ├── timeline.py            # Multi-lane timeline (V1/A1/A2/B1/L1/M1/S1)
+│   │       └── track_labels.py        # Left-strip track label bar (mute / effect toggles)
 │   ├── widgets/                      # Custom widgets (timeline, video, overlay)
-│   │   ├── timeline_widget.py        # Multi-lane timeline with voice timing
 │   │   ├── video_view.py             # Video/audio playback via libmpv
-│   │   ├── mpv_video_view.py         # MPV-backed preview
+│   │   ├── mpv_video_view.py         # MPV-backed preview + blur/logo/mask overlay
 │   │   ├── subtitle_overlay.py       # Live subtitle overlay on video
 │   │   └── progress_dialog.py        # Progress dialog with file size display
 │   ├── worker_adapters/              # QThread worker classes
@@ -306,6 +320,19 @@ CapCap/
 │   │   ├── resource_download_service.py  # Hugging Face model downloads
 │   │   └── ...                       # + GPU scheduling, ASR merge, etc.
 │   ├── utils/                        # Voice preview utilities
+│   ├── layers/                       # Track / clip / layer domain model
+│   │   ├── base.py                   # BaseLayer + LayerType + BlendMode
+│   │   ├── video.py                  # V1 Video layer
+│   │   ├── audio.py                  # A1 / A2 Audio layers
+│   │   ├── subtitle.py               # S1 Subtitle layer
+│   │   ├── image.py                  # L1 Logo / image layer
+│   │   ├── blur.py                   # B1 Blur layer
+│   │   ├── mask.py                   # M1 Mask layer (solid colour region)
+│   │   ├── transform.py              # Transform (x/y/scale/rotation/keyframes)
+│   │   ├── keyframe.py              # Keyframe animation
+│   │   ├── timeline.py               # Timeline + Track + Clip containers
+│   │   ├── text.py / sticker.py      # Text / sticker layers
+│   │   └── sync_bridge.py            # Timeline <-> track layer sync helpers
 │   ├── ocr_processor.py             # RapidOCR subtitle extraction + cleanup
 │   ├── whisper_processor.py         # Whisper ASR with CUDA/CPU fallback
 │   ├── sensevoice_processor.py      # SenseVoice ASR (sherpa-onnx, CPU)
