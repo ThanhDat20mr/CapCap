@@ -1990,8 +1990,15 @@ class VideoTranslatorGUI(QMainWindow):
             else:
                 if hasattr(self, "timeline"):
                     self.timeline.set_playing(False)
-            active_label = "both" if (original_audio or dubbed_audio) else "silent"
-            self.log(f"[Preview] audio: {active_label}")
+            # Only log the preview audio state when at least one audio sidecar
+            # was actually applied. Logging "silent" on a freshly opened
+            # video (no generate/voice done yet) is misleading noise —
+            # Bug 3.
+            if original_audio or dubbed_audio:
+                active_label = "both" if (original_audio and dubbed_audio) else (
+                    "dubbed" if dubbed_audio else "original"
+                )
+                self.log(f"[Preview] audio: {active_label}")
         finally:
             self._preview_audio_track_switching = False
         self.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
@@ -2022,6 +2029,18 @@ class VideoTranslatorGUI(QMainWindow):
             normalized = self._normalize_local_file_path(candidate)
             if normalized and os.path.exists(normalized):
                 return normalized
+        # Final fallback: the source video file itself. mpv runs with
+        # `ao=null` (video-only) and audio is routed through the A1
+        # QMediaPlayer sidecar, so on a freshly opened video (no Generate
+        # run yet, no extracted audio artifact) the sidecar would be empty
+        # and the user hears nothing. QMediaPlayer decodes the audio
+        # track straight out of a video container, so loading the source
+        # video into the A1 sidecar restores the original audio. Once the
+        # pipeline extracts a dedicated audio file, that takes priority
+        # via the candidates above.
+        source_video = self._resolve_preview_original_video_path()
+        if source_video:
+            return source_video
         return ""
 
     def on_preview_audio_track_changed(self, index: int):
@@ -7364,12 +7383,22 @@ class VideoTranslatorGUI(QMainWindow):
         play / pause / stop. The mask overlay is also locked
         (`set_editable(False)`) while the video is playing so the
         user cannot accidentally drag or resize the region during
-        playback.
+        playback. Also sync the timeline play state so the timeline
+        stops running when the video ends (Bug 2).
         """
         try:
             is_playing = bool(self.media_player.is_playing())
         except Exception:
             is_playing = False
+        # Sync the timeline's "playing" flag to the real player state.
+        # Without this the timeline keeps animating past the end of the
+        # video because the player auto-pauses (keep_open="always") but
+        # nothing tells the timeline to stop.
+        try:
+            if hasattr(self, "timeline") and self.timeline is not None:
+                self.timeline.set_playing(is_playing)
+        except Exception:
+            pass
         # Lock / unlock the mask overlay based on play state.
         try:
             overlay = getattr(self.video_view, "mask_overlay", None)
@@ -7377,6 +7406,19 @@ class VideoTranslatorGUI(QMainWindow):
                 overlay.set_editable(not is_playing)
         except Exception:
             pass
+        # When playback just ended, pause both audio sidecars so they
+        # don't drift ahead of the held last frame.
+        if not is_playing and hasattr(self, "media_player"):
+            try:
+                if hasattr(self.media_player, "_original_loaded_path") and getattr(self.media_player, "_original_loaded_path", ""):
+                    self.media_player._original_player.pause()
+            except Exception:
+                pass
+            try:
+                if hasattr(self.media_player, "_dubbed_loaded_path") and getattr(self.media_player, "_dubbed_loaded_path", ""):
+                    self.media_player._dubbed_player.pause()
+            except Exception:
+                pass
         try:
             self._apply_mask_to_preview()
         except Exception:
@@ -7416,6 +7458,14 @@ class VideoTranslatorGUI(QMainWindow):
                 tl = self.timeline._timeline
                 track = find_or_create_track(tl, "M1", LayerType.MASK, 60)
                 track.layers.clear()
+                # Mask layers span the full video duration (like the
+                # audio track) so the M1 row matches the video length
+                # rather than collapsing to a zero-width clip (Bug 1).
+                mask_end = tl.duration if tl.duration > 0 else (
+                    self.timeline._duration if hasattr(self.timeline, "_duration") else 0.0
+                )
+                if mask_end <= 0:
+                    mask_end = 5.0
                 for i, r in enumerate(regions):
                     layer = MaskLayer(
                         name=f"Mask {i + 1}",
@@ -7427,6 +7477,8 @@ class VideoTranslatorGUI(QMainWindow):
                         mode=str(r.get("mode", "solid")),
                         pixelate_size=int(r.get("pixelate_size", 12)),
                         blur_strength=int(r.get("blur_strength", 20)),
+                        start=0.0,
+                        end=float(mask_end),
                     )
                     layer.z_index = i
                     track.layers.append(layer)

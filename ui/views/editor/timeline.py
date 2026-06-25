@@ -178,7 +178,31 @@ class EditorTimeline(QGraphicsView):
                     l.end = max_dur
 
     def set_duration_ms(self, ms: int) -> None:
-        self._duration = max(0, ms / 1000.0)
+        new_dur = max(0, ms / 1000.0)
+        old_dur = self._duration
+        self._duration = new_dur
+        # The underlying Timeline model's `duration` is read by code that
+        # creates full-video-spanning layers (e.g. MaskLayer end fallback).
+        # Without this, the Mask track only spans the default 10s and not
+        # the actual video length (Bug 1). Also re-span any Mask track
+        # layers that were created before the real duration was known
+        # (e.g. restored from project state) so they cover the whole video.
+        if self._timeline is not None:
+            self._timeline.duration = new_dur
+            if new_dur > old_dur:
+                for t in self._timeline.tracks:
+                    if t.type != LayerType.MASK:
+                        continue
+                    for layer in t.layers:
+                        try:
+                            prev_end = float(layer.end)
+                        except Exception:
+                            prev_end = 0.0
+                        # Only extend layers that were spanning the full
+                        # previous duration (or had no end set yet), so we
+                        # don't clobber a user-trimmed mask clip.
+                        if prev_end <= 0 or abs(prev_end - old_dur) < 0.05:
+                            layer.end = new_dur
         self._redraw()
 
     set_duration = set_duration_ms
@@ -232,6 +256,9 @@ class EditorTimeline(QGraphicsView):
         if duration_s > 0:
             ensure_v1_a1_tracks(self._timeline, path, duration_s)
             self._duration = max(self._duration, duration_s)
+            # Keep the Timeline model's duration in sync so layers that
+            # span the whole video (Mask track) use the real length.
+            self._timeline.duration = self._duration
         self._redraw()
 
     @staticmethod

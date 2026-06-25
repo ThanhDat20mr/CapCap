@@ -12,6 +12,7 @@ from video_processor import srt_to_ass
 class QtMediaPlayerBackend(QObject):
     positionChanged = Signal(int)
     durationChanged = Signal(int)
+    stateChanged = Signal(int)  # QMediaPlayer.PlaybackState
 
     def __init__(self, video_view):
         super().__init__(video_view)
@@ -26,8 +27,24 @@ class QtMediaPlayerBackend(QObject):
             self._player.setVideoOutput(video_view.video_item)
         self._player.positionChanged.connect(self.positionChanged.emit)
         self._player.durationChanged.connect(self.durationChanged.emit)
+        self._player.stateChanged.connect(lambda s: self.stateChanged.emit(int(s.value)))
+        # When the clip reaches the end, the QMediaPlayer goes to
+        # StoppedState — surface this so the timeline can stop too
+        # (Bug 2: video not pausing at end, timeline keeps running).
+        self._player.mediaStatusChanged.connect(self._on_media_status)
         self._mute_original = False
         self._mute_dubbed = False
+
+    def _on_media_status(self, status):
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer as _QMP
+            if status == _QMP.EndOfMedia:
+                # Pause (hold last frame) and emit StoppedState so the
+                # timeline play state is re-synced to "not playing".
+                self._player.pause()
+                self.stateChanged.emit(int(QMediaPlayer.PausedState.value))
+        except Exception:
+            pass
 
     def setSource(self, source):
         self._source_path = source.toLocalFile() if isinstance(source, QUrl) else str(source)
@@ -281,7 +298,24 @@ class MpvMediaPlayerBackend(QObject):
         if next_duration != self._duration_ms:
             self._duration_ms = next_duration
             self.durationChanged.emit(next_duration)
+        # Detect EOF: mpv self-pauses (keep_open="always") once the
+        # clip reaches the end. Only then do we surface a state change
+        # from the poller — emitting on every transient Playing/Paused
+        # reading would race the explicit play()/pause() calls and
+        # could prematurely pause the audio sidecars (killing audio
+        # right after the user presses Play). Bug 2.
+        prev_state = self._state
         self._state = next_state
+        if (
+            prev_state == QMediaPlayer.PlayingState
+            and next_state == QMediaPlayer.PausedState
+            and self._duration_ms > 0
+            and self._position_ms >= self._duration_ms - 250
+        ):
+            try:
+                self.stateChanged.emit(int(next_state.value))
+            except Exception:
+                pass
 
     def setSource(self, source):
         source_path = self._normalize_source(source)
