@@ -165,6 +165,9 @@ def sync_blur_regions_to_layers(
             width=float(br.get("width", 200)),
             height=float(br.get("height", 80)),
             blur_strength=float(br.get("blur_strength", br.get("intensity", 20))),
+            blur_opacity=float(br.get("blur_opacity", 1.0)),
+            pixelate=bool(br.get("pixelate", False)),
+            pixelate_size=int(br.get("pixelate_size", 12)),
         )
         layer.z_index = i
         blur_track.layers.append(layer)

@@ -2905,6 +2905,11 @@ class VideoTranslatorGUI(QMainWindow):
                 pass
         self._show_default_inspector()
         self._restore_project_blur_state(state)
+        if hasattr(self, "_restore_project_mask_state"):
+            try:
+                self._restore_project_mask_state(state)
+            except Exception:
+                pass
         # Force the dual-track sidecar player to re-initialize for this
         # project. Without this, reopening a project would leave the
         # original/dubbed QMediaPlayer sidecars pointing at the previous
@@ -4414,7 +4419,9 @@ class VideoTranslatorGUI(QMainWindow):
             self._show_video_inspector_for_track(track, layer)
         elif layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo":
             self._show_logo_overlay(track, layer)
-            self._show_default_inspector_for_layer(track, layer)
+            self._show_logo_inspector_for_track(track, layer)
+        elif layer_type == "mask" or str(getattr(track, "name", "")) == "M1":
+            self._show_mask_inspector_for_track(track, layer)
         else:
             # Text, image, sticker: show default with info
             self._show_default_inspector_for_layer(track, layer)
@@ -4475,6 +4482,18 @@ class VideoTranslatorGUI(QMainWindow):
         self.video_view.logoMoved.connect(_moved_handler)
         self.video_view.logoDeleted.connect(_deleted_handler)
         self.video_view.set_logo(path, x, y, w, h)
+
+        # Push opacity + rotation from the layer to the overlay. We
+        # default to fully opaque + 0° for a freshly created logo.
+        opacity = float(getattr(layer, "opacity", 1.0) or 1.0)
+        rotation = 0.0
+        if transform is not None and hasattr(transform, "rotation"):
+            try:
+                rotation = float(getattr(transform, "rotation", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                rotation = 0.0
+        self.video_view.set_logo_opacity(opacity)
+        self.video_view.set_logo_rotation(rotation)
 
     def _delete_logo_layer(self, layer):
         """Remove the logo layer from the L1 track and clean up."""
@@ -4630,6 +4649,7 @@ class VideoTranslatorGUI(QMainWindow):
     def _show_blur_inspector_for_track(self, track, layer=None):
         """Show the Blur Track Inspector populated with the selected track."""
         self._switch_inspector("blur")
+        self._wire_blur_inspector_controls()
         if track is None:
             return
         track_name = str(getattr(track, "name", "Blur"))
@@ -4652,6 +4672,53 @@ class VideoTranslatorGUI(QMainWindow):
             self.blur_inspector_show_cb.blockSignals(True)
             self.blur_inspector_show_cb.setChecked(show)
             self.blur_inspector_show_cb.blockSignals(False)
+        # Load radius / opacity / pixelate from the selected layer
+        # (fall back to defaults when no layer is selected).
+        if layer is not None:
+            try:
+                strength = int(round(float(getattr(layer, "blur_strength", 20.0))))
+            except (TypeError, ValueError):
+                strength = 20
+            strength = max(1, min(20, strength))
+            try:
+                opacity = float(getattr(layer, "blur_opacity", 1.0))
+            except (TypeError, ValueError):
+                opacity = 1.0
+            opacity = max(0.0, min(1.0, opacity))
+            pixelate = bool(getattr(layer, "pixelate", False))
+            try:
+                pixel_size = int(getattr(layer, "pixelate_size", 12))
+            except (TypeError, ValueError):
+                pixel_size = 12
+            pixel_size = max(2, min(60, pixel_size))
+        else:
+            strength, opacity, pixelate, pixel_size = 20, 1.0, False, 12
+
+        if hasattr(self, "blur_inspector_radius_slider"):
+            self.blur_inspector_radius_slider.blockSignals(True)
+            self.blur_inspector_radius_slider.setValue(strength)
+            self.blur_inspector_radius_slider.blockSignals(False)
+        if hasattr(self, "blur_inspector_radius_value_label"):
+            self.blur_inspector_radius_value_label.setText(str(strength))
+        if hasattr(self, "blur_inspector_opacity_slider"):
+            self.blur_inspector_opacity_slider.blockSignals(True)
+            self.blur_inspector_opacity_slider.setValue(int(round(opacity * 100)))
+            self.blur_inspector_opacity_slider.blockSignals(False)
+        if hasattr(self, "blur_inspector_opacity_value_label"):
+            self.blur_inspector_opacity_value_label.setText(
+                f"{int(round(opacity * 100))}%"
+            )
+        if hasattr(self, "blur_inspector_pixelate_cb"):
+            self.blur_inspector_pixelate_cb.blockSignals(True)
+            self.blur_inspector_pixelate_cb.setChecked(pixelate)
+            self.blur_inspector_pixelate_cb.blockSignals(False)
+        if hasattr(self, "blur_inspector_pixel_size_slider"):
+            self.blur_inspector_pixel_size_slider.blockSignals(True)
+            self.blur_inspector_pixel_size_slider.setValue(pixel_size)
+            self.blur_inspector_pixel_size_slider.blockSignals(False)
+        if hasattr(self, "blur_inspector_pixel_size_value_label"):
+            self.blur_inspector_pixel_size_value_label.setText(str(pixel_size))
+
         if hasattr(self, "blur_inspector_summary_label"):
             state = "shown" if show else "hidden"
             self.blur_inspector_summary_label.setText(
@@ -4659,8 +4726,241 @@ class VideoTranslatorGUI(QMainWindow):
                 f"currently {state} on the video preview."
             )
 
+    def _wire_blur_inspector_controls(self):
+        """One-time wiring of the Blur Inspector's per-region controls."""
+        if getattr(self, "_blur_inspector_wired", False):
+            return
+        self._blur_inspector_wired = True
+
+        def _selected_blur_layer():
+            """Return the currently selected BlurLayer (or None)."""
+            if not hasattr(self, "timeline") or not self.timeline._timeline:
+                return None, None
+            sid = getattr(self.timeline, "_selected_layer_id", "") or ""
+            for tr in self.timeline._timeline.tracks:
+                for l in tr.layers:
+                    if l.id == sid:
+                        return l, tr
+            return None, None
+
+        def _on_radius_changed(value):
+            layer, _ = _selected_blur_layer()
+            if layer is None:
+                return
+            try:
+                layer.blur_strength = int(value)
+            except Exception:
+                return
+            if hasattr(self, "blur_inspector_radius_value_label"):
+                self.blur_inspector_radius_value_label.setText(str(int(value)))
+            self._sync_blur_layer_to_preview(layer)
+
+        def _on_opacity_changed(value):
+            layer, _ = _selected_blur_layer()
+            if layer is None:
+                return
+            opacity = max(0.0, min(1.0, float(value) / 100.0))
+            try:
+                layer.blur_opacity = opacity
+            except Exception:
+                return
+            if hasattr(self, "blur_inspector_opacity_value_label"):
+                self.blur_inspector_opacity_value_label.setText(f"{int(value)}%")
+            self._sync_blur_layer_to_preview(layer)
+
+        def _on_pixelate_toggled(checked):
+            layer, _ = _selected_blur_layer()
+            if layer is None:
+                return
+            try:
+                layer.pixelate = bool(checked)
+            except Exception:
+                return
+            self._sync_blur_layer_to_preview(layer)
+
+        def _on_pixel_size_changed(value):
+            layer, _ = _selected_blur_layer()
+            if layer is None:
+                return
+            try:
+                layer.pixelate_size = int(value)
+            except Exception:
+                return
+            if hasattr(self, "blur_inspector_pixel_size_value_label"):
+                self.blur_inspector_pixel_size_value_label.setText(str(int(value)))
+            self._sync_blur_layer_to_preview(layer)
+
+        self._blur_radius_handler = _on_radius_changed
+        self._blur_opacity_handler = _on_opacity_changed
+        self._blur_pixelate_handler = _on_pixelate_toggled
+        self._blur_pixel_size_handler = _on_pixel_size_changed
+
+        if hasattr(self, "blur_inspector_radius_slider"):
+            self.blur_inspector_radius_slider.valueChanged.connect(_on_radius_changed)
+        if hasattr(self, "blur_inspector_opacity_slider"):
+            self.blur_inspector_opacity_slider.valueChanged.connect(_on_opacity_changed)
+        if hasattr(self, "blur_inspector_pixelate_cb"):
+            self.blur_inspector_pixelate_cb.toggled.connect(_on_pixelate_toggled)
+        if hasattr(self, "blur_inspector_pixel_size_slider"):
+            self.blur_inspector_pixel_size_slider.valueChanged.connect(_on_pixel_size_changed)
+
+    def _sync_blur_layer_to_preview(self, layer):
+        """Push a BlurLayer's per-region style back to the video preview
+        + persisted state + B1 timeline regions (so the export matches).
+        """
+        if not hasattr(self, "video_view") or not hasattr(self.video_view, "blur_overlay"):
+            return
+        try:
+            from app.layers.blur import BlurLayer
+            regions = self.video_view.blur_overlay._regions or []
+        except Exception:
+            return
+        # Find the index of this layer in the B1 track to map it to
+        # the corresponding region in the video overlay.
+        idx = -1
+        if hasattr(self, "timeline") and self.timeline._timeline:
+            for tr in self.timeline._timeline.tracks:
+                if tr.id == layer.id or layer in tr.layers:
+                    try:
+                        idx = list(tr.layers).index(layer)
+                    except ValueError:
+                        idx = -1
+                    break
+        if idx < 0 or idx >= len(regions):
+            return
+        rect = regions[idx]
+        try:
+            x = float(rect.x())
+            y = float(rect.y())
+            w = float(rect.width())
+            h = float(rect.height())
+        except Exception:
+            return
+        # Build a single-region payload using this layer's style and
+        # write it through the normal persist + preview path.
+        payload = [{
+            "x": x, "y": y, "width": w, "height": h,
+            "blur_strength": int(getattr(layer, "blur_strength", 20)),
+            "blur_opacity": float(getattr(layer, "blur_opacity", 1.0)),
+            "pixelate": bool(getattr(layer, "pixelate", False)),
+            "pixelate_size": int(getattr(layer, "pixelate_size", 12)),
+        }]
+        try:
+            if hasattr(self.video_view, "set_blur_regions_normalized"):
+                self.video_view.set_blur_regions_normalized(payload)
+        except Exception:
+            pass
+        # Persist and re-apply the filter (so the export matches).
+        if hasattr(self, "persist_project_blur_state"):
+            try:
+                self.persist_project_blur_state(regions=payload)
+            except Exception:
+                pass
+        if hasattr(self, "apply_preview_blur_region"):
+            try:
+                self.apply_preview_blur_region(regions=payload, force=True)
+            except Exception:
+                pass
+        # Push the new style onto the B1 track layers (one payload
+        # entry per BlurLayer).
+        if hasattr(self, "timeline") and self.timeline._timeline:
+            from app.layers.blur import BlurLayer as _BL
+            for tr in self.timeline._timeline.tracks:
+                if tr.name == "B1":
+                    for i, l in enumerate(tr.layers):
+                        if i < len(payload):
+                            l.blur_strength = int(payload[i].get("blur_strength", 20))
+                            l.blur_opacity = float(payload[i].get("blur_opacity", 1.0))
+                            l.pixelate = bool(payload[i].get("pixelate", False))
+                            l.pixelate_size = int(payload[i].get("pixelate_size", 12))
+
     def _show_default_inspector(self):
         self._switch_inspector("default")
+
+    def _show_logo_inspector_for_track(self, track, layer=None):
+        """Show the Logo Track Inspector populated with the selected L1 layer."""
+        self._switch_inspector("logo")
+        self._wire_logo_inspector_controls()
+        if layer is None:
+            return
+        # Read current opacity/rotation from the layer and apply to the
+        # inspector controls.
+        opacity = float(getattr(layer, "opacity", 1.0) or 1.0)
+        rotation = 0.0
+        try:
+            transform = getattr(layer, "transform", None)
+            if transform is not None and hasattr(transform, "rotation"):
+                rotation = float(getattr(transform, "rotation", 0.0) or 0.0)
+        except Exception:
+            rotation = 0.0
+        if hasattr(self, "logo_inspector_opacity_slider"):
+            self.logo_inspector_opacity_slider.blockSignals(True)
+            self.logo_inspector_opacity_slider.setValue(int(round(opacity * 100)))
+            self.logo_inspector_opacity_slider.blockSignals(False)
+        if hasattr(self, "logo_inspector_opacity_value_label"):
+            self.logo_inspector_opacity_value_label.setText(f"{int(round(opacity * 100))}%")
+        if hasattr(self, "logo_inspector_rotation_slider"):
+            self.logo_inspector_rotation_slider.blockSignals(True)
+            self.logo_inspector_rotation_slider.setValue(int(round(rotation)))
+            self.logo_inspector_rotation_slider.blockSignals(False)
+        if hasattr(self, "logo_inspector_rotation_value_label"):
+            self.logo_inspector_rotation_value_label.setText(f"{int(round(rotation))}°")
+        if hasattr(self, "logo_inspector_summary_label"):
+            tname = getattr(track, "name", "L1 Logo")
+            lname = getattr(layer, "name", "Logo")
+            self.logo_inspector_summary_label.setText(
+                f"Selected: {tname} → {lname}. "
+                "Adjust opacity and rotation below; drag the logo on the "
+                "preview to reposition."
+            )
+
+    def _wire_logo_inspector_controls(self):
+        """One-time wiring of the Logo Inspector's opacity/rotation controls."""
+        if getattr(self, "_logo_inspector_wired", False):
+            return
+        self._logo_inspector_wired = True
+
+        def _on_opacity_changed(value, l=None):
+            if l is None:
+                l = getattr(self, "_logo_overlay_layer", None)
+            if l is None:
+                return
+            opacity = max(0.0, min(1.0, float(value) / 100.0))
+            try:
+                l.opacity = opacity
+            except Exception:
+                pass
+            if hasattr(self, "logo_inspector_opacity_value_label"):
+                self.logo_inspector_opacity_value_label.setText(f"{int(value)}%")
+            if hasattr(self, "video_view") and hasattr(self.video_view, "set_logo_opacity"):
+                self.video_view.set_logo_opacity(opacity)
+
+        def _on_rotation_changed(value, l=None):
+            if l is None:
+                l = getattr(self, "_logo_overlay_layer", None)
+            if l is None:
+                return
+            rotation = float(value)
+            try:
+                from app.layers.transform import Transform
+                transform = getattr(l, "transform", None) or Transform()
+                transform.rotation = rotation
+                l.transform = transform
+            except Exception:
+                pass
+            if hasattr(self, "logo_inspector_rotation_value_label"):
+                self.logo_inspector_rotation_value_label.setText(f"{int(value)}°")
+            if hasattr(self, "video_view") and hasattr(self.video_view, "set_logo_rotation"):
+                self.video_view.set_logo_rotation(rotation)
+
+        # Store handlers so we can disconnect on re-wire.
+        self._logo_opacity_handler = _on_opacity_changed
+        self._logo_rotation_handler = _on_rotation_changed
+
+        if hasattr(self, "logo_inspector_opacity_slider"):
+            self.logo_inspector_opacity_slider.valueChanged.connect(_on_opacity_changed)
+        if hasattr(self, "logo_inspector_rotation_slider"):
+            self.logo_inspector_rotation_slider.valueChanged.connect(_on_rotation_changed)
 
     def _show_video_inspector_for_track(self, track, layer=None):
         """Show the Video Track Inspector (V1 Video)."""
@@ -4904,6 +5204,8 @@ class VideoTranslatorGUI(QMainWindow):
             "blur": 2,
             "video": 3,
             "default": 4,
+            "logo": 5,
+            "mask": 6,
         }
         target = idx_map.get(kind, 4)
         if self.inspector_stack.currentIndex() != target:
@@ -4912,7 +5214,7 @@ class VideoTranslatorGUI(QMainWindow):
         # The handle/toggle UI was removed - the track inspector is
         # always expanded. No need to show/hide a handle.
         # Clicking a track layer opens the inspector (auto-expand shell).
-        if kind in ("subtitle", "audio", "blur", "video"):
+        if kind in ("subtitle", "audio", "blur", "video", "logo", "mask"):
             self.set_inspector_collapsed(False)
 
     def _current_audio_track_for_inspector(self):
@@ -5272,6 +5574,22 @@ class VideoTranslatorGUI(QMainWindow):
             if hasattr(self.video_view, "clear_logo"):
                 self.video_view.clear_logo()
 
+    def on_track_mask_toggled(self, track_name: str, is_shown: bool):
+        """Handle M1 track label click - show or hide the mask filter."""
+        if not hasattr(self, "media_player"):
+            return
+        if is_shown:
+            # Re-apply the M1 mask filter from the timeline.
+            try:
+                self._apply_mask_to_preview()
+            except Exception:
+                pass
+        else:
+            try:
+                self.media_player.clear_mask_region()
+            except Exception:
+                pass
+
     def _sync_timeline_mute_to_gui(self):
         """Pull the current timeline track mute state into the GUI and backend."""
         if not hasattr(self, "timeline") or not self.timeline._timeline:
@@ -5518,6 +5836,55 @@ class VideoTranslatorGUI(QMainWindow):
             try:
                 if hasattr(self, "persist_project_blur_state"):
                     self.persist_project_blur_state()
+            except Exception:
+                pass
+
+        elif layer_type == "mask":
+            from app.layers.mask import MaskLayer
+            mask_track = find_or_create_track(tl, "M1", LayerType.MASK, 60)
+            if hasattr(self.timeline, "_track_heights"):
+                self.timeline._track_heights[mask_track.id] = (
+                    mask_track.height or 60
+                )
+            idx = len(mask_track.layers)
+            # Stagger each new mask layer so overlapping ones remain
+            # visible in the timeline.
+            stagger = idx % 4
+            base_y = 0.55 - stagger * 0.05
+            base_x = 0.30 + (stagger % 2) * 0.08
+            layer = MaskLayer(
+                name=f"Mask {idx + 1}",
+                position_x=float(base_x),
+                position_y=float(base_y),
+                width=0.4,
+                height=0.2,
+                color="#000000",
+                mode="solid",
+                pixelate_size=12,
+                blur_strength=20,
+                start=0.0,
+                end=min(tl.duration, 5.0) if tl.duration > 0 else 5.0,
+            )
+            layer.z_index = idx
+            mask_track.layers.append(layer)
+            self.timeline._redraw()
+            # Push the new mask into the mpv filter chain and persist
+            # it so the export matches the preview.
+            try:
+                self._apply_mask_to_preview()
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "persist_project_mask_state"):
+                    self.persist_project_mask_state()
+            except Exception:
+                pass
+            # Select the new mask layer so the inspector opens with
+            # the right settings loaded.
+            try:
+                self.timeline._selected_layer_id = layer.id
+                self.timeline._redraw()
+                self._show_mask_inspector_for_track(mask_track, layer)
             except Exception:
                 pass
 
@@ -6613,15 +6980,36 @@ class VideoTranslatorGUI(QMainWindow):
                 height = max(0.0, min(1.0 - y, float(region.get("height", 0.0))))
             except (TypeError, ValueError):
                 continue
-            if width > 0.0 and height > 0.0:
-                regions.append(
-                    {
-                        "x": round(x, 6),
-                        "y": round(y, 6),
-                        "width": round(width, 6),
-                        "height": round(height, 6),
-                    }
-                )
+            if width <= 0.0 or height <= 0.0:
+                continue
+            entry = {
+                "x": round(x, 6),
+                "y": round(y, 6),
+                "width": round(width, 6),
+                "height": round(height, 6),
+            }
+            # Per-region style (radius, opacity, pixelate). Defaults
+            # are chosen so an existing region without these keys
+            # behaves the same as before the inspector was added.
+            try:
+                strength = region.get("blur_strength", region.get("strength"))
+                if strength is not None:
+                    entry["blur_strength"] = int(round(float(strength)))
+            except (TypeError, ValueError):
+                pass
+            try:
+                opacity = region.get("blur_opacity", region.get("opacity"))
+                if opacity is not None:
+                    entry["blur_opacity"] = round(float(opacity), 4)
+            except (TypeError, ValueError):
+                pass
+            if bool(region.get("pixelate", False)):
+                entry["pixelate"] = True
+                try:
+                    entry["pixelate_size"] = int(region.get("pixelate_size", 12))
+                except (TypeError, ValueError):
+                    entry["pixelate_size"] = 12
+            regions.append(entry)
         return regions
 
     def persist_project_blur_state(self, *, regions=None, enabled=None):
@@ -6666,6 +7054,322 @@ class VideoTranslatorGUI(QMainWindow):
             self.timeline.sync_blur_regions(regions)
         if hasattr(self, "media_player"):
             self.media_player.clear_blur_region()
+
+    # ---- Mask layer (M1) ----
+    def _current_mask_regions_payload(self):
+        """Build the mask payload from the M1 track's MaskLayers."""
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return []
+        items: list[dict] = []
+        for tr in self.timeline._timeline.tracks:
+            if tr.name != "M1":
+                continue
+            for layer in tr.layers:
+                if not getattr(layer, "visible", True):
+                    continue
+                try:
+                    items.append({
+                        "x": float(getattr(layer, "position_x", 0.3)),
+                        "y": float(getattr(layer, "position_y", 0.4)),
+                        "width": float(getattr(layer, "width", 0.4)),
+                        "height": float(getattr(layer, "height", 0.2)),
+                        "color": str(getattr(layer, "color", "#000000")),
+                        "mode": str(getattr(layer, "mode", "solid")),
+                        "opacity": float(getattr(layer, "opacity", 1.0)),
+                        "pixelate_size": int(getattr(layer, "pixelate_size", 12)),
+                        "blur_strength": int(getattr(layer, "blur_strength", 20)),
+                    })
+                except (TypeError, ValueError):
+                    continue
+        return items
+
+    def _apply_mask_to_preview(self, *, regions=None, force: bool = False):
+        """Push the M1 mask track into the mpv filter chain."""
+        if not hasattr(self, "media_player"):
+            return
+        if regions is None:
+            regions = self._current_mask_regions_payload()
+        if regions:
+            self.media_player.set_mask_region(regions)
+        else:
+            self.media_player.clear_mask_region()
+
+    def persist_project_mask_state(self, *, regions=None):
+        state = getattr(self, "current_project_state", None)
+        if not state:
+            return
+        if regions is None:
+            regions = self._current_mask_regions_payload()
+        mask_state = {"enabled": True, "regions": list(regions or [])}
+        if state.settings.get("mask_state") == mask_state:
+            return
+        state.set_setting("mask_state", mask_state)
+        self.project_service.save_project(state)
+
+    def _restore_project_mask_state(self, state):
+        mask_state = dict(getattr(state, "settings", {}).get("mask_state") or {})
+        regions = mask_state.get("regions", [])
+        if hasattr(self, "media_player") and hasattr(self.media_player, "set_mask_region"):
+            if regions:
+                self.media_player.set_mask_region(regions)
+            else:
+                self.media_player.clear_mask_region()
+        if hasattr(self, "track_label_bar"):
+            try:
+                self.track_label_bar.set_mask_shown("M1", True)
+            except Exception:
+                pass
+        # Sync the M1 track from the persisted regions.
+        if hasattr(self, "timeline") and regions:
+            try:
+                from app.layers.mask import MaskLayer
+                from app.layers.sync_bridge import find_or_create_track
+                from app.layers.base import LayerType
+                tl = self.timeline._timeline
+                track = find_or_create_track(tl, "M1", LayerType.MASK, 60)
+                track.layers.clear()
+                for i, r in enumerate(regions):
+                    layer = MaskLayer(
+                        name=f"Mask {i + 1}",
+                        position_x=float(r.get("x", 0.3)),
+                        position_y=float(r.get("y", 0.4)),
+                        width=float(r.get("width", 0.4)),
+                        height=float(r.get("height", 0.2)),
+                        color=str(r.get("color", "#000000")),
+                        mode=str(r.get("mode", "solid")),
+                        pixelate_size=int(r.get("pixelate_size", 12)),
+                        blur_strength=int(r.get("blur_strength", 20)),
+                    )
+                    layer.z_index = i
+                    track.layers.append(layer)
+                if hasattr(self.timeline, "_track_heights"):
+                    self.timeline._track_heights[track.id] = 60
+                self.timeline._redraw()
+            except Exception:
+                pass
+
+    def _show_mask_inspector_for_track(self, track, layer=None):
+        """Show the Mask Track Inspector populated with the selected M1 layer."""
+        self._switch_inspector("mask")
+        self._wire_mask_inspector_controls()
+        if layer is None:
+            return
+        if hasattr(self, "mask_inspector_x_spin"):
+            self.mask_inspector_x_spin.blockSignals(True)
+            self.mask_inspector_x_spin.setValue(float(getattr(layer, "position_x", 0.3)))
+            self.mask_inspector_x_spin.blockSignals(False)
+        if hasattr(self, "mask_inspector_y_spin"):
+            self.mask_inspector_y_spin.blockSignals(True)
+            self.mask_inspector_y_spin.setValue(float(getattr(layer, "position_y", 0.4)))
+            self.mask_inspector_y_spin.blockSignals(False)
+        if hasattr(self, "mask_inspector_w_spin"):
+            self.mask_inspector_w_spin.blockSignals(True)
+            self.mask_inspector_w_spin.setValue(float(getattr(layer, "width", 0.4)))
+            self.mask_inspector_w_spin.blockSignals(False)
+        if hasattr(self, "mask_inspector_h_spin"):
+            self.mask_inspector_h_spin.blockSignals(True)
+            self.mask_inspector_h_spin.setValue(float(getattr(layer, "height", 0.2)))
+            self.mask_inspector_h_spin.blockSignals(False)
+        mode = str(getattr(layer, "mode", "solid"))
+        if hasattr(self, "mask_inspector_mode_combo"):
+            self.mask_inspector_mode_combo.blockSignals(True)
+            idx = self.mask_inspector_mode_combo.findData(mode)
+            if idx >= 0:
+                self.mask_inspector_mode_combo.setCurrentIndex(idx)
+            self.mask_inspector_mode_combo.blockSignals(False)
+        color = str(getattr(layer, "color", "#000000"))
+        if hasattr(self, "mask_inspector_color_btn"):
+            self.mask_inspector_color_btn.setText(color)
+            self.mask_inspector_color_btn.setStyleSheet(
+                f"background-color: {color}; color: #fff;"
+            )
+        try:
+            opacity = float(getattr(layer, "opacity", 1.0))
+        except (TypeError, ValueError):
+            opacity = 1.0
+        opacity = max(0.0, min(1.0, opacity))
+        if hasattr(self, "mask_inspector_opacity_slider"):
+            self.mask_inspector_opacity_slider.blockSignals(True)
+            self.mask_inspector_opacity_slider.setValue(int(round(opacity * 100)))
+            self.mask_inspector_opacity_slider.blockSignals(False)
+        if hasattr(self, "mask_inspector_opacity_value_label"):
+            self.mask_inspector_opacity_value_label.setText(f"{int(round(opacity * 100))}%")
+        try:
+            pixel_size = int(getattr(layer, "pixelate_size", 12))
+        except (TypeError, ValueError):
+            pixel_size = 12
+        pixel_size = max(2, min(60, pixel_size))
+        if hasattr(self, "mask_inspector_pixel_slider"):
+            self.mask_inspector_pixel_slider.blockSignals(True)
+            self.mask_inspector_pixel_slider.setValue(pixel_size)
+            self.mask_inspector_pixel_slider.blockSignals(False)
+        if hasattr(self, "mask_inspector_pixel_value_label"):
+            self.mask_inspector_pixel_value_label.setText(str(pixel_size))
+        try:
+            strength = int(getattr(layer, "blur_strength", 20))
+        except (TypeError, ValueError):
+            strength = 20
+        strength = max(1, min(20, strength))
+        if hasattr(self, "mask_inspector_strength_slider"):
+            self.mask_inspector_strength_slider.blockSignals(True)
+            self.mask_inspector_strength_slider.setValue(strength)
+            self.mask_inspector_strength_slider.blockSignals(False)
+        if hasattr(self, "mask_inspector_strength_value_label"):
+            self.mask_inspector_strength_value_label.setText(str(strength))
+        if hasattr(self, "mask_inspector_summary_label"):
+            tname = getattr(track, "name", "M1")
+            lname = getattr(layer, "name", "Mask")
+            self.mask_inspector_summary_label.setText(
+                f"Selected: {tname} → {lname}. Adjust position, size, "
+                "colour, mode and opacity below."
+            )
+
+    def _wire_mask_inspector_controls(self):
+        """One-time wiring of the Mask Inspector controls."""
+        if getattr(self, "_mask_inspector_wired", False):
+            return
+        self._mask_inspector_wired = True
+
+        def _selected_mask_layer():
+            if not hasattr(self, "timeline") or not self.timeline._timeline:
+                return None, None
+            sid = getattr(self.timeline, "_selected_layer_id", "") or ""
+            for tr in self.timeline._timeline.tracks:
+                for l in tr.layers:
+                    if l.id == sid:
+                        return l, tr
+            return None, None
+
+        def _sync_preview(l):
+            try:
+                self._apply_mask_to_preview()
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "persist_project_mask_state"):
+                    self.persist_project_mask_state()
+            except Exception:
+                pass
+
+        def _on_x_changed(v):
+            layer, _ = _selected_mask_layer()
+            if layer is None:
+                return
+            layer.position_x = float(v)
+            _sync_preview(layer)
+        def _on_y_changed(v):
+            layer, _ = _selected_mask_layer()
+            if layer is None:
+                return
+            layer.position_y = float(v)
+            _sync_preview(layer)
+        def _on_w_changed(v):
+            layer, _ = _selected_mask_layer()
+            if layer is None:
+                return
+            layer.width = float(v)
+            _sync_preview(layer)
+        def _on_h_changed(v):
+            layer, _ = _selected_mask_layer()
+            if layer is None:
+                return
+            layer.height = float(v)
+            _sync_preview(layer)
+        def _on_mode_changed(index):
+            layer, _ = _selected_mask_layer()
+            if layer is None:
+                return
+            try:
+                layer.mode = str(self.mask_inspector_mode_combo.itemData(index) or "solid")
+            except Exception:
+                layer.mode = "solid"
+            _sync_preview(layer)
+        def _on_opacity_changed(v):
+            layer, _ = _selected_mask_layer()
+            if layer is None:
+                return
+            opacity = max(0.0, min(1.0, float(v) / 100.0))
+            try:
+                layer.opacity = opacity
+            except Exception:
+                pass
+            if hasattr(self, "mask_inspector_opacity_value_label"):
+                self.mask_inspector_opacity_value_label.setText(f"{int(v)}%")
+            _sync_preview(layer)
+        def _on_pixel_changed(v):
+            layer, _ = _selected_mask_layer()
+            if layer is None:
+                return
+            try:
+                layer.pixelate_size = int(v)
+            except Exception:
+                return
+            if hasattr(self, "mask_inspector_pixel_value_label"):
+                self.mask_inspector_pixel_value_label.setText(str(int(v)))
+            _sync_preview(layer)
+        def _on_strength_changed(v):
+            layer, _ = _selected_mask_layer()
+            if layer is None:
+                return
+            try:
+                layer.blur_strength = int(v)
+            except Exception:
+                return
+            if hasattr(self, "mask_inspector_strength_value_label"):
+                self.mask_inspector_strength_value_label.setText(str(int(v)))
+            _sync_preview(layer)
+
+        self._mask_x_handler = _on_x_changed
+        self._mask_y_handler = _on_y_changed
+        self._mask_w_handler = _on_w_changed
+        self._mask_h_handler = _on_h_changed
+        self._mask_mode_handler = _on_mode_changed
+        self._mask_opacity_handler = _on_opacity_changed
+        self._mask_pixel_handler = _on_pixel_changed
+        self._mask_strength_handler = _on_strength_changed
+
+        if hasattr(self, "mask_inspector_x_spin"):
+            self.mask_inspector_x_spin.valueChanged.connect(_on_x_changed)
+        if hasattr(self, "mask_inspector_y_spin"):
+            self.mask_inspector_y_spin.valueChanged.connect(_on_y_changed)
+        if hasattr(self, "mask_inspector_w_spin"):
+            self.mask_inspector_w_spin.valueChanged.connect(_on_w_changed)
+        if hasattr(self, "mask_inspector_h_spin"):
+            self.mask_inspector_h_spin.valueChanged.connect(_on_h_changed)
+        if hasattr(self, "mask_inspector_mode_combo"):
+            self.mask_inspector_mode_combo.currentIndexChanged.connect(_on_mode_changed)
+        if hasattr(self, "mask_inspector_opacity_slider"):
+            self.mask_inspector_opacity_slider.valueChanged.connect(_on_opacity_changed)
+        if hasattr(self, "mask_inspector_pixel_slider"):
+            self.mask_inspector_pixel_slider.valueChanged.connect(_on_pixel_changed)
+        if hasattr(self, "mask_inspector_strength_slider"):
+            self.mask_inspector_strength_slider.valueChanged.connect(_on_strength_changed)
+
+        # Color picker
+        from PySide6.QtWidgets import QColorDialog
+        def _on_color_clicked():
+            from PySide6.QtGui import QColor
+            layer, _ = _selected_mask_layer()
+            current = QColor(str(getattr(layer, "color", "#000000")))
+            chosen = QColorDialog.getColor(current, self, "Pick mask colour")
+            if not chosen.isValid():
+                return
+            hex_str = chosen.name()
+            if hasattr(self, "mask_inspector_color_btn"):
+                self.mask_inspector_color_btn.setText(hex_str)
+                self.mask_inspector_color_btn.setStyleSheet(
+                    f"background-color: {hex_str}; color: #fff;"
+                )
+            if layer is not None:
+                try:
+                    layer.color = hex_str
+                except Exception:
+                    pass
+                _sync_preview(layer)
+
+        self._mask_color_handler = _on_color_clicked
+        if hasattr(self, "mask_inspector_color_btn"):
+            self.mask_inspector_color_btn.clicked.connect(_on_color_clicked)
 
     def _resolve_voice_preview_source(self, entry: dict) -> QUrl:
         preview_path = str(entry.get("preview_video_path", "")).strip()
@@ -8988,8 +9692,18 @@ class VideoTranslatorGUI(QMainWindow):
                     self.persist_project_blur_state()
                 except Exception:
                     pass
+            if hasattr(self, "persist_project_mask_state"):
+                try:
+                    self.persist_project_mask_state()
+                except Exception:
+                    pass
             if hasattr(self, "video_view"):
                 self.video_view.clear_blur_region()
+            if hasattr(self, "media_player") and hasattr(self.media_player, "clear_mask_region"):
+                try:
+                    self.media_player.clear_mask_region()
+                except Exception:
+                    pass
             self.save_user_settings()
             self.cleanup_temp_preview_files()
             self._terminate_workers()

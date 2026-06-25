@@ -14,6 +14,9 @@ class BlurLayer(BaseLayer):
     width: float = 200.0
     height: float = 80.0
     blur_strength: float = 20.0
+    blur_opacity: float = 1.0
+    pixelate: bool = False
+    pixelate_size: int = 12
 
     def to_dict(self) -> dict[str, Any]:
         base = super().to_dict()
@@ -23,6 +26,9 @@ class BlurLayer(BaseLayer):
             "width": self.width,
             "height": self.height,
             "blur_strength": self.blur_strength,
+            "blur_opacity": self.blur_opacity,
+            "pixelate": self.pixelate,
+            "pixelate_size": self.pixelate_size,
         })
         return base
 
@@ -41,4 +47,7 @@ class BlurLayer(BaseLayer):
             width=float(data.get("width", 200.0)),
             height=float(data.get("height", 80.0)),
             blur_strength=float(data.get("blur_strength", 20.0)),
+            blur_opacity=float(data.get("blur_opacity", 1.0)),
+            pixelate=bool(data.get("pixelate", False)),
+            pixelate_size=int(data.get("pixelate_size", 12)),
         )

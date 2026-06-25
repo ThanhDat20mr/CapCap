@@ -499,6 +499,8 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
         super().__init__(on_region_changed=on_region_changed, on_edit_finished=on_edit_finished)
         self._pixmap = None
         self._sync_timer = None
+        self._opacity: float = 1.0
+        self._rotation: float = 0.0
 
     def attach_to_view(self, view: QWidget):
         # Inherit the base behavior (event filter on main window,
@@ -535,6 +537,20 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
         else:
             self._pixmap = None
         self.update()
+
+    def set_opacity(self, opacity: float):
+        self._opacity = max(0.0, min(1.0, float(opacity)))
+        self.update()
+
+    def get_opacity(self) -> float:
+        return float(self._opacity)
+
+    def set_rotation(self, rotation: float):
+        self._rotation = float(rotation) % 360.0
+        self.update()
+
+    def get_rotation(self) -> float:
+        return float(self._rotation)
 
     def set_logo_rect(self, x, y, w, h):
         if not self._regions:
@@ -575,10 +591,23 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
             rect = self.region_rect(index)
             if rect.width() <= 0 or rect.height() <= 0:
                 continue
+            # Apply opacity and rotation around the center of the logo.
+            painter.save()
+            painter.setOpacity(self._opacity)
+            cx = rect.center().x()
+            cy = rect.center().y()
+            painter.translate(cx, cy)
+            painter.rotate(self._rotation)
+            painter.translate(-cx, -cy)
             if self._pixmap is not None and not self._pixmap.isNull():
                 painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
                 painter.drawPixmap(rect, self._pixmap, self._pixmap.rect())
-            pen = QPen(QColor(110, 231, 214), 2, Qt.DashLine)
+            # Reset transform/opacity before drawing chrome (handles,
+            # border, close button) so they remain axis-aligned and
+            # fully opaque even when the logo is rotated or faded.
+            painter.restore()
+            pen = QPen(QColor(110, 231, 214, int(255 * max(self._opacity, 0.4))),
+                       2, Qt.DashLine)
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(rect)
@@ -1008,6 +1037,14 @@ class MpvVideoView(QWidget):
         if hasattr(self, "logo_overlay") and self.logo_overlay is not None:
             self.logo_overlay.set_logo_rect(x, y, w, h)
             self.logo_overlay.sync_to_view()
+
+    def set_logo_opacity(self, opacity: float):
+        if hasattr(self, "logo_overlay") and self.logo_overlay is not None:
+            self.logo_overlay.set_opacity(opacity)
+
+    def set_logo_rotation(self, rotation: float):
+        if hasattr(self, "logo_overlay") and self.logo_overlay is not None:
+            self.logo_overlay.set_rotation(rotation)
 
     def clear_logo(self):
         if hasattr(self, "logo_overlay") and self.logo_overlay is not None:

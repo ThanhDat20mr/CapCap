@@ -442,18 +442,63 @@ class MpvMediaPlayerBackend(QObject):
                 h = max(2, min(video_height - y, int(round(float(blur.get("height", 0.0)) * video_height))))
             except (TypeError, ValueError):
                 continue
-            min_dimension = min(w, h)
-            luma_radius = max(1, min(20, int(min_dimension // 2)))
-            chroma_radius = max(0, min(20, int(min_dimension // 4)))
-            regions.append((x, y, w, h, luma_radius, chroma_radius))
+            # Blur strength: 1 (light) .. 20 (heavy). When not set,
+            # fall back to a size-derived default (legacy behaviour).
+            try:
+                strength_raw = blur.get("blur_strength", blur.get("strength"))
+                if strength_raw is None:
+                    min_dimension = min(w, h)
+                    luma_radius = max(1, min(20, int(min_dimension // 2)))
+                else:
+                    luma_radius = max(1, min(20, int(round(float(strength_raw)))))
+            except (TypeError, ValueError):
+                luma_radius = max(1, min(20, int(min(w, h) // 2)))
+            chroma_radius = max(0, min(20, luma_radius // 2))
+            # Blur opacity 0..1. Default = 1.0 (fully visible).
+            try:
+                opacity = float(blur.get("blur_opacity", blur.get("opacity", 1.0)))
+            except (TypeError, ValueError):
+                opacity = 1.0
+            opacity = max(0.0, min(1.0, opacity))
+            # Pixelate: when on, replace boxblur with a mosaic chain.
+            pixelate = bool(blur.get("pixelate", False))
+            try:
+                pixel_size = int(blur.get("pixelate_size", 12))
+            except (TypeError, ValueError):
+                pixel_size = 12
+            pixel_size = max(2, min(60, pixel_size))
+            regions.append((x, y, w, h, luma_radius, chroma_radius, opacity, pixelate, pixel_size))
         if not regions:
             return ""
 
         crop_parts = []
         overlay_parts = []
-        for index, (x, y, w, h, luma_radius, chroma_radius) in enumerate(regions):
+        for index, region in enumerate(regions):
+            x, y, w, h, luma_radius, chroma_radius, opacity, pixelate, pixel_size = region
+            if pixelate:
+                # Mosaic: downscale to (w/N)x(h/N) then upscale back to
+                # w x h with nearest-neighbour so each "cell" becomes a
+                # solid square of colour from the original frame.
+                cell_w = max(1, w // pixel_size)
+                cell_h = max(1, h // pixel_size)
+                effect = (
+                    f"scale={cell_w}:{cell_h}:flags=neighbor,"
+                    f"scale={w}:{h}:flags=neighbor"
+                )
+            else:
+                effect = f"boxblur={luma_radius}:3:{chroma_radius}:3"
+            # When opacity < 1.0, force the cropped effect to RGBA so
+            # the alpha channel can be multiplied by colorchannelmixer
+            # before being overlaid on top of the original frame. The
+            # base [main] is auto-promoted to RGBA by the overlay
+            # filter when the foreground has alpha.
+            if opacity < 0.999:
+                effect = (
+                    f"format=yuva420p,{effect},"
+                    f"colorchannelmixer=aa={opacity:.3f}"
+                )
             crop_parts.append(
-                f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},boxblur={luma_radius}:3:{chroma_radius}:3[blur{index}]"
+                f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},{effect}[blur{index}]"
             )
             base_label = "main" if index == 0 else f"b{index - 1}"
             output_label = "" if index == len(regions) - 1 else f"[b{index}]"
@@ -462,15 +507,32 @@ class MpvMediaPlayerBackend(QObject):
         return "lavfi=[" + f"split={len(regions) + 1}{split_outputs};" + ";".join(crop_parts + overlay_parts) + "]"
 
     def _apply_blur_filter(self):
+        self._apply_all_filters()
+
+    def _apply_mask_filter(self):
+        self._apply_all_filters()
+
+    def _apply_all_filters(self):
+        """Apply blur + mask filters together so they coexist as a chain.
+
+        `vf clr` is called once at the start to drop any previously
+        installed filters, then both filters are pushed back via
+        `vf add` in order (blur first, mask on top).
+        """
         try:
             self._player.command("vf", "clr", "")
         except Exception:
             pass
-        filter_spec = self._build_blur_filter()
-        if not filter_spec:
-            return
+        blur = self._build_blur_filter()
+        if blur:
+            self._push_filter(blur, tag="capcap-blur")
+        mask = self._build_mask_filter()
+        if mask:
+            self._push_filter(mask, tag="capcap-mask")
+
+    def _push_filter(self, filter_spec: str, tag: str = "capcap-fx"):
         try:
-            self._player.command("vf", "add", f"@capcap-blur:{filter_spec}")
+            self._player.command("vf", "add", f"@{tag}:{filter_spec}")
         except Exception:
             try:
                 self._player.vf = filter_spec
@@ -487,6 +549,161 @@ class MpvMediaPlayerBackend(QObject):
     def clear_blur_region(self):
         self._blur_region = None
         self._apply_blur_filter()
+
+    # ---- Mask regions (solid/pixelate/blur) ----
+    def set_mask_region(self, mask_region=None):
+        if isinstance(mask_region, list):
+            self._mask_region = [dict(r) for r in mask_region if isinstance(r, dict)]
+        else:
+            self._mask_region = dict(mask_region or {}) if mask_region else None
+        self._apply_mask_filter()
+
+    def clear_mask_region(self):
+        self._mask_region = None
+        self._apply_mask_filter()
+
+    def _build_mask_filter(self):
+        """Build the lavfi filter chain for the M1 mask track.
+
+        Mask modes:
+        - solid  : draw a coloured rectangle on top of the video.
+        - pixelate: pixelate the cropped region then overlay it.
+        - blur   : blur the cropped region then overlay it.
+        """
+        raw = self._mask_region or []
+        if isinstance(raw, dict):
+            raw = [raw]
+        if not isinstance(raw, list) or not raw:
+            return ""
+        video_width = int(self.video_view.video_source_width or 0)
+        video_height = int(self.video_view.video_source_height or 0)
+        if video_width <= 0 or video_height <= 0:
+            return ""
+        items = []
+        for mask in raw:
+            if not isinstance(mask, dict):
+                continue
+            try:
+                x = max(0, min(video_width - 2, int(round(float(mask.get("x", 0.0)) * video_width))))
+                y = max(0, min(video_height - 2, int(round(float(mask.get("y", 0.0)) * video_height))))
+                w = max(2, min(video_width - x, int(round(float(mask.get("width", 0.0)) * video_width))))
+                h = max(2, min(video_height - y, int(round(float(mask.get("height", 0.0)) * video_height))))
+            except (TypeError, ValueError):
+                continue
+            mode = str(mask.get("mode", "solid")).lower()
+            color = str(mask.get("color", "#000000") or "#000000")
+            try:
+                opacity = float(mask.get("opacity", mask.get("mask_opacity", 1.0)))
+            except (TypeError, ValueError):
+                opacity = 1.0
+            opacity = max(0.0, min(1.0, opacity))
+            try:
+                pixel_size = max(2, min(60, int(mask.get("pixelate_size", 12))))
+            except (TypeError, ValueError):
+                pixel_size = 12
+            try:
+                strength = max(1, min(20, int(mask.get("blur_strength", 20))))
+            except (TypeError, ValueError):
+                strength = 20
+            items.append((x, y, w, h, mode, color, opacity, pixel_size, strength))
+        if not items:
+            return ""
+
+        chain_parts: list[str] = []
+        for i, (x, y, w, h, mode, color, opacity, pixel_size, strength) in enumerate(items):
+            if mode == "pixelate":
+                cell_w = max(1, w // pixel_size)
+                cell_h = max(1, h // pixel_size)
+                effect = (
+                    f"[tmp{i}]crop=w={w}:h={h}:x={x}:y={y},"
+                    f"scale={cell_w}:{cell_h}:flags=neighbor,"
+                    f"scale={w}:{h}:flags=neighbor"
+                )
+                if opacity < 0.999:
+                    effect = f"{effect},format=yuva420p,colorchannelmixer=aa={opacity:.3f}"
+                effect = f"{effect}[effect{i}]"
+                base_label = "main" if i == 0 else f"b{i - 1}"
+                out_label = "" if i == len(items) - 1 else f"[b{i}]"
+                chain_parts.append(effect)
+                chain_parts.append(
+                    f"[{base_label}][effect{i}]overlay={x}:{y}{out_label}"
+                )
+            elif mode == "blur":
+                chroma = max(0, strength // 2)
+                effect = (
+                    f"[tmp{i}]crop=w={w}:h={h}:x={x}:y={y},"
+                    f"boxblur={strength}:3:{chroma}:3"
+                )
+                if opacity < 0.999:
+                    effect = f"{effect},format=yuva420p,colorchannelmixer=aa={opacity:.3f}"
+                effect = f"{effect}[effect{i}]"
+                base_label = "main" if i == 0 else f"b{i - 1}"
+                out_label = "" if i == len(items) - 1 else f"[b{i}]"
+                chain_parts.append(effect)
+                chain_parts.append(
+                    f"[{base_label}][effect{i}]overlay={x}:{y}{out_label}"
+                )
+            else:
+                # Solid colour rectangle. We synthesise the colour with
+                # lavfi's `color` filter, scale it to the region size and
+                # overlay with the chosen opacity.
+                # Strip leading '#' from the colour for ffmpeg.
+                hex_color = color.lstrip("#")
+                if len(hex_color) == 3:
+                    hex_color = "".join(c * 2 for c in hex_color)
+                if len(hex_color) != 6:
+                    hex_color = "000000"
+                if opacity < 0.999:
+                    synth = (
+                        f"color=0x{hex_color}:s={w}x{h}:d=1,"
+                        f"format=yuva420p,colorchannelmixer=aa={opacity:.3f}"
+                    )
+                else:
+                    synth = f"color=0x{hex_color}:s={w}x{h}:d=1,format=yuva420p"
+                synth = f"{synth},loop=loop=-1:size=1:start=0[rect{i}]"
+                chain_parts.append(synth)
+                base_label = "main" if i == 0 else f"b{i - 1}"
+                out_label = "" if i == len(items) - 1 else f"[b{i}]"
+                chain_parts.append(
+                    f"[{base_label}][rect{i}]overlay={x}:{y}{out_label}"
+                )
+
+        split_outputs = "[main]" + "".join(f"[tmp{i}]" for i in range(len(items)))
+        # Pixelate + blur paths need split (they crop from main). Solid
+        # does NOT need split (it synthesises its own colour stream).
+        if any(it[4] != "solid" for it in items):
+            prefix = f"split={len(items) + 1}{split_outputs};"
+        else:
+            prefix = ""
+        return "lavfi=[" + prefix + ";".join(chain_parts) + "]"
+
+    def _apply_mask_filter(self):
+        try:
+            self._player.command("vf", "clr", "")
+        except Exception:
+            pass
+        # Re-apply blur if a blur region is set so the two filters
+        # coexist. We treat blur as primary and append mask after it.
+        filter_specs: list[str] = []
+        blur = self._build_blur_filter()
+        if blur:
+            filter_specs.append(blur)
+        mask = self._build_mask_filter()
+        if mask:
+            filter_specs.append(mask)
+        for spec in filter_specs:
+            try:
+                self._player.command("vf", "add", f"@capcap-mask:{spec}")
+            except Exception:
+                try:
+                    self._player.vf = spec
+                except Exception:
+                    pass
+        if not filter_specs:
+            return
+        # If mpv only supports a single vf, the last one wins — but in
+        # practice `vf add` chains them. The above loop appends both
+        # filters in order (blur first, then mask on top).
 
     def set_audio_file(self, audio_path):
         """Load the dubbed audio file into the QMediaPlayer sidecar."""
