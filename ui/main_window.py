@@ -7376,12 +7376,21 @@ class VideoTranslatorGUI(QMainWindow):
         cleared from the mpv filter chain so the original frame shows
         through. The draggable overlay remains visible either way so
         the user can position / resize the region while paused.
+
+        `force=True` bypasses the play-state gate (used by direct
+        calls from `toggle_play` so the mask is applied/cleared in
+        the same code path as the play/pause).
         """
         if not hasattr(self, "media_player"):
             return
         if regions is None:
             regions = self._current_mask_regions_payload()
-        # Gate by playback state: only apply while playing.
+        if force:
+            if regions:
+                self.media_player.set_mask_region(regions)
+            else:
+                self.media_player.clear_mask_region()
+            return
         is_playing = False
         try:
             is_playing = bool(self.media_player.is_playing())
@@ -7392,7 +7401,7 @@ class VideoTranslatorGUI(QMainWindow):
         else:
             self.media_player.clear_mask_region()
 
-    def _on_preview_state_changed(self, _state: int):
+    def _on_preview_state_changed(self, state: int):
         """Re-apply the M1 mask filter when the player state changes.
 
         The mask is only applied to the video while the player is
@@ -7401,7 +7410,17 @@ class VideoTranslatorGUI(QMainWindow):
         play / pause / stop.
         """
         try:
-            self._apply_mask_to_preview()
+            from PySide6.QtMultimedia import QMediaPlayer
+            is_playing = (state == int(QMediaPlayer.PlayingState.value))
+        except Exception:
+            is_playing = False
+        if hasattr(self, "log"):
+            try:
+                self.log(f"[Preview] state changed to {state} (is_playing={is_playing})")
+            except Exception:
+                pass
+        try:
+            self._apply_mask_to_preview(force=True)
         except Exception:
             pass
 

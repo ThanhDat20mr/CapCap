@@ -59,6 +59,13 @@ def toggle_play(gui):
             if hasattr(gui, "_sync_blur_controls"):
                 gui._sync_blur_controls()
             gui.timeline.set_playing(False)
+            # Clear the M1 mask filter on pause so the video shows
+            # through (the mask only renders while playing).
+            if hasattr(gui, "_apply_mask_to_preview"):
+                try:
+                    gui._apply_mask_to_preview(force=True)
+                except Exception:
+                    pass
             if (
                 has_active_video_filters
                 and filter_workflow_active
@@ -103,6 +110,15 @@ def toggle_play(gui):
             # The track inspector is always expanded - no auto-collapse.
             gui.media_player.play()
             gui.timeline.set_playing(True)
+            # Apply the M1 mask filter on play so the colour shows
+            # while the video is playing. Use force=True to bypass
+            # the is_playing() check (the play() call above already
+            # set the state to PlayingState).
+            if hasattr(gui, "_apply_mask_to_preview"):
+                try:
+                    gui._apply_mask_to_preview(force=True)
+                except Exception:
+                    pass
         if hasattr(gui, "_refresh_preview_audio_controls"):
             gui._refresh_preview_audio_controls()
     except Exception as exc:

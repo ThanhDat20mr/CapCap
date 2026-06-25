@@ -340,7 +340,7 @@ class MpvMediaPlayerBackend(QObject):
                 pass
         self._state = QMediaPlayer.PlayingState
         try:
-            self.stateChanged.emit(int(self._state))
+            self.stateChanged.emit(int(self._state.value))
         except Exception:
             pass
 
@@ -358,7 +358,7 @@ class MpvMediaPlayerBackend(QObject):
                 pass
         self._state = QMediaPlayer.PausedState
         try:
-            self.stateChanged.emit(int(self._state))
+            self.stateChanged.emit(int(self._state.value))
         except Exception:
             pass
 
@@ -383,6 +383,10 @@ class MpvMediaPlayerBackend(QObject):
         self._position_ms = 0
         self._state = QMediaPlayer.StoppedState
         self.positionChanged.emit(0)
+        try:
+            self.stateChanged.emit(int(self._state.value))
+        except Exception:
+            pass
 
     def setPosition(self, position):
         self._position_ms = int(position)
