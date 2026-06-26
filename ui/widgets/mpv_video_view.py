@@ -836,6 +836,12 @@ class MpvVideoView(QWidget):
             on_region_changed=self.maskRegionChanged.emit,
             on_edit_finished=self.maskEditFinished.emit,
         )
+        # Forward the overlay's internal delete signal to the public
+        # MpvVideoView.maskDeleted signal so the main window can react
+        # to X-button clicks on the mask overlay. Without this the
+        # maskDeleted signal is emitted but nothing listens, so the
+        # layer is never removed from the timeline.
+        self.mask_overlay.maskDeleted.connect(self.maskDeleted.emit)
         self.ratio_badge = QLabel(self)
         self.ratio_badge.setObjectName("previewRatioBadge")
         self.ratio_badge.setAlignment(Qt.AlignCenter)
