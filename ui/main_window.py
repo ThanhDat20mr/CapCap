@@ -5926,10 +5926,19 @@ class VideoTranslatorGUI(QMainWindow):
             if not path:
                 return
             img_track = find_or_create_track(tl, "L1 Logo", LayerType.IMAGE, 80)
-            idx = len(img_track.layers)
+            # L1 is a singleton: a new logo replaces the old one. Clear
+            # the existing layers and the logo overlay before adding
+            # the new layer.
+            img_track.layers.clear()
+            if hasattr(self.video_view, "logo_overlay"):
+                try:
+                    self.video_view.logo_overlay.clear_region()
+                except Exception:
+                    pass
+            idx = 0
             dur = tl.duration if tl.duration > 0 else 10.0
             layer = ImageLayer(
-                name=f"Logo {idx + 1}",
+                name="Logo 1",
                 source=path,
                 start=0.0,
                 end=dur,
@@ -6058,20 +6067,23 @@ class VideoTranslatorGUI(QMainWindow):
         elif layer_type == "mask":
             from app.layers.mask import MaskLayer
             mask_track = find_or_create_track(tl, "M1", LayerType.MASK, 60)
+            # M1 is a singleton: a new mask replaces the old one. Clear
+            # the existing layers and the mask overlay before adding
+            # the new layer.
+            mask_track.layers.clear()
+            if hasattr(self.video_view, "mask_overlay"):
+                try:
+                    self.video_view.mask_overlay.clear_region()
+                except Exception:
+                    pass
             if hasattr(self.timeline, "_track_heights"):
                 self.timeline._track_heights[mask_track.id] = (
                     mask_track.height or 60
                 )
-            idx = len(mask_track.layers)
-            # Stagger each new mask layer so overlapping ones remain
-            # visible in the timeline.
-            stagger = idx % 4
-            base_y = 0.55 - stagger * 0.05
-            base_x = 0.30 + (stagger % 2) * 0.08
             layer = MaskLayer(
-                name=f"Mask {idx + 1}",
-                position_x=float(base_x),
-                position_y=float(base_y),
+                name="Mask 1",
+                position_x=0.3,
+                position_y=0.4,
                 width=0.4,
                 height=0.2,
                 color="#000000",
@@ -6084,7 +6096,7 @@ class VideoTranslatorGUI(QMainWindow):
                 # not a short 5-second segment.
                 end=tl.duration if tl.duration > 0 else 5.0,
             )
-            layer.z_index = idx
+            layer.z_index = 0
             # Visibility is gated by the play state in
             # _apply_mask_to_preview: the mask filter is only pushed
             # to mpv while the video is playing, so a freshly added
