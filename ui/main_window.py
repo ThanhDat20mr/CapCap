@@ -4613,24 +4613,12 @@ class VideoTranslatorGUI(QMainWindow):
         w = float(getattr(layer, "width", 0.4))
         h = float(getattr(layer, "height", 0.2))
         color = str(getattr(layer, "color", "#000000"))
-        # Show the overlay only when the M1 track is enabled (the
-        # user toggled it on via the track label).
-        if hasattr(self, "track_label_bar"):
-            shown = True
-            try:
-                for i, n in enumerate(self.track_label_bar._track_names):
-                    if n.startswith("M1"):
-                        shown = bool(self.track_label_bar._track_mask_shown[i])
-                        break
-            except Exception:
-                shown = True
-            if not shown:
-                if hasattr(self.video_view, "clear_mask_region"):
-                    self.video_view.clear_mask_region()
-                return
-        # Lock the overlay if the video is currently playing so the
-        # user cannot accidentally drag or resize the region during
-        # playback.
+        # The overlay is always shown so the user can move / resize
+        # the region regardless of the M1 track toggle. The toggle
+        # only controls whether the mpv filter is applied (see
+        # on_track_mask_toggled). Without this, the overlay would
+        # only appear after the user clicked the mask layer track
+        # to re-select it, even though the layer already exists.
         is_playing = False
         try:
             is_playing = bool(self.media_player.is_playing())
@@ -7485,6 +7473,16 @@ class VideoTranslatorGUI(QMainWindow):
                 if hasattr(self.timeline, "_track_heights"):
                     self.timeline._track_heights[track.id] = 60
                 self.timeline._redraw()
+                # Show the draggable overlay for the first restored
+                # mask so the user can immediately move / resize it
+                # after reopening the project (like the blur overlay).
+                if track.layers:
+                    try:
+                        first_layer = track.layers[0]
+                        self.timeline._selected_layer_id = first_layer.id
+                        self._show_mask_overlay(track, first_layer)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
