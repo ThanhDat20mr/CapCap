@@ -162,6 +162,31 @@ def position_changed(gui, position):
         _apply_audio_fade(gui, position)
     except Exception:
         pass
+    # Disable the play button when the playhead reaches the end of
+    # the video (within 250 ms of the duration) so the user can tell
+    # at a glance that playback has finished. The button is re-enabled
+    # on seek (`set_position`) or when a new source is loaded.
+    try:
+        if hasattr(gui, "play_btn") and not getattr(
+            gui, "_disable_play_at_end", False
+        ):
+            duration_ms = 0
+            try:
+                duration_ms = int(gui.media_player.duration() or 0)
+            except Exception:
+                duration_ms = 0
+            at_end = duration_ms > 0 and position >= duration_ms - 250
+            try:
+                is_playing = bool(gui.media_player.is_playing())
+            except Exception:
+                is_playing = False
+            gui.play_btn.setEnabled(not at_end)
+            # When playback ends naturally, update the icon/tooltip to
+            # "Play" so the next click re-starts from the end.
+            if at_end and not is_playing and hasattr(gui, "refresh_play_button_icon"):
+                gui.refresh_play_button_icon()
+    except Exception:
+        pass
 
 
 def _apply_audio_fade(gui, position_ms: int):
@@ -245,6 +270,17 @@ def set_position(gui, position):
     except Exception as exc:
         if hasattr(gui, "log"):
             gui.log(f"[Preview] seek highlight error: {exc}")
+    # Seeking away from the end re-enables the play button.
+    try:
+        if hasattr(gui, "play_btn"):
+            duration_ms = 0
+            try:
+                duration_ms = int(gui.media_player.duration() or 0)
+            except Exception:
+                duration_ms = 0
+            gui.play_btn.setEnabled(duration_ms <= 0 or position < duration_ms - 250)
+    except Exception:
+        pass
     if (
         hasattr(gui, "has_active_video_filters")
         and gui.has_active_video_filters()

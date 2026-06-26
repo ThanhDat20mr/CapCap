@@ -9995,16 +9995,27 @@ class VideoTranslatorGUI(QMainWindow):
             icon_name = "volume_down.svg" if getattr(self, "_preview_muted", False) else "volume_mute.svg"
             icon_path = asset_path("icons", icon_name)
             self.preview_mute_btn.setIcon(load_icon(icon_path, 18))
-        if hasattr(self, "play_btn"):
+        self.refresh_play_button_icon()
+
+    def refresh_play_button_icon(self):
+        """Update the play button icon + tooltip to reflect the current
+        media player state (playing vs paused). Called from
+        position_changed when playback ends naturally so the button
+        switches from the pause icon back to the play icon."""
+        if not hasattr(self, "play_btn"):
+            return
+        playing = False
+        try:
+            playing = bool(self.media_player.is_playing())
+        except Exception:
             playing = False
-            try:
-                playing = bool(self.media_player.is_playing())
-            except Exception:
-                playing = False
-            play_icon = "pause.svg" if playing else "play.svg"
-            play_tip = "Pause preview" if playing else "Play preview"
+        play_icon = "pause.svg" if playing else "play.svg"
+        play_tip = "Pause preview" if playing else "Play preview"
+        try:
             self.play_btn.setIcon(load_icon(asset_path("icons", play_icon), 18))
             self.play_btn.setToolTip(play_tip)
+        except Exception:
+            pass
         if hasattr(self, "blur_area_btn"):
             blur_active = bool(self.blur_area_btn.isChecked())
             self.blur_area_btn.setToolTip("Blur effect on" if blur_active else "Turn blur effect on or off")
