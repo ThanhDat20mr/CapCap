@@ -10,12 +10,15 @@ from PySide6.QtWidgets import QApplication, QLabel, QWidget
 class _SubtitleOverlayWidget(QWidget):
     """A real-time overlay widget for MpvVideoView."""
 
+    LINE_HEIGHT_FACTOR = 1.35
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setMouseTracking(False)
         self.current_text = ""
+        self.current_lines: list[str] = []
         self.font_name = "Segoe UI"
         self.font_size = 20
         self.font_color = QColor(255, 255, 255)
@@ -37,8 +40,31 @@ class _SubtitleOverlayWidget(QWidget):
         pass
 
     def set_text(self, text):
-        if self.current_text != text:
+        new_lines = [text] if text else []
+        if self.current_lines != new_lines or self.current_text != text:
             self.current_text = text
+            self.current_lines = new_lines
+            self._update_height()
+            self.update()
+
+    def set_lines(self, lines):
+        """Set multiple subtitle lines (e.g. when two segments overlap).
+        Each line is drawn on its own row, stacked vertically.
+        """
+        cleaned = [str(line or "").strip() for line in (lines or []) if str(line or "").strip()]
+        joined = "\n".join(cleaned)
+        if self.current_lines != cleaned or self.current_text != joined:
+            self.current_lines = cleaned
+            self.current_text = joined
+            self._update_height()
+            self.update()
+
+    def _update_height(self):
+        line_count = max(1, len(self.current_lines))
+        line_height = max(24, int(self.font_size * self.LINE_HEIGHT_FACTOR))
+        new_h = max(96, int(self.font_size * 4) + max(0, line_count - 1) * line_height)
+        if new_h != self.H:
+            self.H = new_h
             self.update()
 
     def set_style(self, font_name, font_size, font_color, outline_width=2, outline_color=None, background_box=None, background_color=None, single_line=None):
@@ -53,7 +79,7 @@ class _SubtitleOverlayWidget(QWidget):
             self.background_color = background_color
         if single_line is not None:
             self.single_line = bool(single_line)
-        self.H = max(96, int(font_size * 4))
+        self.H = max(96, int(self.font_size * 4) + max(0, len(self.current_lines) - 1) * int(self.font_size * self.LINE_HEIGHT_FACTOR))
         self.update()
 
     def set_alignment(self, alignment: str):
@@ -80,45 +106,56 @@ class _SubtitleOverlayWidget(QWidget):
             self.update()
 
     def paintEvent(self, event):
-        if not self.current_text and not self.isVisible():
+        if not self.current_text and not self.current_lines and not self.isVisible():
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(0, 0, float(self.W), float(self.H))
 
-        if self.current_text:
-            painter.setPen(self.font_color)
-            font = QFont(self.font_name)
-            font.setPixelSize(max(1, int(self.font_size)))
-            font.setBold(True)
-            painter.setFont(font)
-            flags = Qt.AlignCenter if self.single_line else (Qt.AlignCenter | Qt.TextWordWrap)
+        if not self.current_lines:
+            return
 
-            if self.background_box:
-                metrics = painter.fontMetrics()
-                text_rect = metrics.boundingRect(rect.toRect(), int(flags), self.current_text).adjusted(-18, -10, 18, 10)
-                text_rect = text_rect.intersected(rect.toRect().adjusted(4, 4, -4, -4))
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(self.background_color)
+        painter.setPen(self.font_color)
+        font = QFont(self.font_name)
+        font.setPixelSize(max(1, int(self.font_size)))
+        font.setBold(True)
+        painter.setFont(font)
+        line_height = max(24, int(self.font_size * self.LINE_HEIGHT_FACTOR))
+        wrap_flags = Qt.AlignCenter | Qt.TextWordWrap
+
+        line_rects: list[QRectF] = []
+        if len(self.current_lines) == 1:
+            line_rects = [rect]
+        else:
+            total_h = line_height * len(self.current_lines)
+            y0 = max(0.0, (rect.height() - total_h) / 2.0)
+            for i in range(len(self.current_lines)):
+                line_rects.append(QRectF(rect.x(), rect.y() + y0 + i * line_height, rect.width(), line_height))
+
+        if self.background_box:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self.background_color)
+            metrics = painter.fontMetrics()
+            for line_text, line_rect in zip(self.current_lines, line_rects):
+                text_rect = metrics.boundingRect(line_rect.toRect(), int(wrap_flags), line_text).adjusted(-18, -4, 18, 4)
+                text_rect = text_rect.intersected(line_rect.toRect().adjusted(4, 0, -4, 0))
                 painter.drawRoundedRect(QRectF(text_rect), 14, 14)
 
-            # Outline
-            if self.outline_width > 0:
-                painter.setPen(self.outline_color)
-                # Drawing offsets based on outline width
-                w = max(1.0, self.outline_width)
-                offsets = [
-                    (-w, 0), (w, 0), (0, -w), (0, w),
-                    (-w*0.7, -w*0.7), (w*0.7, -w*0.7),
-                    (-w*0.7, w*0.7), (w*0.7, w*0.7)
-                ]
+        if self.outline_width > 0:
+            w = max(1.0, self.outline_width)
+            offsets = [
+                (-w, 0), (w, 0), (0, -w), (0, w),
+                (-w*0.7, -w*0.7), (w*0.7, -w*0.7),
+                (-w*0.7, w*0.7), (w*0.7, w*0.7)
+            ]
+            painter.setPen(self.outline_color)
+            for line_text, line_rect in zip(self.current_lines, line_rects):
                 for dx, dy in offsets:
-                    painter.drawText(rect.translated(dx, dy), flags, self.current_text)
+                    painter.drawText(line_rect.translated(dx, dy), int(wrap_flags), line_text)
 
-            painter.setPen(self.font_color)
-            painter.drawText(rect, flags, self.current_text)
-        else:
-            return
+        painter.setPen(self.font_color)
+        for line_text, line_rect in zip(self.current_lines, line_rects):
+            painter.drawText(line_rect, int(wrap_flags), line_text)
 
 
 

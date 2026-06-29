@@ -552,6 +552,7 @@ def _build_karaoke_dialogue_events(
     custom_position_enabled: bool = False,
     custom_position_x: float = 50.0,
     custom_position_y: float = 86.0,
+    margin_v: int = 0,
 ) -> list[str]:
     source_text = text or ""
     segment_duration = max(0.1, float(end_seconds) - float(start_seconds))
@@ -571,7 +572,8 @@ def _build_karaoke_dialogue_events(
         custom_position_y=custom_position_y,
     )
     base_text = (rf"{{{position_tag}}}" if position_tag else "") + base_text
-    events = [f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{base_text}"]
+    mv = int(max(0, margin_v or 0))
+    events = [f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,{mv},,{base_text}"]
     if not mapped_words:
         return events
 
@@ -585,7 +587,7 @@ def _build_karaoke_dialogue_events(
             overlay_text = rf"{{{position_tag}}}" + overlay_text
         events.append(
             "Dialogue: 1,"
-            + f"{_seconds_to_ass(word_start)},{_seconds_to_ass(word_end)},Default,,0,0,0,,"
+            + f"{_seconds_to_ass(word_start)},{_seconds_to_ass(word_end)},Default,,0,0,{mv},,"
             + overlay_text
         )
 
@@ -732,6 +734,8 @@ def srt_to_ass(srt_path: str,
     )
 
     events = []
+    line_height = max(20, int(font_size * 1.4))
+    row_last_end: list[float] = []
     for event_index, m in enumerate(pattern.finditer(content.strip() + "\n\n")):
         start_seconds = _srt_time_to_seconds(m.group(1))
         end_seconds = _srt_time_to_seconds(m.group(2))
@@ -747,6 +751,23 @@ def srt_to_ass(srt_path: str,
         if single_line:
             raw_text = " ".join(part.strip() for part in raw_text.splitlines() if part.strip())
         style_key = (animation_style or "Static").strip().lower()
+
+        # Greedy row assignment: a segment goes to the first row whose
+        # last segment has already ended by the time this one starts. When
+        # two segments overlap, the later one gets a higher row index so it
+        # is drawn on a new line above the previous one.
+        row_index = 0
+        for r_idx, last_end in enumerate(row_last_end):
+            if last_end <= start_seconds:
+                row_index = r_idx
+                break
+        else:
+            row_index = len(row_last_end)
+            row_last_end.append(end_seconds)
+        if row_index < len(row_last_end):
+            row_last_end[row_index] = max(row_last_end[row_index], end_seconds)
+        row_margin_v = row_index * line_height
+
         if style_key == "word highlight karaoke":
             events.extend(
                 _build_karaoke_dialogue_events(
@@ -763,7 +784,8 @@ def srt_to_ass(srt_path: str,
                     custom_position_enabled=custom_position_enabled,
                     custom_position_x=custom_position_x,
                     custom_position_y=custom_position_y,
-    )
+                    margin_v=row_margin_v,
+                )
             )
             continue
 
@@ -789,7 +811,7 @@ def srt_to_ass(srt_path: str,
             custom_position_x=custom_position_x,
             custom_position_y=custom_position_y,
     )
-        events.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
+        events.append(f"Dialogue: 0,{start},{end},Default,,0,0,{row_margin_v},,{text}")
 
     with open(ass_path, 'w', encoding='utf-8-sig') as f:
         f.write(header)

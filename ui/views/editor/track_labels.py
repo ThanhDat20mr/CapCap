@@ -8,6 +8,7 @@ TRACK_ICONS: dict[str, str] = {
     "B1": "\u25a3",
     "A1": "\u266b",
     "A2": "\u266b",
+    "TS1": "T",
     "S1": "T",
     "M1": "\u25a0",
 }
@@ -16,6 +17,7 @@ AUDIO_PREFIXES = {"A1", "A2"}
 BLUR_PREFIXES = {"B1"}
 LOGO_PREFIXES = {"L1"}
 MASK_PREFIXES = {"M1"}
+SUBTITLE_PREFIXES = {"TS1", "S1"}
 
 
 class TrackLabelBar(QFrame):
@@ -290,6 +292,7 @@ class TrackLabelBar(QFrame):
             prefix = name.split(" ")[0] if name else ""
             palette = {"V1": QColor("#2a6bcf"), "B1": QColor("#6b5b7b"),
                        "A1": QColor("#2a9d3f"), "A2": QColor("#2a9d3f"),
+                       "TS1": QColor("#c96b2a"),
                        "S1": QColor("#c96b2a"),
                        "M1": QColor("#8c5a2a")}
             return palette.get(prefix, QColor("#6b8cb8"))

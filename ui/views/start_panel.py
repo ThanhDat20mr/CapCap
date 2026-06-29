@@ -425,6 +425,12 @@ def build_start_group(gui, left_layout):
     gui.voice_timing_sync_combo = QComboBox()
     gui.voice_timing_sync_combo.addItems(["Off", "Smart", "Force"])
     gui.voice_timing_sync_combo.setCurrentText("Smart")
+
+    def _sync_voice_speed_enabled(_value: str = ""):
+        mode = gui.voice_timing_sync_combo.currentText().strip().lower()
+        gui.voice_speed_spin.setEnabled(mode != "off")
+    gui.voice_timing_sync_combo.currentTextChanged.connect(_sync_voice_speed_enabled)
+    _sync_voice_speed_enabled()
     gui.audio_handling_combo = QComboBox()
     gui.audio_handling_combo.addItem("Fast (recommended)", "fast")
     gui.audio_handling_combo.addItem("Cleaner voice", "clean")

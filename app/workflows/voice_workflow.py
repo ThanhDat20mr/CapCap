@@ -1267,7 +1267,6 @@ class VoiceWorkflow:
     def _apply_deficit_timing_polish(self, *, segments, wavs, tmp_dir, sync_mode):
         polished_wavs = list(wavs or [])
         segments = list(segments or [])
-        total_shift_s = 0.0
         overlap_count = 0
         stretch_count = 0
         silence_count = 0
@@ -1282,16 +1281,7 @@ class VoiceWorkflow:
             ratio = (actual_d / target_d) if target_d > 0 else 1.0
 
             if ratio >= 1.0 or ratio <= 0.01:
-                if total_shift_s > 0:
-                    seg["start"] += total_shift_s
-                    seg["end"] += total_shift_s
                 continue
-
-            if total_shift_s > 0:
-                seg["start"] += total_shift_s
-                seg["end"] += total_shift_s
-                target_d = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
-                ratio = (actual_d / target_d) if target_d > 0 else 1.0
 
             gap_ms = int((target_d - actual_d) * 1000)
             if gap_ms <= 20:
@@ -1325,8 +1315,7 @@ class VoiceWorkflow:
         print(
             "[Voice Deficit] Summary: "
             f"overlap={overlap_count}, stretch={stretch_count}, "
-            f"silence_fade={silence_count}, no_action={no_action_count}, "
-            f"timeline_shift={total_shift_s:.2f}s"
+            f"silence_fade={silence_count}, no_action={no_action_count}"
         )
         return segments, polished_wavs
 
@@ -1350,6 +1339,45 @@ class VoiceWorkflow:
             )
             synced_wavs.append(fitted_path)
         return synced_wavs
+
+    def _extend_segment_ends_to_audio(self, *, segments, wavs) -> None:
+        """Extend each segment's `end` time to match the actual TTS wav
+        duration when the audio is longer than the original segment window.
+
+        The SRT shipped to the renderer reflects the original translated
+        times, which can be shorter than the Vietnamese TTS — particularly
+        when the user picked Off/Smart sync and the time-stretch bailed out
+        because the ratio was outside the safe range. In that case the
+        audio bleeds into the next segment's slot on the final track, but
+        the subtitle stack never fires because the SRT still says the
+        segment ends earlier than it actually does. To make the two match,
+        we push `seg["end"]` forward to `start + actual_wav_duration` when
+        the wav is longer than the segment window.
+
+        The next segment's start is NOT touched — the overlap is real and
+        the row-stacking feature will draw both lines on the burned-in
+        subtitle.
+
+        The original end is preserved in `seg["_original_end"]` so the
+        timeline visual can keep showing the original window while the
+        audio plays the full TTS duration.
+        """
+        for seg, wav_path in zip(segments, wavs or []):
+            if not wav_path or not os.path.exists(wav_path):
+                continue
+            actual_d = self._probe_wav_duration_seconds(wav_path)
+            if actual_d <= 0:
+                continue
+            try:
+                start_s = float(seg.get("start", 0.0))
+                end_s = float(seg.get("end", 0.0))
+            except (TypeError, ValueError):
+                continue
+            target_d = end_s - start_s
+            if actual_d > target_d + 0.01:
+                if "end" in seg and "_original_end" not in seg:
+                    seg["_original_end"] = end_s
+                seg["end"] = start_s + actual_d
 
     def _synthesize_segment_wavs(
         self,
@@ -1638,6 +1666,7 @@ class VoiceWorkflow:
             tmp_dir=tmp_dir,
             sync_mode=timing_sync_mode,
         )
+        self._extend_segment_ends_to_audio(segments=segments, wavs=wavs)
 
         synth_elapsed = time.perf_counter() - synth_started
         print(

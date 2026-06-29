@@ -8208,6 +8208,23 @@ class VideoTranslatorGUI(QMainWindow):
                 return idx
         return -1
 
+    def _find_active_segment_indices(self, position_ms: int, segments) -> list[int]:
+        """Return the indices of every segment whose [start, end] contains
+        position_ms. Multiple entries are returned when segments overlap in
+        time, so the live overlay can stack them on separate lines.
+        """
+        position_seconds = max(0.0, float(position_ms) / 1000.0)
+        result: list[int] = []
+        for idx, seg in enumerate(segments or []):
+            try:
+                start_s = float(seg.get("start", 0.0))
+                end_s = float(seg.get("end", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if start_s <= position_seconds <= end_s:
+                result.append(idx)
+        return result
+
     def _set_editor_highlight(self, editor, active_index: int):
         if not editor:
             return
@@ -8265,17 +8282,23 @@ class VideoTranslatorGUI(QMainWindow):
                 if getattr(self, "_preview_video_has_burned_subtitles", False):
                     self.video_view.subtitle_item.set_text("")
                     self.video_view.subtitle_item.hide()
-                elif 0 <= active_index < len(segments):
-                    self.video_view.subtitle_item.set_text(segments[active_index].get("text", ""))
-                    self.video_view.subtitle_item.show()
                 else:
-                    self.video_view.subtitle_item.set_text("")
-                    # Don't necessarily hide if we want to show the placeholder during style editing
-                    # but for now let's hide if no segment is active during playback
-                    if not self.media_player.is_playing():
-                         self.video_view.subtitle_item.show() # Show placeholder
+                    active_indices = self._find_active_segment_indices(position_ms, segments)
+                    if active_indices:
+                        active_lines = [segments[i].get("text", "") for i in active_indices]
+                        if len(active_lines) == 1:
+                            self.video_view.subtitle_item.set_text(active_lines[0])
+                        else:
+                            self.video_view.subtitle_item.set_lines(active_lines)
+                        self.video_view.subtitle_item.show()
                     else:
-                         self.video_view.subtitle_item.hide()
+                        self.video_view.subtitle_item.set_text("")
+                        # Don't necessarily hide if we want to show the placeholder during style editing
+                        # but for now let's hide if no segment is active during playback
+                        if not self.media_player.is_playing():
+                             self.video_view.subtitle_item.show() # Show placeholder
+                        else:
+                             self.video_view.subtitle_item.hide()
                 self.video_view.reposition_subtitle()
         except Exception as exc:
             self.log(f"[Preview] subtitle highlight skipped: {exc}")
@@ -8320,6 +8343,9 @@ class VideoTranslatorGUI(QMainWindow):
 
         self.extract_btn.setEnabled(v_ok)
         self.vocal_sep_btn.setEnabled(a_ok)
+        if hasattr(self, "voice_timing_sync_combo") and hasattr(self, "voice_speed_spin"):
+            mode = self.voice_timing_sync_combo.currentText().strip().lower()
+            self.voice_speed_spin.setEnabled(mode != "off")
         self.transcribe_btn.setEnabled(a_ok)
         self.translate_btn.setEnabled(bool(self.transcript_text.toPlainText().strip()))
         self.apply_translated_btn.setEnabled(has_translated_text)
@@ -9462,6 +9488,15 @@ class VideoTranslatorGUI(QMainWindow):
             action_taken = str((seg or {}).get("action_taken") or "").strip().lower()
             ratio = float((seg or {}).get("ratio") or 0.0)
             group_id = str((seg or {}).get("tts_group_id") or "").strip()
+            try:
+                new_start = float((seg or {}).get("start", 0.0))
+                new_end = float((seg or {}).get("end", 0.0))
+            except (TypeError, ValueError):
+                new_start = new_end = None
+            try:
+                new_original_end = float((seg or {}).get("_original_end")) if (seg or {}).get("_original_end") is not None else None
+            except (TypeError, ValueError):
+                new_original_end = None
             payload = {
                 "tts_text": tts_text,
                 "subtitle_vi": subtitle_vi,
@@ -9469,6 +9504,9 @@ class VideoTranslatorGUI(QMainWindow):
                 "action_taken": action_taken,
                 "ratio": ratio,
                 "attempt_count": int((seg or {}).get("attempt_count") or 1),
+                "start": new_start,
+                "end": new_end,
+                "_original_end": new_original_end,
             }
             if group_id:
                 grouped_updates[group_id] = payload
@@ -9496,7 +9534,43 @@ class VideoTranslatorGUI(QMainWindow):
             seg["action_taken"] = next_payload["action_taken"]
             seg["ratio"] = next_payload["ratio"]
             seg["attempt_count"] = next_payload["attempt_count"]
+            # Sync start/end from the voice workflow so the SRT reflects the
+            # actual TTS audio duration (see _extend_segment_ends_to_audio).
+            new_start = next_payload.get("start")
+            new_end = next_payload.get("end")
+            if new_start is not None and new_end is not None and new_end > new_start:
+                try:
+                    old_start = float(seg.get("start", 0.0))
+                    old_end = float(seg.get("end", 0.0))
+                except (TypeError, ValueError):
+                    old_start = old_end = None
+                if old_start is not None and old_end is not None:
+                    if abs(new_start - old_start) > 0.01 or abs(new_end - old_end) > 0.01:
+                        seg["start"] = new_start
+                        seg["end"] = new_end
+                        updated = True
+            new_original_end = next_payload.get("_original_end")
+            if new_original_end is not None:
+                seg["_original_end"] = new_original_end
         return updated
+
+    def _regenerate_translated_srt_from_segments(self):
+        """Regenerate the project SRT from current_translated_segments.
+        Called after the voice workflow extends a segment's end time to
+        match the actual TTS audio duration, so the burned-in subtitle and
+        the rendered audio stay in sync.
+        """
+        out_path = str(getattr(self, "last_translated_srt_path", "") or "").strip()
+        if not out_path:
+            return
+        try:
+            from subtitle_builder import generate_srt
+            generate_srt(self.current_translated_segments, out_path)
+        except Exception as exc:
+            print(f"[Voice] SRT regen failed: {exc}")
+            return
+        self.processed_artifacts["srt_translated"] = out_path
+        self.persist_translation_project_data(self.current_translated_segments, out_path)
 
     def on_voiceover_finished(self, voice_track, mixed, voice_segments, error):
         if hasattr(self, "voiceover_btn"):
@@ -9539,6 +9613,10 @@ class VideoTranslatorGUI(QMainWindow):
                 )
             self._sync_timeline_mute_to_gui()
             self.persist_current_timeline_project_data()
+            # Regenerate the project SRT from the updated segments so it
+            # reflects the actual TTS audio duration (e.g. when a segment
+            # was extended in voice_workflow._extend_segment_ends_to_audio).
+            self._regenerate_translated_srt_from_segments()
             self.schedule_live_subtitle_preview_refresh()
             self.sync_segment_editor_rows()
         if self.current_project_state:

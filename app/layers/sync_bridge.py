@@ -38,10 +38,14 @@ def sync_segments_to_subtitle_layers(
     timeline: Timeline,
     segments: list[dict[str, Any]],
 ) -> None:
-    """Convert flat segment dicts to SubtitleLayers on the S1 subtitle track.
+    """Convert flat segment dicts to SubtitleLayers on the single TS1
+    subtitle track.
 
     Pipeline writes flat segments -> this makes them visible on timeline.
-    Overlapping segments spill to subtitle-2, subtitle-3 etc.
+    All segments go on the same TS1 track. Overlapping segments stack
+    visually (the row-stacking feature renders them on separate lines in
+    the burned-in subtitle and live overlay); they stay as separate layers
+    on the same TS1 track so the user sees every segment in the timeline.
 
     Each layer's `metadata["_seg_index"]` stores the original (unsorted)
     index in the input `segments` list, so clicking a layer in the timeline
@@ -56,64 +60,33 @@ def sync_segments_to_subtitle_layers(
     # Sort by start time
     indexed.sort(key=lambda kv: float(kv[1].get("start", 0)))
 
-    # Gather existing subtitle tracks, clear their layers
+    # Gather existing subtitle tracks, clear their layers, drop extras.
     sub_tracks: list[Track] = []
     for t in timeline.tracks:
         if t.type == LayerType.SUBTITLE:
             t.layers.clear()
             sub_tracks.append(t)
-    # Use first subtitle track as primary, create more if needed
-    primary = sub_tracks[0] if sub_tracks else find_or_create_track(timeline, "S1", LayerType.SUBTITLE, 100)
-    if primary not in sub_tracks:
-        sub_tracks.append(primary)
-    # Remove extra subtitle tracks beyond first
+    # Remove extra subtitle tracks beyond first — we keep only TS1.
     for t in sub_tracks[1:]:
         timeline.tracks.remove(t)
 
-    idx_counter = 0
-    active_tracks: list[Track] = [primary]
+    primary = sub_tracks[0] if sub_tracks else find_or_create_track(timeline, "TS1", LayerType.SUBTITLE, 100)
 
     for orig_idx, d in indexed:
         start = float(d.get("start", 0))
         end = float(d.get("end", 0))
         text = _get_segment_text(d)
 
-        placed = False
-        for track in active_tracks:
-            overlaps = any(start < l.end and end > l.start for l in track.layers)
-            if not overlaps:
-                layer = SubtitleLayer(
-                    name=f"Sub {idx_counter + 1}",
-                    text=text,
-                    start=start, end=end,
-                )
-                layer.z_index = idx_counter
-                # Store dict metadata so sync_layers_to_segments can reconstruct
-                layer.metadata["_seg_dict"] = {k: v for k, v in d.items() if k != "text"}
-                layer.metadata["_seg_index"] = int(orig_idx)
-                track.layers.append(layer)
-                idx_counter += 1
-                placed = True
-                break
-
-        if not placed:
-            track = Track(
-                name=f"Subtitles {len(active_tracks) + 1}",
-                type=LayerType.SUBTITLE,
-                height=100,
-            )
-            timeline.tracks.append(track)
-            active_tracks.append(track)
-            layer = SubtitleLayer(
-                name=f"Sub {idx_counter + 1}",
-                text=text,
-                start=start, end=end,
-            )
-            layer.z_index = idx_counter
-            layer.metadata["_seg_dict"] = {k: v for k, v in d.items() if k != "text"}
-            layer.metadata["_seg_index"] = int(orig_idx)
-            track.layers.append(layer)
-            idx_counter += 1
+        layer = SubtitleLayer(
+            name=f"Sub {orig_idx + 1}",
+            text=text,
+            start=start, end=end,
+        )
+        layer.z_index = orig_idx
+        # Store dict metadata so sync_layers_to_segments can reconstruct
+        layer.metadata["_seg_dict"] = {k: v for k, v in d.items() if k != "text"}
+        layer.metadata["_seg_index"] = int(orig_idx)
+        primary.layers.append(layer)
 
 
 def sync_layers_to_segments(timeline: Timeline) -> list[dict[str, Any]]:
@@ -192,7 +165,7 @@ def sync_tts_to_audio_layers(
     a2 = find_or_create_track(timeline, "A2 Dub", LayerType.AUDIO, 80)
     a2.layers.clear()
 
-    dub_segs: list[tuple[float, float, int]] = []
+    dub_segs: list[tuple[float, float, float, int]] = []
     if segments:
         for seg_idx, d in enumerate(segments):
             try:
@@ -202,6 +175,16 @@ def sync_tts_to_audio_layers(
                 continue
             if seg_end <= seg_start:
                 continue
+            # Use the original (pre-extension) end for the visual layer so
+            # overlapping dubs stay as separate clips on the same A2 Dub
+            # track. The actual audio plays the full TTS duration, which
+            # may extend past the visual end.
+            try:
+                visual_end = float(d.get("_original_end", seg_end))
+            except (TypeError, ValueError):
+                visual_end = seg_end
+            if visual_end <= seg_start:
+                visual_end = seg_end
             has_dub = bool(
                 d.get("dubbing_vi")
                 or d.get("tts_text")
@@ -209,7 +192,7 @@ def sync_tts_to_audio_layers(
                 or d.get("voice_edited")
             )
             if has_dub:
-                dub_segs.append((seg_start, seg_end, seg_idx))
+                dub_segs.append((seg_start, visual_end, seg_end, seg_idx))
 
     if not dub_segs:
         dur = end if end > 0 else timeline.duration if timeline.duration > 0 else 10.0
@@ -223,18 +206,21 @@ def sync_tts_to_audio_layers(
         return
 
     dub_segs.sort(key=lambda x: x[0])
-    for idx, (seg_start, seg_end, seg_idx) in enumerate(dub_segs, start=1):
+    for idx, (seg_start, visual_end, audio_end, seg_idx) in enumerate(dub_segs, start=1):
         layer = AudioLayer(
             name=f"Dub {idx}",
             source=voice_track_path,
             start=seg_start,
-            end=seg_end,
+            end=visual_end,
             volume=1.0,
         )
         # Store the original segment index so clicking this layer in
         # the timeline can map back to the matching subtitle segment
         # (and update the Dub Voice inspector content).
         layer.metadata["_seg_index"] = int(seg_idx)
+        # Remember the audio end so the audio renderer (build_voice_track
+        # in audio_mixer) can play the full TTS wav if needed.
+        layer.metadata["_audio_end"] = float(audio_end)
         a2.layers.append(layer)
 
 

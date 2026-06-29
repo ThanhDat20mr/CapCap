@@ -26,8 +26,9 @@ class EditorTimeline(QGraphicsView):
     RULER_HEIGHT = 30
     TRACK_HEADER_W = 0
     TRACK_LABEL_H = 24
-    TRACK_MIN_H = 40
-    TRACK_DEFAULT_H = 80
+    TRACK_MIN_H = 32
+    TRACK_DEFAULT_H = 56
+    CHILD_TRACK_H = 36
     CHROME_H = 24
     HANDLE_W = 8
     MIN_DUR = 0.1
@@ -376,16 +377,20 @@ class EditorTimeline(QGraphicsView):
             self._track_heights[track.id] = self._compute_track_height(track)
 
     def _compute_track_height(self, track) -> int:
-        """Compute a track's height. Blur tracks give each layer
-        the full base height as its own row (Blur 1 and Blur 2 can
-        overlap in time, so they need vertical separation). Other
-        tracks use a single base row; their layers are drawn as
-        side-by-side segments in that row.
+        """Compute a track's height. Blur tracks allocate one full base
+        slot per visible layer. Subtitle and dub tracks (overlap-stacked)
+        use the same CHILD_TRACK_H slot for every row — primary and
+        overlap-child rows are equally small — so the whole track stays
+        compact.
         """
         base = int(getattr(track, "height", None) or self.TRACK_DEFAULT_H)
         if self._is_blur_track(track):
             num_layers = max(1, len([l for l in track.layers if l.visible]))
             return base * num_layers
+        if self._should_overlap_stack(track):
+            visible = [l for l in track.layers if l.visible]
+            _, num_rows = self._compute_overlap_rows(visible)
+            return self.CHILD_TRACK_H * max(1, num_rows)
         return base
 
     @staticmethod
@@ -396,6 +401,60 @@ class EditorTimeline(QGraphicsView):
             return True
         return any(getattr(l, "type", None) == LayerType.BLUR
                    for l in getattr(track, "layers", []))
+
+    @staticmethod
+    def _is_subtitle_track(track) -> bool:
+        return any(getattr(l, "type", None) == LayerType.SUBTITLE
+                   for l in getattr(track, "layers", []))
+
+    @staticmethod
+    def _is_dub_track(track) -> bool:
+        name = (track.name or "").lower()
+        prefix = name.split(" ")[0] if name else ""
+        if prefix == "a2":
+            return True
+        return False
+
+    @classmethod
+    def _should_overlap_stack(cls, track) -> bool:
+        """True for tracks whose overlapping layers should stack vertically
+        inside the same track (TS1 subtitle, A2 Dub). The track stays a
+        single row visually only for non-overlapping layers; overlaps
+        spill onto additional child rows within the track.
+        """
+        return cls._is_subtitle_track(track) or cls._is_dub_track(track)
+
+    @staticmethod
+    def _compute_overlap_rows(visible_layers):
+        """Greedy overlap-aware row assignment.
+
+        Returns (layer_rows, num_rows) where layer_rows is a list of
+        row indices (0-based) in the same order as visible_layers.
+        A new row is started only when a layer overlaps with every
+        existing row's last segment. Used for subtitle tracks so
+        overlapping Sub N layers stack vertically inside the same TS1
+        track, mirroring how Blur 1 and Blur 2 stack inside B1.
+        """
+        rows: list[float] = []
+        layer_rows: list[int] = []
+        for layer in visible_layers:
+            try:
+                start = float(getattr(layer, "start", 0.0))
+                end = float(getattr(layer, "end", 0.0))
+            except (TypeError, ValueError):
+                start = end = 0.0
+            row_index = 0
+            for r_idx, last_end in enumerate(rows):
+                if last_end <= start:
+                    row_index = r_idx
+                    break
+            else:
+                row_index = len(rows)
+                rows.append(end)
+            if row_index < len(rows):
+                rows[row_index] = max(rows[row_index], end)
+            layer_rows.append(row_index)
+        return layer_rows, len(rows)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -510,15 +569,38 @@ class EditorTimeline(QGraphicsView):
         margin = 4
         view_w = self.viewport().width()
         is_blur = self._is_blur_track(track)
+        overlap_stack = self._should_overlap_stack(track)
         visible_layers = [l for l in track.layers if l.visible]
-        num_layers = max(1, len(visible_layers))
-        row_h = (h - margin * 2) / num_layers if num_layers > 0 else h
+        if overlap_stack:
+            layer_rows, num_rows = self._compute_overlap_rows(visible_layers)
+            num_rows = max(1, num_rows)
+            # All rows (primary + overlap-child) share the same small
+            # CHILD_TRACK_H height so the whole track stays compact.
+            row_slots: list[tuple[int, int]] = []
+            cursor = y + margin
+            for r in range(num_rows):
+                row_slots.append((cursor, self.CHILD_TRACK_H))
+                cursor += self.CHILD_TRACK_H
+        else:
+            num_layers = max(1, len(visible_layers))
+            row_h = (h - margin * 2) / num_layers if num_layers > 0 else h
         for row_index, layer in enumerate(track.layers):
             if not layer.visible:
                 continue
             x = int(layer.start * self.pixels_per_second) - scroll_x
             w = max(int(layer.duration * self.pixels_per_second), 20)
-            if is_blur:
+            if overlap_stack:
+                # Look up the row assigned to this layer in the visible
+                # list (it was indexed in start-time order by
+                # _compute_overlap_rows).
+                try:
+                    visible_idx = visible_layers.index(layer)
+                    row = layer_rows[visible_idx]
+                except ValueError:
+                    row = 0
+                bar_y, slot_h = row_slots[row]
+                bar_h = max(slot_h - margin * 2, 8)
+            elif is_blur:
                 visible_count = sum(1 for l in track.layers[:track.layers.index(layer) + 1] if l.visible)
                 z = max(0, visible_count - 1)
                 z = min(z, num_layers - 1)
@@ -681,6 +763,32 @@ class EditorTimeline(QGraphicsView):
             visible_layers = [l for l in track.layers if l.visible]
             num_layers = max(1, len(visible_layers))
             is_blur = self._is_blur_track(track)
+            overlap_stack = self._should_overlap_stack(track)
+            if overlap_stack and num_layers > 1:
+                layer_rows, num_rows = self._compute_overlap_rows(visible_layers)
+                num_rows = max(1, num_rows)
+                # All rows are the same CHILD_TRACK_H tall. Recompute the
+                # same Y positions the painter uses.
+                row_slots: list[tuple[int, int]] = []
+                cursor = y + margin
+                for r in range(num_rows):
+                    row_slots.append((cursor, self.CHILD_TRACK_H))
+                    cursor += self.CHILD_TRACK_H
+                row = -1
+                for r, (slot_y, slot_h) in enumerate(row_slots):
+                    if slot_y <= click_y <= slot_y + slot_h:
+                        row = r
+                        break
+                if row < 0:
+                    return ""
+                for visible_idx, layer in enumerate(visible_layers):
+                    if layer_rows[visible_idx] != row:
+                        continue
+                    lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
+                    lw = max(int(layer.duration * self.pixels_per_second), 20)
+                    if lx - 4 <= pos.x() <= lx + lw + 4:
+                        return layer.id
+                return ""
             if is_blur and num_layers > 1:
                 row_h = (th - margin * 2) / num_layers
                 rel_y = click_y - y - margin
