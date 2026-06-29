@@ -690,7 +690,6 @@ class PreviewController:
                     self.gui.video_view.set_preview_scale_mode(self.gui.get_output_scale_mode_key())
                 self.gui.media_player.setSource(QUrl.fromLocalFile(video_path))
                 self.gui.sync_live_subtitle_preview()
-                self.gui._refresh_preview_audio_controls()
                 self.gui.refresh_ui_state()
             except Exception:
                 pass
@@ -813,7 +812,6 @@ class PreviewController:
             else:
                 self.gui.sync_live_subtitle_preview()
             self.gui.sync_preview_audio_track_to_output(apply_to_player=False)
-            self.gui._refresh_preview_audio_controls()
             if getattr(self.gui, "_play_video_filter_preview_when_ready", False):
                 self.gui._play_video_filter_preview_when_ready = False
                 self.gui.media_player.play()

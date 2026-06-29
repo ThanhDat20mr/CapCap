@@ -1904,7 +1904,6 @@ class VideoTranslatorGUI(QMainWindow):
         self._preview_audio_track_mode = target_mode
 
         if not apply_to_player or not getattr(self, "media_player", None):
-            self._refresh_preview_audio_controls()
             return
 
         source_video = self._resolve_preview_original_video_path()
@@ -1916,7 +1915,6 @@ class VideoTranslatorGUI(QMainWindow):
         if should_apply:
             self._apply_preview_audio_track_selection()
             return
-        self._refresh_preview_audio_controls()
 
     def _apply_preview_audio_track_selection(self):
         if (
@@ -1927,7 +1925,6 @@ class VideoTranslatorGUI(QMainWindow):
             return
         source_video = self._resolve_preview_original_video_path()
         if not source_video:
-            self._refresh_preview_audio_controls()
             return
 
         # Always load BOTH the original audio file (extracted audio) and
@@ -1974,7 +1971,6 @@ class VideoTranslatorGUI(QMainWindow):
                 self.media_player.set_audio_file(dubbed_audio)
             else:
                 self.media_player.clear_audio()
-            self._apply_preview_audio_state()
             if current_position > 0:
                 try:
                     self.media_player.setPosition(current_position)
@@ -2002,7 +1998,6 @@ class VideoTranslatorGUI(QMainWindow):
         finally:
             self._preview_audio_track_switching = False
         self.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
-        self._refresh_preview_audio_controls()
 
     def _resolve_preview_original_audio_path(self) -> str:
         """Resolve the original audio file path (separate from source video).
@@ -2332,8 +2327,6 @@ class VideoTranslatorGUI(QMainWindow):
         self.sync_live_subtitle_preview()
         if hasattr(self, "timeline"):
             self.timeline.set_playing(False)
-        if hasattr(self, "_refresh_preview_audio_controls"):
-            self._refresh_preview_audio_controls()
         self.refresh_ui_state()
 
     def _can_auto_render_filter_preview(self):
@@ -5734,7 +5727,6 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "track_label_bar"):
             self.track_label_bar.set_muted(track_name, muted)
 
-        self._refresh_preview_audio_controls()
         self.schedule_timeline_visual_refresh(waveform=True, thumbnails=False)
 
     def on_track_blur_toggled(self, track_name: str, is_on: bool):
@@ -7043,7 +7035,6 @@ class VideoTranslatorGUI(QMainWindow):
             self.media_player.pause()
             if hasattr(self, "timeline"):
                 self.timeline.set_playing(False)
-            self._refresh_preview_audio_controls()
         self.audio_preview_player.stop()
         self.audio_preview_player.setSource(QUrl.fromLocalFile(audio_path))
         self.audio_preview_player.play()
@@ -7113,7 +7104,6 @@ class VideoTranslatorGUI(QMainWindow):
         # rendering artifacts at the toggle position.
         self._sync_blur_controls()
         self.persist_project_blur_state()
-        self._refresh_preview_audio_controls()
         # Sync the B1 track label so the ON/OFF indicator matches
         if hasattr(self, "track_label_bar"):
             try:
@@ -8859,12 +8849,13 @@ class VideoTranslatorGUI(QMainWindow):
         provider_layout.addWidget(provider_label)
         provider_combo = QComboBox(dialog)
         provider_combo.addItem("Google Translate (free, no key)", "google")
-        provider_combo.addItem("OpenAI (Google AI Studio)", "openai")
+        provider_combo.addItem("Gemini (Google AI Studio)", "gemini")
+        provider_combo.addItem("OpenAI", "openai")
         provider_combo.addItem("Ollama (Local)", "ollama")
         if not cpu_mode:
             provider_combo.addItem("Local (GGUF)", "local")
         current_provider = (os.getenv("OPENAI_PROVIDER") or "google").strip().lower()
-        if current_provider not in {"google", "openai", "ollama", "local"}:
+        if current_provider not in {"google", "gemini", "openai", "ollama", "local"}:
             current_provider = "local"
         if cpu_mode and current_provider == "local":
             current_provider = "google"
@@ -8960,12 +8951,13 @@ class VideoTranslatorGUI(QMainWindow):
         def update_provider_fields():
             p = provider_combo.currentData()
             is_ai = p != "google"
+            is_gemini = p == "gemini"
             is_openai = p == "openai"
             is_local = p == "local"
             is_google = p == "google"
             _toggle_visible(style_label, not remote_mode and is_ai)
             _toggle_visible(style_edit, not remote_mode and is_ai)
-            _toggle_visible(key_section_widget, is_openai)
+            _toggle_visible(key_section_widget, is_gemini or is_openai)
             _toggle_visible(local_model_label, not remote_mode and is_local and not cpu_mode)
             _toggle_visible(local_model_combo, not remote_mode and is_local and not cpu_mode)
             _toggle_visible(local_model_note, not remote_mode and is_local and not cpu_mode)
@@ -8980,10 +8972,20 @@ class VideoTranslatorGUI(QMainWindow):
                 key_edit.clear()
                 model_edit.clear()
                 base_url_edit.clear()
+            elif is_gemini:
+                model_label.setText("AI Model:")
+                if not base_url_edit.text().strip() or base_url_edit.text().strip() == "https://api.openai.com/v1/":
+                    base_url_edit.setText("https://generativelanguage.googleapis.com/v1beta/openai/")
+                if not model_edit.text().strip():
+                    model_edit.setText("gemma-4-31b-it")
+                provider_hint.setText("Get an API key at https://aistudio.google.com/apikey")
             elif is_openai:
                 model_label.setText("AI Model:")
-                base_url_edit.setText("https://generativelanguage.googleapis.com/v1beta/openai/")
-                provider_hint.setText("Get an API key at https://aistudio.google.com/apikey")
+                if not base_url_edit.text().strip() or base_url_edit.text().strip() == "https://generativelanguage.googleapis.com/v1beta/openai/":
+                    base_url_edit.setText("https://api.openai.com/v1/")
+                if not model_edit.text().strip():
+                    model_edit.setText("gpt-4o-mini")
+                provider_hint.setText("Get an API key at https://platform.openai.com/api-keys")
             elif p == "ollama":
                 model_label.setText("AI Model:")
                 base_url_edit.setText("http://localhost:11434/v1")
@@ -9145,6 +9147,14 @@ class VideoTranslatorGUI(QMainWindow):
                     "OPENAI_MODEL": "",
                     "OPENAI_BASE_URL": "",
                 }
+            elif new_provider == "gemini":
+                updates = {
+                    "AI_POLISHER_PROVIDER": "gemini",
+                    "OPENAI_PROVIDER": "gemini",
+                    "OPENAI_API_KEY": new_key,
+                    "OPENAI_MODEL": new_model or "gemma-4-31b-it",
+                    "OPENAI_BASE_URL": new_base_url or "https://generativelanguage.googleapis.com/v1beta/openai/",
+                }
             elif new_provider == "ollama":
                 updates = {
                     "AI_POLISHER_PROVIDER": "gemini",
@@ -9172,8 +9182,8 @@ class VideoTranslatorGUI(QMainWindow):
                     "AI_POLISHER_PROVIDER": "gemini",
                     "OPENAI_PROVIDER": "openai",
                     "OPENAI_API_KEY": new_key,
-                    "OPENAI_MODEL": new_model,
-                    "OPENAI_BASE_URL": new_base_url or "https://generativelanguage.googleapis.com/v1beta/openai/",
+                    "OPENAI_MODEL": new_model or "gpt-4o-mini",
+                    "OPENAI_BASE_URL": new_base_url or "https://api.openai.com/v1/",
                 }
         
         updates.update(_engine_updates)
@@ -9217,15 +9227,15 @@ class VideoTranslatorGUI(QMainWindow):
     def setup_media_player(self):
         if getattr(self, "_media_backend_ready", False):
             return
-        previous_volume = getattr(self, "_preview_volume", 100)
-        previous_muted = getattr(self, "_preview_muted", False)
         previous_speed = getattr(self, "_preview_speed", 1.0)
         setup_media_player_impl(self)
-        self._preview_volume = previous_volume
-        self._preview_muted = previous_muted
         self._preview_speed = previous_speed
         self._media_backend_ready = True
-        self._apply_preview_audio_state()
+        if hasattr(self, "media_player"):
+            try:
+                self.media_player.set_playback_rate(previous_speed)
+            except Exception:
+                pass
 
     def browse_video(self):
         browse_video_impl(self)
@@ -9395,7 +9405,6 @@ class VideoTranslatorGUI(QMainWindow):
         try:
             self.media_player.pause()
             self.timeline.set_playing(False)
-            self._refresh_preview_audio_controls()
         except Exception:
             pass
 
@@ -9971,42 +9980,6 @@ class VideoTranslatorGUI(QMainWindow):
     def update_duration_label(self, current, total):
         update_duration_label_impl(self, current, total)
 
-    def _apply_preview_audio_state(self):
-        if not hasattr(self, "media_player"):
-            return
-        try:
-            self.media_player.set_volume(getattr(self, "_preview_volume", 100))
-        except Exception:
-            pass
-        # Per-track mute is owned by the timeline (A1/A2). Re-apply the
-        # current per-track mute states so the backend reflects them.
-        try:
-            mute_original = bool(getattr(self, "_mute_original", False))
-            mute_dubbed = bool(getattr(self, "_mute_dubbed", False))
-            if hasattr(self.media_player, "set_mute_original"):
-                self.media_player.set_mute_original(mute_original)
-            if hasattr(self.media_player, "set_mute_dubbed"):
-                self.media_player.set_mute_dubbed(mute_dubbed)
-        except Exception:
-            pass
-        try:
-            self.media_player.set_playback_rate(getattr(self, "_preview_speed", 1.0))
-        except Exception:
-            pass
-        self._refresh_preview_audio_controls()
-
-    def _refresh_preview_audio_controls(self):
-        if hasattr(self, "preview_volume_label"):
-            label = f"{int(getattr(self, '_preview_volume', 100))}%"
-            if getattr(self, "_preview_muted", False):
-                label += " muted"
-            self.preview_volume_label.setText(label)
-        if hasattr(self, "preview_mute_btn"):
-            icon_name = "volume_down.svg" if getattr(self, "_preview_muted", False) else "volume_mute.svg"
-            icon_path = asset_path("icons", icon_name)
-            self.preview_mute_btn.setIcon(load_icon(icon_path, 18))
-        self.refresh_play_button_icon()
-
     def refresh_play_button_icon(self):
         """Update the play button icon + tooltip to reflect the current
         media player state (playing vs paused). Called from
@@ -10059,49 +10032,20 @@ class VideoTranslatorGUI(QMainWindow):
                 combo.blockSignals(False)
             combo.setEnabled(combo.count() > 1 and getattr(self, "media_player", None) is not None and getattr(self.media_player, "backend_name", "") == "libmpv")
 
-    def preview_volume_down(self):
-        self._preview_volume = max(0, int(getattr(self, "_preview_volume", 100)) - 10)
-        self._preview_muted = self._preview_volume == 0
-        self._apply_preview_audio_state()
-
-    def preview_volume_up(self):
-        self._preview_volume = min(200, int(getattr(self, "_preview_volume", 100)) + 10)
-        if self._preview_volume > 0:
-            self._preview_muted = False
-        self._apply_preview_audio_state()
-
-    def toggle_preview_mute(self):
-        """Legacy global mute: toggle muting BOTH tracks together."""
-        was_muted = bool(getattr(self, "_mute_original", False)) and bool(getattr(self, "_mute_dubbed", False))
-        new_state = not was_muted
-        self._mute_original = new_state
-        self._mute_dubbed = new_state
-        self._preview_muted = new_state
-        if hasattr(self, "media_player"):
-            try:
-                self.media_player.set_mute_original(new_state)
-                self.media_player.set_mute_dubbed(new_state)
-            except Exception:
-                pass
-        # Sync timeline track mute visuals
-        if hasattr(self, "timeline") and self.timeline._timeline:
-            for t in self.timeline._timeline.tracks:
-                if t.name in ("A1 Audio", "A2 Dub"):
-                    t.muted = new_state
-        if hasattr(self, "track_label_bar"):
-            self.track_label_bar.set_muted("A1 Audio", new_state)
-            self.track_label_bar.set_muted("A2 Dub", new_state)
-        self._refresh_preview_audio_controls()
-
     def on_preview_speed_changed(self, index: int):
         if not hasattr(self, "preview_speed_combo"):
             return
         rate = self.preview_speed_combo.itemData(index)
         try:
-            self._preview_speed = float(rate or 1.0)
+            new_rate = float(rate or 1.0)
         except Exception:
-            self._preview_speed = 1.0
-        self._apply_preview_audio_state()
+            new_rate = 1.0
+        self._preview_speed = new_rate
+        if hasattr(self, "media_player"):
+            try:
+                self.media_player.set_playback_rate(new_rate)
+            except Exception:
+                pass
 
 
 def _relaunch_launcher():

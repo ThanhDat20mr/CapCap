@@ -124,8 +124,6 @@ def toggle_play(gui):
                     gui._apply_mask_to_preview(force=True)
                 except Exception:
                     pass
-        if hasattr(gui, "_refresh_preview_audio_controls"):
-            gui._refresh_preview_audio_controls()
     except Exception as exc:
         if hasattr(gui, "log"):
             gui.log(f"[Preview] toggle play failed: {exc}")
@@ -145,8 +143,6 @@ def stop_video(gui):
         gui._sync_blur_controls()
     gui.timeline.set_playing(False)
     gui.schedule_seek_frame_preview()
-    if hasattr(gui, "_refresh_preview_audio_controls"):
-        gui._refresh_preview_audio_controls()
 
 
 def position_changed(gui, position):
@@ -343,8 +339,6 @@ def browse_video(gui):
     QTimer.singleShot(220, gui.video_view.reposition_subtitle)
     gui.refresh_ui_state()
     gui.sync_live_subtitle_preview()
-    if hasattr(gui, "_refresh_preview_audio_controls"):
-        gui._refresh_preview_audio_controls()
 
 
 def update_frame_preview_thumbnail(gui, image_path: str, qpixmap_cls, qt):

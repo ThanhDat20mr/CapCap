@@ -93,7 +93,7 @@ class PipelineController:
         self._stop_prepare_status_polling()
         self.prepare_status_phase = ""
         timer = QTimer(self.gui)
-        timer.setInterval(500)
+        timer.setInterval(10000)
         timer.timeout.connect(self._poll_prepare_status)
         self.prepare_status_timer = timer
         timer.start()

@@ -259,7 +259,7 @@ class TranslationOrchestrator:
 
     def _describe_ai_provider(self, provider_type: str) -> str:
         if provider_type == "gemini":
-            return f"OpenAI ({self.gemini_polisher.model_name})"
+            return f"Gemini ({self.gemini_polisher.model_name})"
         if provider_type == "local":
             return f"Local GGUF ({os.path.basename(self.local_polisher.model_path)})"
         return f"Local GGUF ({os.path.basename(self.local_polisher.model_path)})"

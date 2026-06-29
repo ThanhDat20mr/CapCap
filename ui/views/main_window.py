@@ -198,12 +198,6 @@ def _connect_ui_signals(gui):
     if hasattr(gui, "output_quality_combo"):
         gui.output_quality_combo.currentIndexChanged.connect(gui.refresh_ui_state)
     gui.audio_handling_combo.currentTextChanged.connect(gui.refresh_ui_state)
-    if hasattr(gui, "preview_volume_down_btn"):
-        gui.preview_volume_down_btn.clicked.connect(gui.preview_volume_down)
-    if hasattr(gui, "preview_volume_up_btn"):
-        gui.preview_volume_up_btn.clicked.connect(gui.preview_volume_up)
-    if hasattr(gui, "preview_mute_btn"):
-        gui.preview_mute_btn.clicked.connect(gui.toggle_preview_mute)
     if hasattr(gui, "audio_inspector_volume_slider"):
         gui.audio_inspector_volume_slider.valueChanged.connect(
             gui.on_audio_inspector_volume_changed
@@ -371,7 +365,6 @@ def _initialize_ui_state(gui):
     gui.last_exact_preview_frame_path = ""
     gui._preview_video_has_burned_subtitles = False
     gui._preview_audio_track_mode = "both"
-    gui._preview_muted = False
     gui._mute_original = False
     gui._mute_dubbed = False
     gui._preview_audio_track_switching = False
