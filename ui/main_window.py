@@ -1616,7 +1616,7 @@ class VideoTranslatorGUI(QMainWindow):
         box.setWindowTitle("Missing Resources")
         box.setText(f"{action_label} cannot start because some required resources are missing.")
         box.setInformativeText(
-            "Open Manage Resources and download the missing items:\n\n"
+            "Open Manage Resources for download links and target folders:\n\n"
             f"{missing_lines}"
         )
         open_btn = box.addButton("Manage Resources", QMessageBox.AcceptRole)
@@ -8999,10 +8999,10 @@ class VideoTranslatorGUI(QMainWindow):
                 selected_tier = str(local_model_combo.currentData() or "normal").strip().lower()
                 if selected_tier == "high":
                     model_edit.setText("models/ai/gemma-4-E4B-it-Q4_K_M.gguf")
-                    provider_hint.setText("Download Gemma 4 GGUF from Manage Resources. High Quality needs a better GPU.")
+                    provider_hint.setText("Place Gemma 4 GGUF into models/ai/. See Manage Resources for the download link. High Quality needs a better GPU.")
                 else:
                     model_edit.setText("models/ai/Hy-MT2-1.8B-Q4_K_M.gguf")
-                    provider_hint.setText("Download Hy-MT2 GGUF from Manage Resources. Normal Quality is the default lighter model.")
+                    provider_hint.setText("Place Hy-MT2 GGUF into models/ai/. See Manage Resources for the download link. Normal Quality is the default lighter model.")
             model_edit.setReadOnly(is_local)
             dialog.layout().invalidate()
             dialog.adjustSize()

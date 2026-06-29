@@ -143,6 +143,9 @@ class ProjectCard(QFrame):
         self._update_thumb()
 
     def mousePressEvent(self, event):
+        if not self.isEnabled():
+            event.ignore()
+            return
         self.window().selected_video = self.video_path
         self.window().accept()
 
@@ -198,6 +201,7 @@ class LauncherWindow(QDialog):
 
         self._build_ui()
         QTimer.singleShot(0, self._load_recent)
+        QTimer.singleShot(0, self._validate_resources_for_device)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -221,6 +225,15 @@ class LauncherWindow(QDialog):
         gpu_label = QLabel(gpu_info)
         gpu_label.setStyleSheet("font-size: 11px; color: #5a7a9a;")
         header_text.addWidget(gpu_label)
+
+        self._missing_label = QLabel("", self)
+        self._missing_label.setWordWrap(True)
+        self._missing_label.setStyleSheet(
+            "font-size: 11px; color: #ff6b6b; padding: 4px 8px;"
+            " background-color: #3b1a1a; border: 1px solid #ff6b6b55; border-radius: 6px;"
+        )
+        self._missing_label.hide()
+        header_text.addWidget(self._missing_label)
 
         device_row = QHBoxLayout()
         device_row.setSpacing(0)
@@ -253,6 +266,7 @@ class LauncherWindow(QDialog):
             if checked:
                 self.gpu_btn.setChecked(False)
                 self.selected_device = "cpu"
+                self._validate_resources_for_device()
             elif not self.gpu_btn.isChecked():
                 self.cpu_btn.setChecked(True)
 
@@ -260,6 +274,7 @@ class LauncherWindow(QDialog):
             if checked:
                 self.cpu_btn.setChecked(False)
                 self.selected_device = "cuda"
+                self._validate_resources_for_device()
             elif not self.cpu_btn.isChecked():
                 self.gpu_btn.setChecked(True)
 
@@ -365,6 +380,30 @@ class LauncherWindow(QDialog):
             super().accept()
             return
 
+        try:
+            service = self._resource_service()
+            is_ok, missing = service.validate_device(self.selected_device)
+            if not is_ok:
+                from PySide6.QtWidgets import QMessageBox
+                labels = [label for _rid, label in missing]
+                if self.selected_device == "cpu":
+                    prefix = "CPU mode needs:"
+                else:
+                    prefix = "GPU mode needs:"
+                mb = QMessageBox(self)
+                mb.setIcon(QMessageBox.Warning)
+                mb.setWindowTitle("Missing Resources")
+                mb.setText(f"{prefix}\n\n" + "\n".join(f"- {label}" for label in labels))
+                mb.setInformativeText("Open Manage Resources to download them.")
+                mb.addButton("Manage Resources", QMessageBox.AcceptRole)
+                mb.addButton("Close", QMessageBox.RejectRole)
+                mb.setStyleSheet(MSG_STYLE)
+                mb.exec()
+                self._validate_resources_for_device()
+                return
+        except Exception as exc:
+            print(f"[Launcher] Resource validation failed: {exc}")
+
         duration = _get_video_duration(self.selected_video)
         MAX_DURATION = 7200
         if duration > MAX_DURATION:
@@ -431,6 +470,47 @@ class LauncherWindow(QDialog):
         except Exception as e:
             print(f"[Launcher] Failed to write .env: {e}")
 
+    def _resource_service(self):
+        from runtime_paths import workspace_root
+        from services import ResourceDownloadService
+        return ResourceDownloadService(workspace_root())
+
+    def _validate_resources_for_device(self):
+        try:
+            service = self._resource_service()
+        except Exception as exc:
+            print(f"[Launcher] Failed to load resource service: {exc}")
+            self.new_btn.setEnabled(True)
+            return
+        device = self.selected_device
+        is_ok, missing = service.validate_device(device)
+        self.new_btn.setEnabled(is_ok)
+        if is_ok:
+            self._missing_label.hide()
+            self._missing_label.setText("")
+            if hasattr(self, "new_btn") and self.new_btn.toolTip():
+                self.new_btn.setToolTip("")
+        else:
+            labels = [label for _rid, label in missing]
+            if device == "cpu":
+                prefix = "CPU mode needs:"
+            else:
+                prefix = "GPU mode needs:"
+            text = f"{prefix} {', '.join(labels)}. Open Manage Resources to set them up."
+            self._missing_label.setText(text)
+            self._missing_label.show()
+            self.new_btn.setToolTip(text)
+        try:
+            for i in range(self.grid.count()):
+                item = self.grid.itemAt(i)
+                if item is None:
+                    continue
+                widget = item.widget()
+                if isinstance(widget, ProjectCard):
+                    widget.setEnabled(is_ok)
+        except Exception:
+            pass
+
     def _load_recent(self):
         projects = _load_recent_projects()
         os.makedirs(self._thumbnail_dir, exist_ok=True)
@@ -472,6 +552,7 @@ class LauncherWindow(QDialog):
     def _on_manage_resources(self):
         from views.resource_manager import open_resource_manager
         open_resource_manager(parent=self)
+        self._validate_resources_for_device()
 
     def _on_split_video(self):
         from PySide6.QtWidgets import QMessageBox, QProgressDialog, QInputDialog

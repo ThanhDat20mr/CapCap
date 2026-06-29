@@ -16,10 +16,23 @@ class ResourceDownloadService:
     NORMAL_AI_FILENAME = "Hy-MT2-1.8B-Q4_K_M.gguf"
     HIGH_AI_FILENAME = "gemma-4-E4B-it-Q4_K_M.gguf"
 
+    HF_RESOURCE_REPO = os.getenv("CAPCAP_RESOURCE_REPO", "Hacht/CapCapResource").strip() or "Hacht/CapCapResource"
+    HF_RESOURCE_REVISION = os.getenv("CAPCAP_RESOURCE_REVISION", "main").strip() or "main"
+    SENSEVOICE_REPO = os.getenv(
+        "SENSEVOICE_MODEL_REPO",
+        "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+    ).strip() or "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
+
+    _AUTO_DOWNLOAD_IDS = {
+        "voice:pack",
+        "sensevoice:model",
+        "cuda:whisper",
+    }
+
     def __init__(self, workspace_root: str):
         self.workspace_root = workspace_root
-        self.repo_id = os.getenv("CAPCAP_RESOURCE_REPO", "Hacht/CapCapResource").strip() or "Hacht/CapCapResource"
-        self.revision = os.getenv("CAPCAP_RESOURCE_REVISION", "main").strip() or "main"
+        self.repo_id = self.HF_RESOURCE_REPO
+        self.revision = self.HF_RESOURCE_REVISION
 
     def _catalog_path(self) -> str:
         download_catalog = app_path("voice_download_catalog.json")
@@ -91,16 +104,12 @@ class ResourceDownloadService:
         end_percent: int = 100,
         label: str = "Downloading file...",
     ) -> str:
-        print(f"[DEBUG] _download_hf_file: {repo_id}/{filename} -> {local_dir}")
         expected_path = os.path.join(local_dir, filename.replace("/", os.sep))
         try:
             file_url = hf_hub_url(repo_id=repo_id, filename=filename, revision=revision)
-            print(f"[DEBUG] file_url: {file_url}")
             metadata = get_hf_file_metadata(url=file_url)
             expected_size = int(getattr(metadata, "size", 0) or 0)
-            print(f"[DEBUG] expected_size: {expected_size}")
-        except Exception as e:
-            print(f"[DEBUG] metadata fetch failed: {e}")
+        except Exception:
             expected_size = 0
 
         stop_event = threading.Event()
@@ -230,35 +239,88 @@ class ResourceDownloadService:
         except Exception:
             return ""
 
-    def _vietdict_status(self) -> str:
-        import csv
-        custom_dir = models_path("vietnormalizer")
-        if not os.path.isdir(custom_dir):
-            return "missing"
-        csv_files = [f for f in os.listdir(custom_dir) if f.endswith(".csv") and not f.startswith("_")]
-        if not csv_files:
-            return "missing"
-        total_entries = 0
-        for fname in csv_files:
-            try:
-                with open(os.path.join(custom_dir, fname), encoding="utf-8", newline="") as f:
-                    total_entries += sum(1 for _ in csv.DictReader(f))
-            except Exception:
-                pass
-        return f"installed ({total_entries} entries)" if total_entries > 0 else "missing"
-
     def _ocr_model_status(self) -> str:
         models_dir = self._ocr_model_dir()
         if not models_dir:
             return "missing"
-        models_path = os.path.join(models_dir, "models")
+        models_path_dir = os.path.join(models_dir, "models")
         missing = [
             m for m in self._OCR_REQUIRED_MODELS
-            if not os.path.isfile(os.path.join(models_path, m))
+            if not os.path.isfile(os.path.join(models_path_dir, m))
         ]
         return "missing" if missing else "installed"
 
+    def is_ocr_ready(self) -> bool:
+        return self._ocr_model_status() == "installed"
+
+    @staticmethod
+    def is_nvidia_driver_available() -> bool:
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return True
+        except Exception:
+            pass
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return True
+        except Exception:
+            pass
+        return False
+
+    def get_device_requirements(self, device: str) -> list[tuple[str, str]]:
+        dev = str(device or "").strip().lower()
+        if dev == "cpu":
+            return [
+                ("sensevoice:model", "SenseVoice ASR model"),
+                ("ocr", "Rapid OCR engine"),
+            ]
+        return [
+            ("whisper:medium", "Whisper model"),
+            ("cuda:whisper", "CUDA runtime pack"),
+            ("nvidia_driver", "NVIDIA driver"),
+        ]
+
+    def is_requirement_met(self, requirement_id: str) -> bool:
+        rid = str(requirement_id or "").strip()
+        if rid == "ocr":
+            return self.is_ocr_ready()
+        if rid == "nvidia_driver":
+            return self.is_nvidia_driver_available()
+        return self.is_resource_installed(rid)
+
+    def validate_device(self, device: str) -> tuple[bool, list[tuple[str, str]]]:
+        missing: list[tuple[str, str]] = []
+        for rid, label in self.get_device_requirements(device):
+            if not self.is_requirement_met(rid):
+                missing.append((rid, label))
+        return (len(missing) == 0, missing)
+
+    def _hf_blob_url(self, filename: str) -> str:
+        return (
+            f"https://huggingface.co/{self.HF_RESOURCE_REPO}/"
+            f"resolve/{self.HF_RESOURCE_REVISION}/{filename.lstrip('/')}"
+        )
+
     def list_resources(self) -> list[dict]:
+        whisper_folder_url = (
+            f"https://huggingface.co/{self.HF_RESOURCE_REPO}/"
+            f"tree/{self.HF_RESOURCE_REVISION}/faster_whisper"
+        )
+        cuda_folder_url = (
+            f"https://huggingface.co/{self.HF_RESOURCE_REPO}/"
+            f"tree/{self.HF_RESOURCE_REVISION}/cuda12_fw"
+        )
+        piper_dir_url = (
+            f"https://huggingface.co/{self.HF_RESOURCE_REPO}/"
+            f"tree/{self.HF_RESOURCE_REVISION}/piper"
+        )
+
         resources: list[dict] = [
             {
                 "id": self.NORMAL_AI_RESOURCE_ID,
@@ -266,7 +328,13 @@ class ResourceDownloadService:
                 "kind": "ai",
                 "status": "installed" if self.is_resource_installed(self.NORMAL_AI_RESOURCE_ID) else "missing",
                 "target_dir": os.path.dirname(self._ai_model_local_path("normal")),
-                "description": "Default local GGUF model. Faster and lighter. Uses the normal-quality prompt.",
+                "download_url": self._hf_blob_url(self.NORMAL_AI_FILENAME),
+                "expected_filename": self.NORMAL_AI_FILENAME,
+                "auto_download_supported": False,
+                "description": (
+                    "Default local GGUF model. Faster and lighter. "
+                    "Uses the normal-quality prompt. Manual download only."
+                ),
             },
             {
                 "id": self.HIGH_AI_RESOURCE_ID,
@@ -274,7 +342,13 @@ class ResourceDownloadService:
                 "kind": "ai",
                 "status": "installed" if self.is_resource_installed(self.HIGH_AI_RESOURCE_ID) else "missing",
                 "target_dir": os.path.dirname(self._ai_model_local_path("high")),
-                "description": "Higher quality local GGUF model. Needs a better GPU or will run slower on CPU. Uses the high-quality prompt.",
+                "download_url": self._hf_blob_url(self.HIGH_AI_FILENAME),
+                "expected_filename": self.HIGH_AI_FILENAME,
+                "auto_download_supported": False,
+                "description": (
+                    "Higher quality local GGUF model. Needs a better GPU or will run slower on CPU. "
+                    "Uses the high-quality prompt. Manual download only."
+                ),
             },
             {
                 "id": "whisper:medium",
@@ -282,7 +356,15 @@ class ResourceDownloadService:
                 "kind": "whisper",
                 "status": "installed" if self.is_resource_installed("whisper:medium") else "missing",
                 "target_dir": self._whisper_cache_root(),
-                "description": "Higher accuracy, larger download size. Downloaded via faster-whisper.",
+                "download_url": whisper_folder_url,
+                "expected_filename": "medium (full snapshot folder)",
+                "auto_download_supported": True,
+                "description": (
+                    "Higher accuracy, larger download size. "
+                    "Click 'Auto Download' to fetch from Hugging Face, or open the URL to download manually "
+                    "and place files into models/faster_whisper/medium/. "
+                    "faster-whisper will also auto-download on first use if the folder is empty."
+                ),
             },
             {
                 "id": "cuda:whisper",
@@ -290,7 +372,14 @@ class ResourceDownloadService:
                 "kind": "cuda",
                 "status": "installed" if self.is_resource_installed("cuda:whisper") else "missing",
                 "target_dir": join_root("bin", "cuda12_fw"),
-                "description": "CUDA 12 runtime + ONNX GPU provider. Required for GPU acceleration on Whisper, OCR, and local AI.",
+                "download_url": cuda_folder_url,
+                "expected_filename": "cuda12_fw/ contents (cuBLAS + cuDNN)",
+                "auto_download_supported": True,
+                "description": (
+                    "CUDA 12 runtime + ONNX GPU provider. "
+                    "Required for GPU acceleration on Whisper, OCR, and local AI. "
+                    "Click 'Auto Download' to fetch from Hugging Face, or open the URL to download manually."
+                ),
             },
             {
                 "id": "sensevoice:model",
@@ -298,15 +387,14 @@ class ResourceDownloadService:
                 "kind": "sensevoice",
                 "status": "installed" if self.is_resource_installed("sensevoice:model") else "missing",
                 "target_dir": models_path("sensevoice"),
-                "description": "Multilingual SenseVoice model for CPU-based speech recognition. ~50MB download.",
-            },
-            {
-                "id": "vietnormalizer:dict",
-                "name": "Vietnamese Normalizer Dictionary",
-                "kind": "vietdict",
-                "status": self._vietdict_status(),
-                "target_dir": models_path("vietnormalizer"),
-                "description": "Custom acronym/non-Vietnamese word mappings. Place .csv files here to override built-in normalizer rules.",
+                "download_url": f"https://huggingface.co/{self.SENSEVOICE_REPO}",
+                "expected_filename": "model.int8.onnx + tokens.txt",
+                "auto_download_supported": True,
+                "description": (
+                    "Multilingual SenseVoice model for CPU-based speech recognition. "
+                    "Click 'Auto Download' to fetch from Hugging Face, or open the URL to download manually "
+                    "and drop model.int8.onnx + tokens.txt into models/sensevoice/."
+                ),
             },
         ]
 
@@ -315,20 +403,36 @@ class ResourceDownloadService:
             resources.append(
                 {
                     "id": "voice:pack",
-                    "name": "Vietnamese Voice Pack",
+                    "name": "Local Vietnamese Voices (Piper)",
                     "kind": "voice",
                     "status": self._voice_pack_status(),
                     "target_dir": models_path("piper"),
-                    "description": f"Download all {len(piper_entries)} local Piper voices at once.",
+                    "download_url": piper_dir_url,
+                    "expected_filename": "*.onnx + *.onnx.json pairs",
+                    "auto_download_supported": True,
+                    "description": (
+                        f"Local Piper TTS voices. The catalog lists {len(piper_entries)} Vietnamese voice(s). "
+                        "Click 'Auto Download' to fetch every voice from Hugging Face, "
+                        "or open the URL to download individual voices manually "
+                        "and place each .onnx + .onnx.json pair into models/piper/."
+                    ),
                 }
             )
         return resources
+
+    def supports_auto_download(self, resource_id: str) -> bool:
+        rid = str(resource_id or "")
+        if rid.startswith("whisper:"):
+            return True
+        return rid in self._AUTO_DOWNLOAD_IDS
 
     def is_resource_installed(self, resource_id: str) -> bool:
         if resource_id in {self.NORMAL_AI_RESOURCE_ID, "ai:local-gguf"}:
             return os.path.exists(self._ai_model_local_path("normal"))
         if resource_id == self.HIGH_AI_RESOURCE_ID:
             return os.path.exists(self._ai_model_local_path("high"))
+        if resource_id == "ocr:engine":
+            return self.is_ocr_ready()
         if resource_id == "cuda:whisper":
             fw_dir = join_root("bin", "cuda12_fw")
             cuda_ok = os.path.exists(os.path.join(fw_dir, "cublas64_12.dll"))
@@ -359,10 +463,13 @@ class ResourceDownloadService:
             model_path, config_path = self._voice_local_paths(voice_entry)
             return os.path.exists(model_path) and os.path.exists(config_path)
         if resource_id == "cuda:ort":
-            return self._cuda_ort_dll_status() == "installed"
-        if resource_id == "vietnormalizer:dict":
-            status = self._vietdict_status()
-            return status != "missing"
+            try:
+                import onnxruntime
+                return os.path.isfile(
+                    os.path.join(os.path.dirname(onnxruntime.__file__), "capi", "onnxruntime_providers_cuda.dll")
+                )
+            except Exception:
+                return False
         return False
 
     def _find_voice_entry(self, voice_id: str) -> dict | None:
@@ -373,22 +480,23 @@ class ResourceDownloadService:
         return None
 
     def download_resource(self, resource_id: str, progress_cb=None) -> None:
-        print(f"[DEBUG] download_resource called: {resource_id}")
-        import sys
-        print(f"[DEBUG] frozen={getattr(sys, 'frozen', False)} meipass={getattr(sys, '_MEIPASS', 'N/A')}")
         if resource_id.startswith("whisper:"):
             model_name = resource_id.split(":", 1)[1].strip().lower()
             if progress_cb:
                 progress_cb(-1, f"Downloading Whisper {model_name} via faster-whisper...")
-            from whisper_processor import load_whisper_model
+            from whisper_processor import _download_whisper_from_custom_repo
 
-            load_whisper_model(model_name)
+            local_dir = _download_whisper_from_custom_repo(model_name)
+            if not local_dir:
+                raise RuntimeError(
+                    f"Whisper {model_name} download failed. See logs for details."
+                )
             if progress_cb:
                 progress_cb(100, f"Whisper {model_name} is ready.")
             return
 
         if resource_id == "sensevoice:model":
-            sensevoice_repo = os.getenv("SENSEVOICE_MODEL_REPO", "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17").strip()
+            sensevoice_repo = self.SENSEVOICE_REPO
             target_dir = models_path("sensevoice")
             os.makedirs(target_dir, exist_ok=True)
             if progress_cb:
@@ -410,56 +518,14 @@ class ResourceDownloadService:
                 progress_cb(100, "SenseVoice model downloaded.")
             return
 
-        print("[DEBUG] importing huggingface_hub...")
         try:
             from huggingface_hub import hf_hub_download, hf_hub_url, snapshot_download
             from huggingface_hub.errors import RemoteEntryNotFoundError
             from huggingface_hub.file_download import get_hf_file_metadata
-            print("[DEBUG] huggingface_hub imported OK")
         except Exception as exc:
-            print(f"[DEBUG] huggingface_hub import FAILED: {exc}")
             raise ImportError(
                 "huggingface_hub is not installed. Run `pip install huggingface_hub` first."
             ) from exc
-
-        if resource_id in {self.NORMAL_AI_RESOURCE_ID, self.HIGH_AI_RESOURCE_ID, "ai:local-gguf"}:
-            tier = "high" if resource_id == self.HIGH_AI_RESOURCE_ID else "normal"
-            filename = self._ai_model_filename(tier)
-            target_path = self._ai_model_local_path(tier)
-            print(f"[DEBUG] {resource_id} download start. repo={self.repo_id} file={filename}")
-            print(f"[DEBUG] local_dir={join_root('models')} target={target_path}")
-            if progress_cb:
-                progress_cb(-1, f"Downloading {os.path.basename(filename)} from Hugging Face...")
-            try:
-                downloaded = self._download_hf_file(
-                    repo_id=self.repo_id,
-                    revision=self.revision,
-                    filename=filename,
-                    local_dir=join_root("models"),
-                    hf_hub_download=hf_hub_download,
-                    hf_hub_url=hf_hub_url,
-                    get_hf_file_metadata=get_hf_file_metadata,
-                    progress_cb=progress_cb,
-                    start_percent=0,
-                    end_percent=100,
-                    label=f"Downloading {os.path.basename(filename)}",
-                )
-                print(f"[DEBUG] download returned: {downloaded}")
-            except Exception as exc:
-                print(f"[DEBUG] _download_hf_file FAILED: {exc}")
-                raise
-            print(f"[DEBUG] moving to target: {target_path}")
-            os.makedirs(os.path.dirname(target_path), exist_ok=True)
-            normalized_source = os.path.normcase(os.path.abspath(downloaded))
-            normalized_target = os.path.normcase(os.path.abspath(target_path))
-            if normalized_source != normalized_target:
-                if os.path.exists(target_path):
-                    os.remove(target_path)
-                shutil.move(downloaded, target_path)
-                self._cleanup_empty_voice_cache_dirs(os.path.dirname(downloaded))
-            if progress_cb:
-                progress_cb(100, f"{os.path.basename(filename)} is ready.")
-            return
 
         if resource_id == "cuda:whisper":
             if progress_cb:
@@ -595,5 +661,10 @@ class ResourceDownloadService:
             if progress_cb:
                 progress_cb(100, f"Voice {voice_id} is ready.")
             return
+
+        if resource_id in {self.NORMAL_AI_RESOURCE_ID, self.HIGH_AI_RESOURCE_ID}:
+            raise ValueError(
+                f"Auto download is not supported for '{resource_id}'. Use 'Open Download Page' to get the file manually."
+            )
 
         raise ValueError(f"Unsupported resource: {resource_id}")

@@ -54,7 +54,7 @@
    - **Google Translate** — free, no key (fallback quality)
 7. Save → Load video → click **Generate**
 
-If you use OCR mode, open **Settings → Manage Resources** and download **OCR Engine (RapidOCR PP-OCRv4)** first.
+If you use OCR mode, the OCR engine ships inside the `rapidocr` package and is used automatically when present.
 
 No key? Google translate fallback works for free (slower, lower quality).
 
@@ -158,7 +158,7 @@ Behavior notes:
 | TTS | Piper (local), edge-tts (online) |
 | Vietnamese normalization | vietnormalizer |
 | Audio processing | FFmpeg, pydub |
-| Model downloads | huggingface_hub |
+| Model downloads | manual URL + optional `huggingface_hub` Auto Download |
 | Configuration | python-dotenv |
 | Packaging | PyInstaller |
 
@@ -204,16 +204,41 @@ requirements-local.txt:
 | `CAPCAP_RUNTIME_PROFILE` | `local` | `local` or `remote` |
 | `CAPCAP_REMOTE_API_URL` | `http://127.0.0.1:8765` | Remote API address (remote mode) |
 
-### Local AI Models
+### Local Resources
 
-- **Normal Quality AI Model**
-  - File: `models/ai/Hy-MT2-1.8B-Q4_K_M.gguf`
-  - Default option
-  - Faster and lighter
-- **High Quality AI Model**
-  - File: `models/ai/gemma-4-E4B-it-Q4_K_M.gguf`
-  - Download: [Gemma 4 GGUF](https://huggingface.co/Hacht/CapCapResource/blob/main/gemma-4-E4B-it-Q4_K_M.gguf)
-  - Better quality, but needs a better GPU or runs slower on CPU
+Open **Manage Resources** from the launcher or `Settings → Manage Resources`. Each card shows a status pill (`Ready` / `Partial` / `Missing`), the target folder, the expected file, and two download paths:
+
+- **Open Download Page** — opens the Hugging Face / GitHub URL in your browser
+- **Auto Download** — fetches the file directly into the target folder (uses `huggingface_hub`; only available for some resources)
+
+Per-card progress replaces the status pill during an Auto Download. Click **Refresh** to re-check status without closing the dialog.
+
+| Resource | Target | Auto Download |
+|---|---|---|
+| Normal AI Model (Hy-MT2) | `models/ai/Hy-MT2-1.8B-Q4_K_M.gguf` | ❌ manual only |
+| High AI Model (Gemma 4) | `models/ai/gemma-4-E4B-it-Q4_K_M.gguf` | ❌ manual only |
+| Whisper Medium | `models/faster_whisper/medium/` | ✅ |
+| GPU Acceleration Pack (CUDA 12) | `bin/cuda12_fw/` | ✅ |
+| SenseVoice ASR Model | `models/sensevoice/` | ✅ |
+| Local Vietnamese Voices (Piper) | `models/piper/` | ✅ |
+
+- **AI Model** (Normal / High)
+  - File: `models/ai/Hy-MT2-1.8B-Q4_K_M.gguf` (default) or `models/ai/gemma-4-E4B-it-Q4_K_M.gguf`
+  - Download manually from the [CapCapResource HF repo](https://huggingface.co/Hacht/CapCapResource).
+- **Whisper Medium**
+  - Folder: `models/faster_whisper/medium/`
+  - Manual: [`Hacht/CapCapResource/faster_whisper`](https://huggingface.co/Hacht/CapCapResource/tree/main/faster_whisper)
+  - `faster-whisper` will also auto-download on first use if the folder is empty.
+- **GPU Acceleration Pack (CUDA 12)**
+  - Folder: `bin/cuda12_fw/`
+  - Manual: [`Hacht/CapCapResource/cuda12_fw`](https://huggingface.co/Hacht/CapCapResource/tree/main/cuda12_fw)
+- **SenseVoice ASR Model**
+  - Folder: `models/sensevoice/`
+  - Manual: [`csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17`](https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17)
+- **Local Vietnamese Voices (Piper)**
+  - Folder: `models/piper/`
+  - Manual: [`Hacht/CapCapResource/piper`](https://huggingface.co/Hacht/CapCapResource/tree/main/piper)
+  - Drop each `.onnx` file together with its `.onnx.json` config.
 
 ## Run From Source
 
@@ -263,7 +288,7 @@ CapCap/
 │   │   ├── main_window.py            # Main window layout + signal connections
 │   │   ├── start_panel.py            # Left panel (media, voice, style, etc.)
 │   │   ├── preview_panel.py          # Right panel (preview + per-track inspector + timeline)
-│   │   ├── resource_manager.py       # Hugging Face resource download dialog
+│   │   ├── resource_manager.py       # Resource status dialog (manual URL + optional Auto Download)
 │   │   ├── advanced_tabs.py          # Advanced settings tab
 │   │   └── editor/                   # Timeline + track label bar
 │   │       ├── timeline.py            # Multi-lane timeline (V1/A1/A2/B1/L1/M1/S1)
@@ -317,7 +342,7 @@ CapCap/
 │   │   ├── segment_service.py        # Subtitle segment management
 │   │   ├── chunking_service.py       # Audio segmentation
 │   │   ├── engine_runtime.py         # Engine initialization and lifecycle
-│   │   ├── resource_download_service.py  # Hugging Face model downloads
+│   │   ├── resource_download_service.py  # Resource catalog + status checks + Auto Download backend
 │   │   └── ...                       # + GPU scheduling, ASR merge, etc.
 │   ├── utils/                        # Voice preview utilities
 │   ├── layers/                       # Track / clip / layer domain model
