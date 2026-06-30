@@ -4327,10 +4327,6 @@ class VideoTranslatorGUI(QMainWindow):
 
 
 
-    def toggle_original_subtitle_visibility(self):
-        show_original = bool(getattr(self, "show_original_subtitle_cb", None) and self.show_original_subtitle_cb.isChecked())
-        for row in getattr(self, "_segment_editor_rows", []):
-            row["original_label"].setVisible(show_original and bool(row["original_label"].text().strip()))
 
     def _get_effective_selected_segment_index(self, rows=None) -> int:
         rows = rows if rows is not None else self._segment_editor_display_rows()
@@ -4408,23 +4404,10 @@ class VideoTranslatorGUI(QMainWindow):
         layer_type = str(getattr(layer.type, "value", layer.type)).lower()
         if layer_type == "subtitle":
             self._show_subtitle_inspector_for_layer(layer_id)
+        elif layer_type == "dub_subtitle":
+            self._show_dub_subtitle_inspector_for_layer(layer_id, layer)
         elif layer_type == "audio":
             self._show_audio_inspector_for_track(track, layer)
-            # A2 Dub layers store the original subtitle segment
-            # index in metadata["_seg_index"]. Use it to update the
-            # selected segment so the Dub Voice editor shows the
-            # matching content.
-            if track is not None and str(getattr(track, "name", "")) == "A2 Dub":
-                seg_idx = None
-                meta = getattr(layer, "metadata", None) or {}
-                raw = meta.get("_seg_index")
-                if raw is not None:
-                    try:
-                        seg_idx = int(raw)
-                    except (TypeError, ValueError):
-                        seg_idx = None
-                if seg_idx is not None and seg_idx >= 0:
-                    self.set_selected_segment_index(seg_idx, sync_ui=True)
         elif layer_type == "blur":
             self._show_blur_inspector_for_track(track, layer)
         elif layer_type == "video":
@@ -4731,6 +4714,14 @@ class VideoTranslatorGUI(QMainWindow):
 
     def _show_subtitle_inspector_for_layer(self, layer_id: str):
         """Show subtitle inspector and select the matching segment."""
+        self._switch_inspector("subtitle")
+        if hasattr(self, "timeline") and self.timeline:
+            idx = self.timeline._segment_indices.get(layer_id, -1)
+            if idx >= 0:
+                self.set_selected_segment_index(idx, sync_ui=True)
+
+    def _show_dub_subtitle_inspector_for_layer(self, layer_id: str, layer=None):
+        """Show the inspector for a dub subtitle layer."""
         self._switch_inspector("subtitle")
         if hasattr(self, "timeline") and self.timeline:
             idx = self.timeline._segment_indices.get(layer_id, -1)
@@ -5508,14 +5499,11 @@ class VideoTranslatorGUI(QMainWindow):
         self._apply_audio_track_settings(track_name)
 
     def _refresh_audio_inspector_dub_voice_buttons(self):
-        """Enable/disable the Dub Voice buttons and load the spoken
-        text for the currently selected segment into the A2 inspector's
-        spoken-text editor. The buttons live in the A2 audio inspector
-        card but act on the currently selected subtitle segment.
-        """
+        """Enable/disable Dub Voice buttons and populate shared/tabs."""
         idx = int(getattr(self, "_selected_segment_index", -1))
         segments = self.get_active_segments() or []
         valid = 0 <= idx < len(segments)
+        seg = segments[idx] if valid and isinstance(segments[idx], dict) else {}
         for attr in (
             "audio_inspector_use_voice_btn",
             "audio_inspector_regenerate_voice_btn",
@@ -5523,89 +5511,14 @@ class VideoTranslatorGUI(QMainWindow):
             btn = getattr(self, attr, None)
             if btn is not None:
                 btn.setEnabled(valid)
-        label = getattr(self, "audio_inspector_segment_index_label", None)
-        if label is not None:
-            if valid:
-                label.setText(f"Selected segment: Block {idx + 1} / {len(segments)}")
-            else:
-                label.setText("Selected segment: none")
-        # Update Start/End timing chips for the dub segment
-        start_lbl = getattr(self, "audio_inspector_dub_start_label", None)
-        end_lbl = getattr(self, "audio_inspector_dub_end_label", None)
-        if start_lbl is not None or end_lbl is not None:
-            if valid:
-                seg = segments[idx] if isinstance(segments[idx], dict) else {}
-                try:
-                    fmt = getattr(self, "format_timestamp", None)
-                    if callable(fmt):
-                        start_text = f"Start  {fmt(float(seg.get('start', 0.0)))}"
-                        end_text = f"End  {fmt(float(seg.get('end', 0.0)))}"
-                    else:
-                        start_text = f"Start  {seg.get('start', 0.0):.2f}s"
-                        end_text = f"End  {seg.get('end', 0.0):.2f}s"
-                except Exception:
-                    start_text = "Start  -"
-                    end_text = "End  -"
-                if start_lbl is not None:
-                    start_lbl.setText(start_text)
-                if end_lbl is not None:
-                    end_lbl.setText(end_text)
-            else:
-                if start_lbl is not None:
-                    start_lbl.setText("Start  -")
-                if end_lbl is not None:
-                    end_lbl.setText("End  -")
-        # Load the dub content (spoken text if stored, otherwise the
-        # subtitle text) into the A2 inspector's editable input. The
-        # user can edit it directly - no separate read-only display.
-        editor = getattr(self, "audio_inspector_spoken_editor", None)
-        if editor is not None:
-            try:
-                editor.blockSignals(True)
-                if valid:
-                    seg = segments[idx] if isinstance(segments[idx], dict) else {}
-                    content = str(
-                        seg.get("spoken")
-                        or seg.get("tts_text")
-                        or seg.get("text", "")
-                        or ""
-                    ).strip()
-                    current = editor.toPlainText().strip()
-                    if current != content:
-                        editor.setPlainText(content)
-                else:
-                    if editor.toPlainText():
-                        editor.setPlainText("")
-            finally:
-                editor.blockSignals(False)
-        status_label = getattr(self, "audio_inspector_spoken_status_label", None)
-        if status_label is not None:
-            if not valid:
-                status_label.setText("")
-
-    def _on_audio_inspector_spoken_text_edited(self):
-        """Persist edits made in the A2 inspector's spoken-text editor
-        back to the currently selected segment.
-        """
-        editor = getattr(self, "audio_inspector_spoken_editor", None)
-        if editor is None:
-            return
-        idx = int(getattr(self, "_selected_segment_index", -1))
-        segments = self.get_active_segments() or []
-        if not (0 <= idx < len(segments)):
-            return
-        new_text = editor.toPlainText()
-        seg = segments[idx]
-        if isinstance(seg, dict):
-            seg["spoken"] = new_text
-            seg["tts_text"] = new_text
-
-    def on_audio_inspector_use_voice_clicked(self):
-        idx = int(getattr(self, "_selected_segment_index", -1))
-        segments = self.get_active_segments() or []
-        if not (0 <= idx < len(segments)):
-            return
-        self.use_spoken_text_for_subtitle(idx)
+        # Shared section: Original text
+        orig_lbl = getattr(self, "inspector_original_text_label", None)
+        orig_widget = getattr(self, "inspector_shared_original_label", None)
+        if orig_lbl is not None:
+            orig_text = str(seg.get("original_text", "") or "") if valid else ""
+            orig_lbl.setText(orig_text if orig_text else "")
+            if orig_widget is not None:
+                orig_widget.setVisible(bool(orig_text))
 
     def on_audio_inspector_regenerate_voice_clicked(self):
         idx = int(getattr(self, "_selected_segment_index", -1))
@@ -5717,6 +5630,13 @@ class VideoTranslatorGUI(QMainWindow):
                 except Exception:
                     pass
         elif track_name == "A2 Dub":
+            self._mute_dubbed = muted
+            if hasattr(self, "media_player"):
+                try:
+                    self.media_player.set_mute_dubbed(muted)
+                except Exception:
+                    pass
+        elif track_name == "TS1":
             self._mute_dubbed = muted
             if hasattr(self, "media_player"):
                 try:
@@ -6619,8 +6539,11 @@ class VideoTranslatorGUI(QMainWindow):
         return None
 
     def _is_subtitle_inspector_details_visible(self) -> bool:
-        widget = getattr(self, "subtitle_inspector_details_widget", None)
-        return bool(widget and widget.isVisible())
+        stack = getattr(self, "inspector_stack", None)
+        if not stack or stack.currentIndex() != 0:
+            return False
+        card = getattr(self, "subtitle_inspector_card", None)
+        return bool(card and card.isVisible())
 
     def is_subtitle_inspector_anchored(self) -> bool:
         # Backwards-compatible alias - the anchor now applies to the
@@ -6843,7 +6766,7 @@ class VideoTranslatorGUI(QMainWindow):
                 selected_index = int(visible_rows[0].get("segment_index", 0))
             self._update_subtitle_inspector_summary(rows)
 
-            show_original = bool(getattr(self, "show_original_subtitle_cb", None) and self.show_original_subtitle_cb.isChecked())
+            show_original = True
             for row in visible_rows:
                 idx = int(row.get("segment_index", 0))
                 card = QFrame(self.segment_editor_container if hasattr(self, "segment_editor_container") else None)

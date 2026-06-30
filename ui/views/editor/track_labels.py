@@ -18,6 +18,7 @@ BLUR_PREFIXES = {"B1"}
 LOGO_PREFIXES = {"L1"}
 MASK_PREFIXES = {"M1"}
 SUBTITLE_PREFIXES = {"TS1", "S1"}
+MUTE_PREFIXES = {"A1", "A2", "TS1"}
 
 
 class TrackLabelBar(QFrame):
@@ -134,7 +135,7 @@ class TrackLabelBar(QFrame):
             if 0 <= idx < len(self._track_names):
                 name = self._track_names[idx]
                 prefix = name.split(" ")[0] if name else ""
-                if prefix in AUDIO_PREFIXES:
+                if prefix in MUTE_PREFIXES:
                     new_muted = not self._track_muted[idx]
                     self._track_muted[idx] = new_muted
                     self.update()

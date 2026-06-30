@@ -28,7 +28,7 @@ class EditorTimeline(QGraphicsView):
     TRACK_LABEL_H = 24
     TRACK_MIN_H = 32
     TRACK_DEFAULT_H = 56
-    CHILD_TRACK_H = 36
+    CHILD_TRACK_H = 48
     CHROME_H = 24
     HANDLE_W = 8
     MIN_DUR = 0.1
@@ -92,7 +92,7 @@ class EditorTimeline(QGraphicsView):
     # ---- Legacy API (drop-in replacement for existing TimelineWidget) ----
 
     def set_segments(self, segments: list) -> None:
-        from app.layers.sync_bridge import sync_segments_to_subtitle_layers
+        from app.layers.sync_bridge import sync_segments_to_dub_subtitle_layers
         if not self._timeline:
             self._init_default_tracks()
 
@@ -101,7 +101,7 @@ class EditorTimeline(QGraphicsView):
             d = seg if isinstance(seg, dict) else (seg.to_dict() if hasattr(seg, "to_dict") else {})
             seg_dicts.append(d)
 
-        sync_segments_to_subtitle_layers(self._timeline, seg_dicts)
+        sync_segments_to_dub_subtitle_layers(self._timeline, seg_dicts)
 
         # Register any new tracks in _track_heights (height adapts
         # to the number of layers in the track).
@@ -111,11 +111,11 @@ class EditorTimeline(QGraphicsView):
 
         self._segment_indices.clear()
         for t in self._timeline.tracks:
-            if t.type == LayerType.SUBTITLE:
+            if t.type == LayerType.DUB_SUBTITLE:
                 for layer in t.layers:
                     # Prefer the original segment index stored in metadata
-                    # (set by sync_segments_to_subtitle_layers). Falls back
-                    # to z_index for layers created without metadata.
+                    # (set by sync_segments_to_dub_subtitle_layers). Falls
+                    # back to z_index for layers created without metadata.
                     seg_idx = None
                     if isinstance(layer.metadata, dict):
                         raw = layer.metadata.get("_seg_index")
@@ -234,7 +234,10 @@ class EditorTimeline(QGraphicsView):
             # inspector shows the correct card.
             if current_track is None:
                 self._selected_layer_id = ""
-            elif current_track.type != LayerType.SUBTITLE:
+            elif current_track.type not in (
+                LayerType.SUBTITLE,
+                LayerType.DUB_SUBTITLE,
+            ):
                 return
         for lid, idx in self._segment_indices.items():
             if idx == index:
@@ -296,11 +299,12 @@ class EditorTimeline(QGraphicsView):
         self._redraw()
 
     def sync_tts_track(self, voice_track_path: str, duration: float = 0.0, segments: list | None = None) -> None:
-        from app.layers.sync_bridge import sync_tts_to_audio_layers
+        from app.layers.sync_bridge import sync_tts_to_dub_subtitle_layers
         if not self._timeline:
             self._init_default_tracks()
-        dur = duration if duration > 0 else self._duration
-        sync_tts_to_audio_layers(self._timeline, voice_track_path, 0.0, dur, segments=segments)
+        sync_tts_to_dub_subtitle_layers(
+            self._timeline, voice_track_path, segments=segments
+        )
         # Register track height (adapts to the number of layers)
         for t in self._timeline.tracks:
             if t.id not in self._track_heights:
@@ -404,11 +408,15 @@ class EditorTimeline(QGraphicsView):
 
     @staticmethod
     def _is_subtitle_track(track) -> bool:
-        return any(getattr(l, "type", None) == LayerType.SUBTITLE
-                   for l in getattr(track, "layers", []))
+        return any(
+            getattr(l, "type", None) in (LayerType.SUBTITLE, LayerType.DUB_SUBTITLE)
+            for l in getattr(track, "layers", [])
+        )
 
     @staticmethod
     def _is_dub_track(track) -> bool:
+        # Legacy A2 Dub name prefix kept for projects that still have
+        # a separate audio track from the old two-track layout.
         name = (track.name or "").lower()
         prefix = name.split(" ")[0] if name else ""
         if prefix == "a2":
@@ -418,9 +426,8 @@ class EditorTimeline(QGraphicsView):
     @classmethod
     def _should_overlap_stack(cls, track) -> bool:
         """True for tracks whose overlapping layers should stack vertically
-        inside the same track (TS1 subtitle, A2 Dub). The track stays a
-        single row visually only for non-overlapping layers; overlaps
-        spill onto additional child rows within the track.
+        inside the same track. The new TS1 DubSubtitle layout inherits
+        the stacking; legacy A2 Dub still does.
         """
         return cls._is_subtitle_track(track) or cls._is_dub_track(track)
 
@@ -635,15 +642,75 @@ class EditorTimeline(QGraphicsView):
             painter.setPen(QColor("#ffffff"))
             font = QFont("Segoe UI", 8)
             painter.setFont(font)
-            label = layer.name or layer.type.value.title()
+            if getattr(layer, "type", None) == LayerType.DUB_SUBTITLE:
+                # Default: show dub_text (the voice-spoken text) on the
+                # timeline bar so the user sees what the dub voice is
+                # actually saying. Fall back to text, then layer name.
+                label = (
+                    str(getattr(layer, "dub_text", "") or "").strip()
+                    or str(getattr(layer, "text", "") or "").strip()
+                    or layer.name
+                )
+            else:
+                label = layer.name or layer.type.value.title()
             short_label = os.path.basename(label) if os.path.sep in label else label
             text_rect = QRectF(x + 4, y, min(w - 8, view_w - x - 4), h)
             elided = painter.fontMetrics().elidedText(short_label, Qt.ElideRight, int(text_rect.width()))
             painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, elided)
 
+            # Audio glyph on DubSubtitleLayer bars that have generated
+            # voice audio. Small speaker shape on the right edge of
+            # the bar.
+            if (
+                getattr(layer, "type", None) == LayerType.DUB_SUBTITLE
+                and getattr(layer, "audio_path", "")
+                and h >= 14
+            ):
+                self._draw_audio_glyph(painter, x + w - 14, y + (h - 10) / 2, color)
+
         if is_selected:
             painter.setPen(QPen(QColor("#4a8cff"), 2))
             painter.drawPath(path)
+
+    @staticmethod
+    def _draw_audio_glyph(painter, x, y, color):
+        """Draw a small speaker glyph at (x, y) to indicate the layer
+        has generated voice audio. The colour is lightened to be
+        visible on the bar fill.
+        """
+        from PySide6.QtGui import QColor as _QC
+        glyph_color = _QC(
+            min(color.red() + 120, 255),
+            min(color.green() + 120, 255),
+            min(color.blue() + 120, 255),
+        )
+        painter.setPen(glyph_color)
+        painter.setBrush(glyph_color)
+        x0 = float(x)
+        y0 = float(y)
+        h = 10.0
+        w_box = 4.0
+        # Speaker cone
+        speaker = QPainterPath()
+        speaker.moveTo(x0, y0 + h * 0.25)
+        speaker.lineTo(x0 + w_box, y0 + h * 0.25)
+        speaker.lineTo(x0 + w_box + 3, y0)
+        speaker.lineTo(x0 + w_box + 3, y0 + h)
+        speaker.lineTo(x0 + w_box, y0 + h * 0.75)
+        speaker.lineTo(x0, y0 + h * 0.75)
+        speaker.closeSubpath()
+        painter.drawPath(speaker)
+        # Sound waves
+        for w_off, w_amp in ((6, 0.35), (8, 0.55), (10, 0.75)):
+            wave = QPainterPath()
+            wave.moveTo(x0 + w_box + 2 + w_off * 0.3, y0 + h * (0.5 - w_amp * 0.3))
+            wave.quadTo(
+                x0 + w_box + 2 + w_off,
+                y0 + h * 0.5,
+                x0 + w_box + 2 + w_off * 0.3,
+                y0 + h * (0.5 + w_amp * 0.3),
+            )
+            painter.drawPath(wave)
 
     def _draw_blur_layer_bar(self, painter, layer, x, y, w, h, is_selected):
         color = QColor("#6b5b7b")
@@ -676,6 +743,7 @@ class EditorTimeline(QGraphicsView):
             LayerType.VIDEO: QColor("#2a6bcf"),
             LayerType.AUDIO: QColor("#2a9d3f"),
             LayerType.SUBTITLE: QColor("#c96b2a"),
+            LayerType.DUB_SUBTITLE: QColor("#c96b2a"),
             LayerType.TEXT: QColor("#9b4dca"),
             LayerType.IMAGE: QColor("#2a9baa"),
             LayerType.STICKER: QColor("#d4a028"),

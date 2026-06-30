@@ -10,6 +10,7 @@ class LayerType(str, Enum):
     VIDEO = "video"
     AUDIO = "audio"
     SUBTITLE = "subtitle"
+    DUB_SUBTITLE = "dub_subtitle"
     TEXT = "text"
     IMAGE = "image"
     STICKER = "sticker"

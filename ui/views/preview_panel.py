@@ -860,8 +860,6 @@ def build_preview_panel(gui):
     gui.inspector_stack = inspector_stack
 
     inspector_card = QFrame()
-    # No outer border - the Subtitle Inspector blends into the shell.
-    # Background color matches the audio track inspector (#132033).
     inspector_card.setObjectName("statusCard")
     inspector_card.setMinimumWidth(400)
     inspector_card.setMaximumWidth(560)
@@ -885,47 +883,48 @@ def build_preview_panel(gui):
     inspector_header.addStretch(0)
     inspector_layout.addLayout(inspector_header)
 
-    gui.subtitle_inspector_details_widget = QWidget()
-    gui.subtitle_inspector_details_widget.setObjectName("segmentInspectorDetails")
-    inspector_details_layout = QVBoxLayout(gui.subtitle_inspector_details_widget)
-    inspector_details_layout.setContentsMargins(0, 0, 0, 0)
-    inspector_details_layout.setSpacing(10)
-
+    # --- Action buttons at top ---
     inspector_actions_row = QHBoxLayout()
     inspector_actions_row.setSpacing(8)
     gui.rewrite_translation_btn = QPushButton("Rewrite")
-    gui.rewrite_selected_segment_btn = QPushButton("Rewrite Selected Subtitle")
+    gui.rewrite_selected_segment_btn = QPushButton("Rewrite Selected")
     gui.import_translation_btn = QPushButton("Import SRT")
+    gui.audio_inspector_regenerate_voice_btn = QPushButton("Regenerate voice")
+    gui.audio_inspector_regenerate_voice_btn.setToolTip(
+        "Re-generate the dubbed voice for the currently selected segment."
+    )
+    gui.audio_inspector_regenerate_voice_btn.setEnabled(False)
     gui.rewrite_selected_segment_btn.clicked.connect(gui.run_rewrite_selected_segment)
     inspector_actions_row.addWidget(gui.rewrite_translation_btn)
     inspector_actions_row.addWidget(gui.rewrite_selected_segment_btn)
     inspector_actions_row.addWidget(gui.import_translation_btn)
+    inspector_actions_row.addWidget(gui.audio_inspector_regenerate_voice_btn)
+    inspector_actions_row.addStretch(1)
     inspector_layout.addLayout(inspector_actions_row)
 
-    gui.show_original_subtitle_cb = QCheckBox("Show original")
-    gui.show_original_subtitle_cb.setChecked(True)
-    inspector_toggle_row = QHBoxLayout()
-    inspector_toggle_row.setSpacing(10)
-    inspector_toggle_row.addWidget(gui.show_original_subtitle_cb)
-    inspector_toggle_row.addStretch(1)
-    inspector_layout.addLayout(inspector_toggle_row)
+    # --- Shared section: Original text ---
+    gui.inspector_shared_original_label = QWidget()
+    _orig_layout = QHBoxLayout(gui.inspector_shared_original_label)
+    _orig_layout.setContentsMargins(0, 0, 0, 0)
+    _orig_layout.setSpacing(6)
+    _orig_icon = QLabel("\u25B6")
+    _orig_icon.setStyleSheet("color: #6ee7d6; font-size: 10px;")
+    _orig_icon.setFixedWidth(14)
+    _orig_layout.addWidget(_orig_icon)
+    gui.inspector_original_text_label = QLabel("")
+    gui.inspector_original_text_label.setObjectName("helperLabel")
+    gui.inspector_original_text_label.setWordWrap(True)
+    gui.inspector_original_text_label.setStyleSheet("color: #cfe6ff;")
+    _orig_layout.addWidget(gui.inspector_original_text_label, 1)
+    gui.inspector_shared_original_label.hide()
+    inspector_layout.addWidget(gui.inspector_shared_original_label)
 
-    inspector_nav_row = QHBoxLayout()
-    inspector_nav_row.setSpacing(8)
-    inspector_layout.addLayout(inspector_nav_row)
-
-    # The segment editor container is a plain widget (no inner
-    # QScrollArea) so the outer inspector QScrollArea provides the
-    # single scroll layer. This avoids the nested-scroll confusion
-    # the user reported.
     gui.segment_editor_container = QWidget()
     gui.segment_editor_container.setObjectName("segmentEditorContainer")
     gui.segment_editor_layout = QVBoxLayout(gui.segment_editor_container)
     gui.segment_editor_layout.setContentsMargins(0, 0, 0, 0)
     gui.segment_editor_layout.setSpacing(10)
-    inspector_details_layout.addWidget(gui.segment_editor_container, 1)
-    inspector_layout.addWidget(gui.subtitle_inspector_details_widget, 1)
-    gui.subtitle_inspector_details_widget.setVisible(False)
+    inspector_layout.addWidget(gui.segment_editor_container, 1)
 
     # --- Audio Track Inspector ---
     # Compact card: header + volume slider + mute/solo + gain/speed. The
@@ -1041,75 +1040,10 @@ def build_preview_panel(gui):
     gui.audio_inspector_tip_label.setWordWrap(True)
     audio_layout.addWidget(gui.audio_inspector_tip_label)
 
-    # --- Dub Voice (only shown for A2 Dub) ---
-    # Wrapped in a container so it can be hidden for A1 Audio.
-    # Start hidden - revealed when A2 Dub is selected.
+    # Dub voice widgets are now in the inspector's Dub tab.
+    # audio_inspector_card only has volume/fade controls for A1 Audio.
     gui.audio_inspector_dub_section = QWidget()
     gui.audio_inspector_dub_section.setVisible(False)
-    dub_section_layout = QVBoxLayout(gui.audio_inspector_dub_section)
-    dub_section_layout.setContentsMargins(0, 0, 0, 0)
-    dub_section_layout.setSpacing(6)
-    dub_voice_title = QLabel("Dub Voice")
-    dub_voice_title.setObjectName("sectionTitle")
-    dub_section_layout.addWidget(dub_voice_title)
-    # Single input frame containing both display and input - styled
-    # like the subtitle input frame so the whole area looks like one
-    # continuous input box.
-    gui.audio_inspector_dub_card = QFrame()
-    gui.audio_inspector_dub_card.setObjectName("segmentInspectorEditor")
-    gui.audio_inspector_dub_card.setFrameShape(QFrame.StyledPanel)
-    dub_card_layout = QVBoxLayout(gui.audio_inspector_dub_card)
-    dub_card_layout.setContentsMargins(10, 10, 10, 10)
-    dub_card_layout.setSpacing(6)
-    # Start/End timing chips (mirrors the Subtitle Inspector)
-    timing_layout = QHBoxLayout()
-    timing_layout.setContentsMargins(0, 0, 0, 0)
-    timing_layout.setSpacing(12)
-    gui.audio_inspector_dub_start_label = QLabel("Start  -")
-    gui.audio_inspector_dub_start_label.setObjectName("timingChip")
-    gui.audio_inspector_dub_end_label = QLabel("End  -")
-    gui.audio_inspector_dub_end_label.setObjectName("timingChip")
-    timing_layout.addWidget(gui.audio_inspector_dub_start_label)
-    timing_layout.addWidget(gui.audio_inspector_dub_end_label)
-    timing_layout.addStretch()
-    dub_card_layout.addLayout(timing_layout)
-    gui.audio_inspector_segment_index_label = QLabel("Selected segment: -")
-    gui.audio_inspector_segment_index_label.setObjectName("helperLabel")
-    gui.audio_inspector_segment_index_label.setWordWrap(True)
-    dub_card_layout.addWidget(gui.audio_inspector_segment_index_label)
-    gui.audio_inspector_spoken_status_label = QLabel("")
-    gui.audio_inspector_spoken_status_label.setObjectName("helperLabel")
-    gui.audio_inspector_spoken_status_label.setWordWrap(True)
-    dub_card_layout.addWidget(gui.audio_inspector_spoken_status_label)
-    # Editable input that shows the current dub content (subtitle text
-    # or stored spoken text) and lets the user edit it directly.
-    gui.audio_inspector_spoken_editor = QTextEdit()
-    gui.audio_inspector_spoken_editor.setObjectName("segmentInspectorEditor")
-    gui.audio_inspector_spoken_editor.setAcceptRichText(False)
-    gui.audio_inspector_spoken_editor.setMinimumHeight(96)
-    gui.audio_inspector_spoken_editor.setMaximumHeight(96)
-    gui.audio_inspector_spoken_editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-    gui.audio_inspector_spoken_editor.setPlaceholderText("Text spoken by the voice.")
-    dub_card_layout.addWidget(gui.audio_inspector_spoken_editor, 0)
-    dub_voice_row = QHBoxLayout()
-    dub_voice_row.setSpacing(6)
-    dub_voice_row.setContentsMargins(0, 0, 0, 0)
-    gui.audio_inspector_use_voice_btn = QPushButton("Use voice for subtitle")
-    gui.audio_inspector_use_voice_btn.setToolTip(
-        "Copy the TTS spoken text back into the subtitle text for the "
-        "currently selected segment."
-    )
-    gui.audio_inspector_use_voice_btn.setEnabled(False)
-    dub_voice_row.addWidget(gui.audio_inspector_use_voice_btn)
-    gui.audio_inspector_regenerate_voice_btn = QPushButton("Regenerate voice")
-    gui.audio_inspector_regenerate_voice_btn.setToolTip(
-        "Re-generate the dubbed voice for the currently selected segment."
-    )
-    gui.audio_inspector_regenerate_voice_btn.setEnabled(False)
-    dub_voice_row.addWidget(gui.audio_inspector_regenerate_voice_btn)
-    dub_voice_row.addStretch(1)
-    dub_card_layout.addLayout(dub_voice_row)
-    dub_section_layout.addWidget(gui.audio_inspector_dub_card)
     audio_layout.addWidget(gui.audio_inspector_dub_section)
     audio_layout.addStretch(1)
 
@@ -1525,7 +1459,6 @@ def build_preview_panel(gui):
     # icon; both are now hidden and the empty strip has been removed.
     inspector_shell_layout.addWidget(gui.inspector_stack, 1)
 
-    gui.subtitle_inspector_details_widget.setVisible(False)
     gui.subtitle_inspector_shell = inspector_shell
     # Initial width; the actual value is recomputed by
     # `_sync_subtitle_inspector_shell_width` based on the active card.

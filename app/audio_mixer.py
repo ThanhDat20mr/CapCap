@@ -69,36 +69,54 @@ def fit_wav_to_duration(
     fit_ratio = target_duration / source_duration
     if abs(fit_ratio - 1.0) < 0.02:
         return input_wav_path
-    if mode_key == "smart":
-        # Smart mode should avoid "saving" bad TTS by over-stretching.
-        # Past this range the text itself likely needs to be shorter.
-        if fit_ratio < 1.0 and fit_ratio < smart_min_ratio:
-            return input_wav_path
-        if fit_ratio > 1.0 and fit_ratio > smart_max_ratio:
-            return input_wav_path
 
     ffmpeg = _ffmpeg_path()
     if not os.path.exists(ffmpeg):
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
 
     os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
-    filter_chain = _build_atempo_filter(1.0 / fit_ratio)
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-i",
-        input_wav_path,
-        "-filter:a",
-        filter_chain,
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        output_wav_path,
-    ]
+
+    if mode_key == "smart":
+        # Smart mode: when the audio is too long, TRIM (cut) it to
+        # match the target duration instead of speeding it up. When it's
+        # too short, stretch (atempo) up to the safe range.
+        if fit_ratio < 1.0:
+            # Audio shorter than target — stretch to fit.
+            if fit_ratio < smart_min_ratio:
+                return input_wav_path
+            atempo_ratio = 1.0 / fit_ratio
+            filter_chain = _build_atempo_filter(atempo_ratio)
+            cmd = [
+                ffmpeg, "-y", "-i", input_wav_path,
+                "-filter:a", filter_chain,
+                "-ar", "16000", "-ac", "1",
+                output_wav_path,
+            ]
+        else:
+            # Audio longer than target — TRIM (cut) to fit, no speed
+            # change. Use ffmpeg's `-t` flag to set the output duration.
+            cmd = [
+                ffmpeg, "-y", "-i", input_wav_path,
+                "-t", str(target_duration),
+                "-ar", "16000", "-ac", "1",
+                output_wav_path,
+            ]
+    else:
+        # Force mode: use atempo to speed up the audio so it fits the
+        # target duration. This is the legacy behaviour.
+        if fit_ratio > 1.0 and fit_ratio > smart_max_ratio:
+            return input_wav_path
+        filter_chain = _build_atempo_filter(1.0 / fit_ratio)
+        cmd = [
+            ffmpeg, "-y", "-i", input_wav_path,
+            "-filter:a", filter_chain,
+            "-ar", "16000", "-ac", "1",
+            output_wav_path,
+        ]
+
     proc = subprocess.run(cmd, capture_output=True, text=True, **_subprocess_run_kwargs())
     if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg time-stretch failed:\n{proc.stderr or proc.stdout}")
+        raise RuntimeError(f"FFmpeg fit failed:\n{proc.stderr or proc.stdout}")
     return output_wav_path
 
 

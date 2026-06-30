@@ -234,17 +234,9 @@ def _connect_ui_signals(gui):
         gui.audio_inspector_solo_btn.toggled.connect(
             gui.on_audio_inspector_solo_toggled
         )
-    if hasattr(gui, "audio_inspector_use_voice_btn"):
-        gui.audio_inspector_use_voice_btn.clicked.connect(
-            gui.on_audio_inspector_use_voice_clicked
-        )
     if hasattr(gui, "audio_inspector_regenerate_voice_btn"):
         gui.audio_inspector_regenerate_voice_btn.clicked.connect(
             gui.on_audio_inspector_regenerate_voice_clicked
-        )
-    if hasattr(gui, "audio_inspector_spoken_editor"):
-        gui.audio_inspector_spoken_editor.textChanged.connect(
-            gui._on_audio_inspector_spoken_text_edited
         )
     if hasattr(gui, "blur_inspector_show_cb"):
         gui.blur_inspector_show_cb.toggled.connect(
@@ -274,7 +266,6 @@ def _connect_ui_signals(gui):
     gui.translated_text.textChanged.connect(gui.refresh_ui_state)
     gui.translated_text.textChanged.connect(gui.schedule_live_subtitle_preview_refresh)
     gui.translated_text.textChanged.connect(gui.sync_segment_editor_from_hidden_text)
-    gui.show_original_subtitle_cb.toggled.connect(gui.toggle_original_subtitle_visibility)
     if hasattr(gui, "anchor_inspector_cb"):
         gui.anchor_inspector_cb.toggled.connect(gui.on_anchor_inspector_toggled)
     gui.subtitle_font_combo.currentTextChanged.connect(gui.update_subtitle_preview_style)
