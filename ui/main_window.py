@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QLineEdit,
                              QFileDialog, QTextEdit, QComboBox,
+                             QDoubleSpinBox,
                              QFrame, QProgressBar, QMessageBox,
                              QScrollArea,
                              QColorDialog, QTabWidget, QDialog, QSizePolicy, QInputDialog, QLayout)
@@ -8597,14 +8598,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.timeline_split_btn.setEnabled(has_timeline_segments)
         if hasattr(self, "timeline_delete_btn"):
             self.timeline_delete_btn.setEnabled(has_timeline_segments)
-        if hasattr(self, "timeline_nudge_left_btn"):
-            self.timeline_nudge_left_btn.setEnabled(has_timeline_segments)
-        if hasattr(self, "timeline_nudge_right_btn"):
-            self.timeline_nudge_right_btn.setEnabled(has_timeline_segments)
-        if hasattr(self, "timeline_ripple_left_btn"):
-            self.timeline_ripple_left_btn.setEnabled(has_timeline_segments)
-        if hasattr(self, "timeline_ripple_right_btn"):
-            self.timeline_ripple_right_btn.setEnabled(has_timeline_segments)
+
         if hasattr(self, "clean_project_action"):
             self.clean_project_action.setEnabled(self._has_cleanable_project_data())
         self.run_all_btn.setEnabled(v_ok and not self._pipeline_active)
