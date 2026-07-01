@@ -1,6 +1,7 @@
 import os
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QProgressBar,
     QRadioButton,
@@ -185,9 +187,20 @@ def build_start_group(gui, left_layout):
     gui.final_output_folder_edit.setPlaceholderText("Folder to save final results...")
     gui.final_output_folder_edit.hide()
 
-    gui.run_all_btn = QPushButton("Generate")
+    gui.run_all_btn = QToolButton()
     gui.run_all_btn.setObjectName("mainActionBtn")
-    gui.run_all_btn.clicked.connect(gui.smart_generate)
+    gui.run_all_btn.setText("Generate")
+    gui.run_all_btn.setPopupMode(QToolButton.InstantPopup)
+
+    gui._generate_menu = QMenu(gui.run_all_btn)
+    gui._generate_menu.setObjectName("generateMenu")
+    gui._generate_full_action = QAction("Generate Full Pipeline", gui.run_all_btn)
+    gui._generate_full_action.triggered.connect(gui.run_all_pipeline)
+    gui._generate_menu.addAction(gui._generate_full_action)
+    gui._regen_voice_action = QAction("Generate Voice Only", gui.run_all_btn)
+    gui._regen_voice_action.triggered.connect(gui.run_voiceover_with_progress)
+    gui._generate_menu.addAction(gui._regen_voice_action)
+    gui.run_all_btn.setMenu(gui._generate_menu)
 
     gui.export_btn = QPushButton("Export")
     gui.export_btn.setObjectName("mainActionBtn")

@@ -357,15 +357,22 @@ class VideoTranslatorGUI(QMainWindow):
                 background-color: #2d4665;
                 border-color: #4575a8;
             }
-            QPushButton#mainActionBtn {
+            QPushButton#mainActionBtn, QToolButton#mainActionBtn {
                 background-color: #4ed0b3;
                 color: #0b1620;
                 border: none;
+                border-radius: 10px;
                 font-size: 13px;
+                font-weight: bold;
                 border-bottom: 2px solid #258971;
+                padding: 8px 14px;
             }
-            QPushButton#mainActionBtn:hover {
+            QPushButton#mainActionBtn:hover, QToolButton#mainActionBtn:hover {
                 background-color: #66ddc2;
+            }
+            QToolButton#mainActionBtn::menu-indicator {
+                image: none;
+                width: 0px;
             }
             QPushButton#secondaryActionBtn {
                 background-color: #18314a;
@@ -383,23 +390,23 @@ class VideoTranslatorGUI(QMainWindow):
                 width: 0px;
                 image: none;
             }
-            QMenu#headerMoreMenu {
+            QMenu#headerMoreMenu, QMenu#generateMenu {
                 background-color: #0f1724;
                 color: #e6eef9;
                 border: 1px solid #30425b;
                 padding: 6px;
             }
-            QMenu#headerMoreMenu::item {
+            QMenu#headerMoreMenu::item, QMenu#generateMenu::item {
                 background-color: transparent;
                 color: #e6eef9;
                 padding: 8px 14px;
                 border-radius: 8px;
             }
-            QMenu#headerMoreMenu::item:selected {
+            QMenu#headerMoreMenu::item:selected, QMenu#generateMenu::item:selected {
                 background-color: #213248;
                 color: #ffffff;
             }
-            QMenu#headerMoreMenu::separator {
+            QMenu#headerMoreMenu::separator, QMenu#generateMenu::separator {
                 height: 1px;
                 background: #2b425c;
                 margin: 6px 8px;

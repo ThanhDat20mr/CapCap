@@ -1,396 +1,119 @@
-# Layer System Specification (MVP)
+# TS1 Timeline & Sync Mode Specification
 
-## Goal
+## Overview
 
-Build a simple and extensible layer system for an AI-powered video translation and dubbing editor.
+After generating voice/video, the application creates a single **TS1** track.
 
-The system should support:
+Each TS1 segment contains:
+- Start / End time
+- Subtitle text
+- Generated TTS audio
+- Voice speed
+- Volume
 
-* Original video
-* Original audio
-* AI dubbing (TTS)
-* Subtitles
-* Blur/masking regions
+The subtitle displayed on the video always uses the segment text.
 
-Future features should be able to reuse the same architecture without major changes.
-
----
-
-# Phase 1 — Import Video
-
-## Automatically Create
-
-When a video is imported:
-
-```text
-V1 Original Video
-A1 Original Audio
-```
-
-## UI
-
-```text
-V1 Original Video
-
-A1 Original Audio
-```
-
-## Rules
-
-### V1 Original Video
-
-Always exists.
-
-Contains:
-
-* Video file
-* Duration
-* Resolution
-* FPS
-
-### A1 Original Audio
-
-Always exists.
-
-Contains:
-
-* Original audio stream
-* Volume controls
-* Mute controls
-
-The original audio should never be overwritten.
+If the actual audio duration extends beyond the next segment, the overlapping segment is automatically displayed on the next row (row stacking).
 
 ---
 
-# Phase 2 — Generate Subtitle
+## Timeline Editing
 
-Pipeline:
+### Edit Subtitle
 
-```text
-Video
-↓
-Transcription
-↓
-Translation
-↓
-Subtitle Generation
-```
+When the subtitle text is changed and **Regenerate Voice** is executed:
 
-## Create
+- Regenerate TTS for that segment.
+- Update the audio duration.
+- Update the timeline.
+- Recalculate row stacking.
 
-```text
-S1 Subtitle
-```
-
-## UI
-
-```text
-V1 Original Video
-
-A1 Original Audio
-
-S1 Subtitle
-```
-
-## Rules
-
-* Subtitle layer is optional.
-* Subtitle segments are stored independently.
-* Subtitle rendering uses libass.
-* Subtitle must appear above all visual effects.
+If the regenerated audio becomes shorter and no longer overlaps, the segment automatically moves back to the first row.
 
 ---
 
-# Phase 3 — Generate TTS
+### Edit Duration
 
-Pipeline:
+Users can resize a segment to increase or decrease its duration.
 
-```text
-Translated Subtitle
-↓
-TTS Generation
-```
+Resizing only changes the timeline duration.
 
-## Create
-
-```text
-A2 Dub Audio
-```
-
-## UI
-
-```text
-V1 Original Video
-
-A1 Original Audio
-
-A2 Dub Audio
-
-S1 Subtitle
-```
-
-## Rules
-
-* A2 is an audio group.
-* A2 contains one or more tracks.
-* Each track contains multiple TTS clips.
-* Clips are generated from subtitle segments.
+The audio is regenerated only when **Regenerate Voice** is executed.
 
 ---
 
-# Phase 4 — Handle Overlapping Dialogue
+### Voice Speed
 
-Problem:
-
-```text
-Speaker A
-|--------|
-
-Speaker B
-    |--------|
-```
-
-Multiple speakers may talk simultaneously.
-
-A single audio track is not sufficient.
+Each segment can have its own voice speed.
 
 ---
 
-## Solution
+### Volume
 
-Create additional tracks inside A2.
+Volume is applied to the entire TS1 track.
 
-Example:
+---
 
-```text
-A2 Dub Audio
+# Sync Modes
 
-├─ Track 1
-│   └─ Speaker A
-│
-└─ Track 2
-    └─ Speaker B
-```
+## OFF
 
-## Rules
+**Priority:** Preserve original TTS.
 
-When generating TTS clips:
+- No timing adjustment.
+- No silence trimming.
+- No speed adjustment.
+- No audio trimming.
+- Audio always plays completely.
+- Overlapping segments are displayed using row stacking.
 
-```text
-If clip overlaps
-    ↓
-Create/use another track
-```
+---
+
+## SMART (Recommended)
+
+**Priority:** Balance speech quality and timeline accuracy.
+
+Processing order:
+
+1. Trim trailing silence.
+2. Slightly increase speech speed (within a safe limit).
+3. If only a very small overflow remains, trim the remaining audio.
+4. If the overflow is still significant, keep the original audio and allow overlap.
 
 Result:
 
-```text
-A2 Dub Audio
-
-├─ Track 1
-├─ Track 2
-├─ Track 3
-```
-
-Track count depends on overlap complexity.
+- Most segments fit naturally.
+- Speech remains natural.
+- Minor overlaps may still occur.
 
 ---
 
-# Phase 5 — Detect Original Subtitle Region
+## Timeline Priority
 
-Pipeline:
+**Priority:** Keep the timeline clean.
 
-```text
-OCR
-↓
-Subtitle Detection
-```
+- Audio playback is limited to the segment duration.
+- When the segment reaches its end, playback immediately switches to the next segment.
+- Subtitle remains unchanged.
 
-OCR results are NOT layers.
+Result:
 
-OCR is analysis data only.
-
-Example:
-
-```json
-{
-  "text": "Hello",
-  "bbox": [100, 200, 300, 250]
-}
-```
-
-OCR data should be stored separately from timeline layers.
+- No overlapping segments.
+- Timeline always stays on a single row.
+- The end of the speech may be skipped if it exceeds the segment duration.
 
 ---
 
-# Phase 6 — Generate Blur Layer
+## Force Fit
 
-Purpose:
+**Priority:** Preserve complete speech.
 
-* Hide original subtitles
-* Hide logos
-* Hide watermarks
-* Hide faces
-* Hide license plates
+- Increase speech speed as much as allowed.
+- Try to fit the entire audio into the segment duration.
+- If it still cannot fit, keep the full audio and allow overlap.
 
-## Create
+Result:
 
-```text
-B1 Blur
-```
-
-## UI
-
-```text
-V1 Original Video
-
-B1 Blur
-
-A1 Original Audio
-
-A2 Dub Audio
-
-S1 Subtitle
-```
-
-## Rules
-
-B1 is a group layer.
-
-Inside B1:
-
-```text
-Blur Item 1
-Blur Item 2
-Blur Item 3
-```
-
-Each blur item contains:
-
-```text
-Position
-Size
-Duration
-Blur Strength
-```
-
----
-
-# Phase 7 — Visual Render Order
-
-Render order is critical.
-
-Correct order:
-
-```text
-Video
-↓
-Blur
-↓
-Image / Sticker / Overlay
-↓
-Subtitle
-```
-
-Reason:
-
-```text
-Original subtitle exists inside video
-↓
-Blur hides original subtitle
-↓
-New subtitle appears on top
-```
-
-New subtitle must never be blurred.
-
----
-
-# Phase 8 — Audio Render Order
-
-Audio processing:
-
-```text
-A1 Original Audio
-+
-A2 Dub Audio
-↓
-Audio Mixer
-↓
-Final Audio Output
-```
-
-Export options:
-
-```text
-Original Audio Only
-
-Dub Audio Only
-
-Original + Dub Audio
-```
-
----
-
-# Final MVP Layer Structure
-
-## Always Present
-
-```text
-V1 Original Video
-
-A1 Original Audio
-```
-
----
-
-## Generated By Pipeline
-
-```text
-B1 Blur
-
-A2 Dub Audio
-
-S1 Subtitle
-```
-
----
-
-## Final Timeline Example
-
-```text
-V1 Original Video
-
-B1 Blur
-
-A1 Original Audio
-
-A2 Dub Audio
-├─ Track 1
-├─ Track 2
-└─ Track N
-
-S1 Subtitle
-```
-
----
-
-# Future Expansion
-
-Future layers can be added without changing the architecture.
-
-Examples:
-
-```text
-I1 Image Layer
-
-L1 Logo Layer
-
-T1 Text Layer
-
-M1 Background Music
-
-FX1 Effect Layer
-```
-
-All future layers should follow the same timeline and rendering model.
+- Speech is preserved.
+- Less overlap than OFF.
+- May still overlap in extreme cases.
