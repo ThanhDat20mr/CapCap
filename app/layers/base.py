@@ -68,7 +68,7 @@ class BaseLayer:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BaseLayer:
-        return cls(
+        layer = cls(
             id=str(data.get("id", uuid4().hex[:12])),
             name=str(data.get("name", "")),
             start=float(data.get("start", 0.0)),
@@ -80,3 +80,10 @@ class BaseLayer:
             blend_mode=BlendMode(data.get("blend_mode", "normal")),
             metadata=dict(data.get("metadata", {}) or {}),
         )
+        type_raw = data.get("type", None)
+        if type_raw is not None:
+            try:
+                layer.type = LayerType(type_raw)
+            except (TypeError, ValueError):
+                pass
+        return layer

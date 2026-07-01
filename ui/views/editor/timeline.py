@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView
 
 from app.layers.base import BaseLayer, LayerType
 from app.layers.timeline import Timeline, Track, Clip
+from app.layers.dub_subtitle import DubSubtitleLayer
 
 
 class EditorTimeline(QGraphicsView):
@@ -420,6 +421,9 @@ class EditorTimeline(QGraphicsView):
 
     @staticmethod
     def _is_subtitle_track(track) -> bool:
+        track_type = getattr(track, "type", None)
+        if track_type in (LayerType.SUBTITLE, LayerType.DUB_SUBTITLE):
+            return True
         return any(
             getattr(l, "type", None) in (LayerType.SUBTITLE, LayerType.DUB_SUBTITLE)
             for l in getattr(track, "layers", [])
@@ -612,8 +616,14 @@ class EditorTimeline(QGraphicsView):
         view_w = self.viewport().width()
         is_blur = self._is_blur_track(track)
         overlap_stack = self._should_overlap_stack(track)
+        # Force every bar on a subtitle track to share the same orange
+        # color, regardless of the layer's runtime class or type. This
+        # guarantees the track reads as a single uniform subtitle strip
+        # even if a layer was hydrated with the wrong type (e.g. a
+        # stale SubtitleLayer rather than a DubSubtitleLayer from an
+        # older project file).
+        force_subtitle_color = self._is_subtitle_track(track)
         visible_layers = [l for l in track.layers if l.visible]
-        layer_row_by_id: dict[str, int] = {}
         if overlap_stack:
             layer_rows, num_rows = self._compute_overlap_rows(visible_layers)
             num_rows = max(1, num_rows)
@@ -641,7 +651,6 @@ class EditorTimeline(QGraphicsView):
                     row = layer_rows[visible_idx]
                 except ValueError:
                     row = 0
-                layer_row_by_id[layer.id] = row
                 bar_y, slot_h = row_slots[row]
                 bar_h = max(slot_h - margin * 2, 8)
             elif is_blur:
@@ -658,36 +667,50 @@ class EditorTimeline(QGraphicsView):
             if clip_w <= 0:
                 continue
             is_selected = layer.id == self._selected_layer_id
-            is_overflow_row = overlap_stack and layer_row_by_id.get(layer.id, 0) > 0
+            track_name = (getattr(track, "name", "") or "").split(" ")[0]
+            is_subtitle_track_name = track_name in ("TS1", "S1")
             if layer.type == LayerType.BLUR:
                 self._draw_blur_layer_bar(painter, layer, x, bar_y, w, bar_h, is_selected)
             else:
                 self._draw_standard_layer_bar(
                     painter, layer, x, bar_y, w, bar_h, view_w,
-                    is_selected, is_overflow_row=is_overflow_row,
+                    is_selected, force_subtitle_color=force_subtitle_color,
+                    force_subtitle_track=is_subtitle_track_name,
                 )
 
-    def _draw_standard_layer_bar(self, painter, layer, x, y, w, h, view_w, is_selected, is_overflow_row: bool = False):
-        # Fill color is the same for every DubSubtitleLayer bar so the
-        # track reads as a single uniform subtitle strip — only the
-        # selection state and the overflow row get a different border
-        # to communicate stacking without changing the perceived color.
-        color = self._layer_color(layer.type)
-        if is_selected:
-            color = color.lighter(130)
+    def _draw_standard_layer_bar(self, painter, layer, x, y, w, h, view_w, is_selected, is_overflow_row: bool = False, force_subtitle_color: bool = False, force_subtitle_track: bool = False):
+        # Every subtitle bar (DubSubtitleLayer, SubtitleLayer, or any
+        # layer drawn on the TS1 track) uses the exact same fill +
+        # border constants so the track reads as one uniform subtitle
+        # strip regardless of which row the layer is on or whether
+        # it's the currently playing/selected segment. No lighter()
+        # or darker() is called on the fill — selection is shown only
+        # by an accent border drawn on top.
+        # Use type-based check as the primary signal so the fill is
+        # uniform even if the layer was hydrated as a plain BaseLayer
+        # (whose default type is VIDEO) by an older class map. The
+        # isinstance and track-name checks are kept as belt-and-braces
+        # for layers that have already been re-instantiated correctly.
+        # The dub_text attribute sniff is a final fallback so a
+        # pre-existing DubSubtitleLayer whose `type` was clobbered
+        # still renders as a subtitle bar.
+        layer_type = getattr(layer, "type", None)
+        is_subtitle_type = layer_type in (LayerType.SUBTITLE, LayerType.DUB_SUBTITLE)
+        has_dub_marker = bool(
+            getattr(layer, "dub_text", None) or getattr(layer, "_seg_dict", None)
+        )
+        if is_subtitle_type or force_subtitle_color or force_subtitle_track or has_dub_marker:
+            fill = QColor(201, 107, 42)   # #c96b2a — exact RGB, no derivation
+            border = QColor(141, 75, 29)  # #8d4b1d — color.darker(140) baked in
+        else:
+            fill = self._layer_color(layer.type)
+            border = fill.darker(140)
 
         rect = QRectF(x, y, w, h)
         path = QPainterPath()
         path.addRoundedRect(rect, 4, 4)
-        painter.fillPath(path, color)
-        # Overflow-row bars get a slightly dashed border so the user can
-        # see they're stacked under a neighbor whose audio bleeds
-        # past the segment end — without changing the bar fill color.
-        if is_overflow_row and not is_selected:
-            pen = QPen(color.darker(160), 1, Qt.DashLine)
-            painter.setPen(pen)
-        else:
-            painter.setPen(QPen(color.darker(140), 1))
+        painter.fillPath(path, fill)
+        painter.setPen(QPen(border, 1))
         painter.drawPath(path)
 
         if w > 40:
@@ -718,7 +741,10 @@ class EditorTimeline(QGraphicsView):
                 and getattr(layer, "audio_path", "")
                 and h >= 14
             ):
-                self._draw_audio_glyph(painter, x + w - 14, y + (h - 10) / 2, color)
+                # Use a fixed glyph color (no derivation from the bar
+                # fill) so the glyph can't make one bar look lighter
+                # than another.
+                self._draw_audio_glyph(painter, x + w - 14, y + (h - 10) / 2, QColor("#ffffff"))
 
         if is_selected:
             painter.setPen(QPen(QColor("#4a8cff"), 2))
@@ -766,8 +792,6 @@ class EditorTimeline(QGraphicsView):
 
     def _draw_blur_layer_bar(self, painter, layer, x, y, w, h, is_selected):
         color = QColor("#6b5b7b")
-        if is_selected:
-            color = color.lighter(130)
 
         # Each child layer fills the full track height (passed as h)
         # so Blur 1 and Blur 2 both span the entire B1 track. The

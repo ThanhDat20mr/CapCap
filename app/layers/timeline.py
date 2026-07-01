@@ -12,11 +12,13 @@ from app.layers.text import TextLayer
 from app.layers.image import ImageLayer
 from app.layers.sticker import StickerLayer
 from app.layers.blur import BlurLayer
+from app.layers.dub_subtitle import DubSubtitleLayer
 
 LAYER_CLASS_MAP: dict[LayerType, type] = {
     LayerType.VIDEO: VideoLayer,
     LayerType.AUDIO: AudioLayer,
     LayerType.SUBTITLE: SubtitleLayer,
+    LayerType.DUB_SUBTITLE: DubSubtitleLayer,
     LayerType.TEXT: TextLayer,
     LayerType.IMAGE: ImageLayer,
     LayerType.STICKER: StickerLayer,
