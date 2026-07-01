@@ -745,6 +745,15 @@ class EditorTimeline(QGraphicsView):
                 # fill) so the glyph can't make one bar look lighter
                 # than another.
                 self._draw_audio_glyph(painter, x + w - 14, y + (h - 10) / 2, QColor("#ffffff"))
+                # _draw_audio_glyph leaves the brush set to the glyph
+                # color (white). Reset it so the next bar's border
+                # drawPath doesn't fill that bar white. Without this
+                # reset the brush leaks across bars in the same paint
+                # event: the first audio-glyph bar turns the next bar
+                # white via its border stroke, and the selection
+                # drawPath on the clicked bar also fills white over
+                # the orange fillPath.
+                painter.setBrush(Qt.NoBrush)
 
         if is_selected:
             painter.setPen(QPen(QColor("#4a8cff"), 2))
