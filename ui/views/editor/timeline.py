@@ -748,6 +748,11 @@ class EditorTimeline(QGraphicsView):
 
         if is_selected:
             painter.setPen(QPen(QColor("#4a8cff"), 2))
+            # _draw_audio_glyph above left the brush as glyph_color
+            # (white). drawPath() strokes AND fills, so without
+            # resetting the brush the selection pass would paint the
+            # bar white on top of the orange fillPath from earlier.
+            painter.setBrush(Qt.NoBrush)
             painter.drawPath(path)
 
     @staticmethod
