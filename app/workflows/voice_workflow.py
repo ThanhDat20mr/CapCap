@@ -1111,22 +1111,30 @@ class VoiceWorkflow:
             return False
         return abs(new_ratio - 1.0) < abs(old_ratio - 1.0)
 
-    def _apply_segment_speed(self, *, wavs, tmp_dir: str, voice_speed: float):
-        speed_value = float(voice_speed)
-        if abs(speed_value - 1.0) < 0.02:
-            return wavs
-
+    def _apply_segment_speed(self, *, wavs, tmp_dir: str, voice_speed: float, segments: list | None = None):
+        """Apply global or per-segment voice speed to each wav."""
         adjusted_wavs = []
         for idx, wav_path in enumerate(wavs):
             if not wav_path or not os.path.exists(wav_path):
                 adjusted_wavs.append(wav_path)
                 continue
-            adjusted_path = os.path.join(tmp_dir, f"seg_{idx:04d}_speed_{int(round(speed_value * 100)):03d}.wav")
+            seg_speed = float(voice_speed)
+            if segments and idx < len(segments):
+                try:
+                    raw = segments[idx].get("voice_speed")
+                    if raw is not None:
+                        seg_speed = float(raw)
+                except (TypeError, ValueError):
+                    pass
+            if abs(seg_speed - 1.0) < 0.02:
+                adjusted_wavs.append(wav_path)
+                continue
+            adjusted_path = os.path.join(tmp_dir, f"seg_{idx:04d}_speed_{int(round(seg_speed * 100)):03d}.wav")
             adjusted_wavs.append(
                 self.engine_runtime.change_wav_speed(
                     input_wav_path=wav_path,
                     output_wav_path=adjusted_path,
-                    speed_ratio=speed_value,
+                    speed_ratio=seg_speed,
                 )
             )
         return adjusted_wavs
@@ -1147,6 +1155,21 @@ class VoiceWorkflow:
             target_duration = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
             actual_duration = self._probe_wav_duration_seconds(wav_path)
             ratio = (actual_duration / target_duration) if target_duration > 0 else 0.0
+
+            # SMART: trim trailing silence first so the duration
+            # estimate used by speed-adjustment heuristics is based
+            # on actual speech, not dead air.
+            if (sync_mode or "off").strip().lower() == "smart":
+                trimmed_path = os.path.join(tmp_dir, f"seg_{idx:04d}_silencetrim.wav")
+                trimmed = self.engine_runtime.trim_trailing_silence(
+                    input_wav_path=polished_wavs[idx],
+                    output_wav_path=trimmed_path,
+                )
+                if trimmed != polished_wavs[idx]:
+                    polished_wavs[idx] = trimmed
+                    actual_duration = self._probe_wav_duration_seconds(trimmed)
+                    ratio = (actual_duration / target_duration) if target_duration > 0 else 0.0
+                    seg["_trimmed_silence"] = True
             speech_cost = int(((seg.get("_tts_metrics") or {}).get("speech_cost")) or 0)
             duration_sec = float(((seg.get("_tts_metrics") or {}).get("duration_sec")) or target_duration)
             attempt_count = int((seg.get("attempt_count") or (seg.get("_tts_metrics") or {}).get("attempt_count") or 1))
@@ -1250,13 +1273,16 @@ class VoiceWorkflow:
                     target_duration_seconds=target_duration,
                     mode="timeline",
                 )
-        if abs(float(voice_speed) - 1.0) >= 0.02:
+        if abs(float(voice_speed) - 1.0) >= 0.02 or any(
+            seg.get("voice_speed") for seg in (segments or [])
+        ):
             polished_wavs = self._apply_segment_speed(
                 wavs=polished_wavs,
                 tmp_dir=tmp_dir,
                 voice_speed=voice_speed,
+                segments=segments,
             )
-        if (sync_mode or "off").strip().lower() == "force":
+        if (sync_mode or "off").strip().lower() in ("force", "force fit"):
             for idx, (seg, wav_path) in enumerate(zip(list(segments or []), polished_wavs)):
                 if not wav_path or not os.path.exists(wav_path):
                     continue

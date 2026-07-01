@@ -436,7 +436,7 @@ def build_start_group(gui, left_layout):
     gui.voice_speed_spin.addItems(["0.8x", "0.9x", "1.0x", "1.1x", "1.2x", "1.3x", "1.4x", "1.5x", "1.6x", "1.8x", "2.0x"])
     gui.voice_speed_spin.setCurrentText("1.0x")
     gui.voice_timing_sync_combo = QComboBox()
-    gui.voice_timing_sync_combo.addItems(["Off", "Smart", "Timeline Priority", "Force"])
+    gui.voice_timing_sync_combo.addItems(["Off", "Smart", "Timeline Priority", "Force Fit"])
     gui.voice_timing_sync_combo.setCurrentText("Smart")
 
     def _sync_voice_speed_enabled(_value: str = ""):

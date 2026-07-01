@@ -852,6 +852,69 @@ class EditorTimeline(QGraphicsView):
         triangle = [QPointF(x - 6, 0), QPointF(x + 6, 0), QPointF(x, 8)]
         painter.drawPolygon(triangle)
 
+    def _hit_test_edge(self, pos, scroll_x: int, scroll_y: int = 0):
+        """Return ('left'|'right', layer_id) if pos is near a bar edge,
+        or ('body', layer_id) if inside the bar, or (None, '')."""
+        if not self._timeline:
+            return None, ""
+        click_y = pos.y() + scroll_y
+        y = self.RULER_HEIGHT
+        margin = 4
+        for track in self._timeline.tracks:
+            if not track.visible:
+                continue
+            th = self._track_heights.get(track.id, self.TRACK_DEFAULT_H)
+            if not (y <= click_y <= y + th):
+                y += th
+                continue
+            visible_layers = [l for l in track.layers if l.visible]
+            num_layers = max(1, len(visible_layers))
+            is_blur = self._is_blur_track(track)
+            overlap_stack = self._should_overlap_stack(track)
+            layers_in_row = []
+            if overlap_stack and num_layers > 1:
+                layer_rows, num_rows = self._compute_overlap_rows(visible_layers)
+                row_slots = []
+                cursor = y + margin
+                for r in range(num_rows):
+                    row_slots.append((cursor, self.CHILD_TRACK_H))
+                    cursor += self.CHILD_TRACK_H
+                row = -1
+                for r, (slot_y, slot_h) in enumerate(row_slots):
+                    if slot_y <= click_y <= slot_y + slot_h:
+                        row = r
+                        break
+                if row < 0:
+                    return None, ""
+                for visible_idx, layer in enumerate(visible_layers):
+                    if layer_rows[visible_idx] == row:
+                        layers_in_row.append(layer)
+            elif is_blur and num_layers > 1:
+                return None, ""
+            else:
+                layers_in_row = list(layers for layers in track.layers if layers.visible)
+            for layer in layers_in_row:
+                lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
+                lw = max(int(layer.duration * self.pixels_per_second), 20)
+                if lx - 4 <= pos.x() <= lx + lw + 4:
+                    dx = pos.x() - lx
+                    if dx <= self.HANDLE_W:
+                        return "left", layer.id
+                    if lw - dx <= self.HANDLE_W:
+                        return "right", layer.id
+                    return "body", layer.id
+            return None, ""
+        return None, ""
+
+    def _find_layer_by_id(self, layer_id: str):
+        if not self._timeline:
+            return None, None
+        for track in self._timeline.tracks:
+            for layer in track.layers:
+                if layer.id == layer_id:
+                    return track, layer
+        return None, None
+
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             pos = event.position()
@@ -865,30 +928,89 @@ class EditorTimeline(QGraphicsView):
                     self.seekRequested.emit(t)
                     self.seekRequestedMs.emit(int(t * 1000))
 
-            clicked_layer = self._hit_test_layer(pos, scroll_x, scroll_y)
-            if clicked_layer:
-                self._selected_layer_id = clicked_layer
-                self.layerSelected.emit(clicked_layer)
-                idx = self._segment_indices.get(clicked_layer, -1)
+            edge, lid = self._hit_test_edge(pos, scroll_x, scroll_y)
+            if lid and edge in ("left", "right"):
+                _, layer = self._find_layer_by_id(lid)
+                if layer:
+                    self._drag_state = {
+                        "type": f"resize_{edge}",
+                        "layer_id": lid,
+                        "start_time": float(layer.start),
+                        "end_time": float(layer.end),
+                        "layer_start_x": float(self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x),
+                    }
+                    self._selected_layer_id = lid
+                    self.layerSelected.emit(lid)
+                    idx = self._segment_indices.get(lid, -1)
+                    if idx >= 0:
+                        self.segmentTimingEditStarted.emit(idx, float(layer.start), float(layer.end))
+                        self.segmentSelected.emit(idx)
+                    self.viewport().update()
+                    event.accept()
+                    return
+
+            elif lid:
+                self._selected_layer_id = lid
+                self.layerSelected.emit(lid)
+                idx = self._segment_indices.get(lid, -1)
                 if idx >= 0:
                     self.segmentSelected.emit(idx)
                 self.viewport().update()
 
         super().mousePressEvent(event)
 
+    def mouseReleaseEvent(self, event) -> None:
+        if self._drag_state and event.button() == Qt.LeftButton:
+            drag = self._drag_state
+            self._drag_state = None
+            self.setCursor(Qt.ArrowCursor)
+            lid = drag["layer_id"]
+            _, layer = self._find_layer_by_id(lid)
+            if layer:
+                start = float(layer.start)
+                end = float(layer.end)
+                idx = self._segment_indices.get(lid, -1)
+                if idx >= 0:
+                    self.segmentTimingChanged.emit(idx, start, end)
+            self.viewport().update()
+        super().mouseReleaseEvent(event)
+
     def mouseMoveEvent(self, event) -> None:
+        pos = event.position()
+        scroll_x = self.horizontalScrollBar().value()
+        scroll_y = self.verticalScrollBar().value()
+        if self._drag_state:
+            drag = self._drag_state
+            t = self._pos_to_time(pos.x(), scroll_x)
+            t = max(0.0, min(t, self._duration))
+            _, layer = self._find_layer_by_id(drag["layer_id"])
+            if layer:
+                if drag["type"] == "resize_left":
+                    new_start = min(t, drag["end_time"] - self.MIN_DUR)
+                    new_start = max(0.0, new_start)
+                    layer.start = new_start
+                elif drag["type"] == "resize_right":
+                    new_end = max(t, drag["start_time"] + self.MIN_DUR)
+                    new_end = min(new_end, self._duration)
+                    layer.end = new_end
+                self.viewport().update()
+            event.accept()
+            return
+
         if event.buttons() & Qt.LeftButton:
-            pos = event.position()
-            # Only scrub the playhead while the user drags inside the
-            # ruler. Dragging on a track body should not move the
-            # playhead - that is reserved for layer selection/edits.
-            if pos.y() < self.RULER_HEIGHT:
-                scroll_x = self.horizontalScrollBar().value()
+            in_ruler = pos.y() < self.RULER_HEIGHT
+            if in_ruler:
                 t = self._pos_to_time(pos.x(), scroll_x)
                 if t >= 0:
                     self.set_playhead(t)
                     self.seekRequested.emit(t)
                     self.seekRequestedMs.emit(int(t * 1000))
+
+        edge, lid = self._hit_test_edge(pos, scroll_x, scroll_y)
+        if lid and edge in ("left", "right"):
+            self.setCursor(Qt.SizeHorCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
         super().mouseMoveEvent(event)
 
     def wheelEvent(self, event) -> None:

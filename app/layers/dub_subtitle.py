@@ -19,6 +19,7 @@ class DubSubtitleLayer(BaseLayer):
     dub_text: str = ""
     audio_path: str = ""
     muted: bool = False
+    voice_speed: float = 1.0
     tts_settings: dict[str, Any] = field(default_factory=dict)
     font_name: str = "Arial"
     font_size: int = 30
@@ -43,6 +44,7 @@ class DubSubtitleLayer(BaseLayer):
             "dub_text": self.dub_text,
             "audio_path": self.audio_path,
             "muted": self.muted,
+            "voice_speed": self.voice_speed,
             "tts_settings": self.tts_settings,
             "font_name": self.font_name,
             "font_size": self.font_size,
@@ -76,6 +78,7 @@ class DubSubtitleLayer(BaseLayer):
             dub_text=str(data.get("dub_text", data.get("text", ""))),
             audio_path=str(data.get("audio_path", "")),
             muted=bool(data.get("muted", False)),
+            voice_speed=float(data.get("voice_speed", 1.0)),
             tts_settings=dict(data.get("tts_settings", {}) or {}),
             font_name=str(data.get("font_name", "Arial")),
             font_size=int(data.get("font_size", 30)),

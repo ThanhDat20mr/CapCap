@@ -92,18 +92,30 @@ def sync_segments_to_dub_subtitle_layers(
             existing.dub_text = dub_text
             existing.start = start
             existing.end = end
+            seg_speed = d.get("voice_speed")
+            if seg_speed is not None:
+                try:
+                    existing.voice_speed = float(seg_speed)
+                except (TypeError, ValueError):
+                    pass
             existing.metadata["_seg_dict"] = {
                 k: v for k, v in d.items() if k != "text"
             }
             existing.metadata["_seg_index"] = int(orig_idx)
             layer = existing
         else:
+            seg_speed = d.get("voice_speed", 1.0)
+            try:
+                seg_speed = float(seg_speed)
+            except (TypeError, ValueError):
+                seg_speed = 1.0
             layer = DubSubtitleLayer(
                 name=f"Sub {orig_idx + 1}",
                 text=text,
                 dub_text=dub_text,
                 start=start,
                 end=end,
+                voice_speed=seg_speed,
             )
             layer.z_index = orig_idx
             layer.metadata["_seg_dict"] = {
@@ -141,6 +153,7 @@ def sync_layers_to_segments(timeline: Timeline) -> list[dict[str, Any]]:
             d["tts_text"] = layer.dub_text
             d["dubbing_vi"] = layer.dub_text
             d["subtitle_vi"] = layer.text
+            d["voice_speed"] = layer.voice_speed
             if "final_text" in d and d["final_text"]:
                 d["final_text"] = layer.text
             segments.append(d)

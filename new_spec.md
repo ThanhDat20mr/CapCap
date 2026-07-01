@@ -8,8 +8,8 @@ Each TS1 segment contains:
 - Start / End time
 - Subtitle text
 - Generated TTS audio
-- Voice speed
-- Volume
+- Voice speed (per-segment)
+- Volume (applied via gain_db to entire track)
 
 The subtitle displayed on the video always uses the segment text.
 
@@ -34,7 +34,7 @@ If the regenerated audio becomes shorter and no longer overlaps, the segment aut
 
 ### Edit Duration
 
-Users can resize a segment to increase or decrease its duration.
+Users can resize a segment by dragging its left or right edge on the timeline bar (cursor changes to horizontal resize handle).
 
 Resizing only changes the timeline duration.
 
@@ -44,13 +44,13 @@ The audio is regenerated only when **Regenerate Voice** is executed.
 
 ### Voice Speed
 
-Each segment can have its own voice speed.
+Each segment can have its own voice speed. Set per-segment in the subtitle inspector (Voice Speed spinbox).
 
 ---
 
 ### Volume
 
-Volume is applied to the entire TS1 track.
+Volume (gain) is applied to the entire TS1 track via the `voice_gain_spin` global control (dB).
 
 ---
 
@@ -117,3 +117,20 @@ Result:
 - Speech is preserved.
 - Less overlap than OFF.
 - May still overlap in extreme cases.
+
+---
+
+# Implementation Status
+
+| Feature | Status |
+|---------|--------|
+| TS1 track + segment data (start/end, text, audio) | ✅ Done |
+| Row stacking | ✅ Done |
+| Edit subtitle + Regenerate Voice | ✅ Done |
+| Edit Duration (drag handles) | ✅ Done |
+| Per-segment voice speed | ✅ Done |
+| Volume on entire TS1 track | ✅ Done (via gain_db) |
+| Sync: OFF | ✅ Done |
+| Sync: SMART (incl. trailing silence trim) | ✅ Done |
+| Sync: Timeline Priority | ✅ Done |
+| Sync: Force Fit | ✅ Done |

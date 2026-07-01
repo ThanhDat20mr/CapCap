@@ -4101,6 +4101,7 @@ class VideoTranslatorGUI(QMainWindow):
                     "ratio": float(translated.get("ratio", 0.0) or 0.0),
                     "attempt_count": int(translated.get("attempt_count", 0) or 0),
                     "action_taken": str(translated.get("action_taken", "")),
+                    "voice_speed": float(reference.get("voice_speed", 1.0)),
                     "manual_highlights": list(translated.get("manual_highlights", [])),
                 }
             )
@@ -6876,6 +6877,27 @@ class VideoTranslatorGUI(QMainWindow):
                 original_label.setVisible(show_original and bool(row["original"].strip()))
 
                 card_layout.addLayout(timing_meta_layout)
+
+                speed_row = QHBoxLayout()
+                speed_row.setContentsMargins(0, 0, 0, 0)
+                speed_row.setSpacing(8)
+                speed_label = QLabel("Voice Speed:")
+                speed_label.setObjectName("helperLabel")
+                speed_spin = QDoubleSpinBox()
+                speed_spin.setRange(0.5, 3.0)
+                speed_spin.setSingleStep(0.1)
+                speed_spin.setDecimals(1)
+                speed_spin.setValue(float(row.get("voice_speed", 1.0)))
+                speed_spin.setSuffix("x")
+                speed_spin.setFixedWidth(90)
+                speed_spin.valueChanged.connect(
+                    lambda val, idx=idx: self.on_segment_voice_speed_changed(idx, val)
+                )
+                speed_row.addWidget(speed_label)
+                speed_row.addWidget(speed_spin)
+                speed_row.addStretch()
+
+                card_layout.addLayout(speed_row)
                 card_layout.addWidget(original_label)
 
                 # The QTabWidget wrapper (with the "Subtitle" tab label
@@ -7008,6 +7030,15 @@ class VideoTranslatorGUI(QMainWindow):
         self._sync_hidden_translated_text_from_segments()
         self.schedule_live_subtitle_preview_refresh()
         self.refresh_ui_state()
+
+    def on_segment_voice_speed_changed(self, index: int, value: float):
+        if getattr(self, "_syncing_segment_editor", False):
+            return
+        for segments_list in (self.current_translated_segments, self.current_segments):
+            if segments_list and 0 <= index < len(segments_list):
+                segments_list[index]["voice_speed"] = round(float(value), 1)
+                self._voiceover_force_refresh = True
+        self.persist_current_timeline_project_data()
 
     def _set_segment_editor_highlight(self, active_index: int):
         rows = getattr(self, "_segment_editor_rows", [])

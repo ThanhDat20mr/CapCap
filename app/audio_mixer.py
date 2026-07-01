@@ -201,6 +201,67 @@ def change_wav_speed(
     return output_wav_path
 
 
+def trim_trailing_silence(
+    *,
+    input_wav_path: str,
+    output_wav_path: str,
+    silence_threshold: float = -40.0,
+    min_silence_duration: float = 0.5,
+) -> str:
+    """Remove trailing silence from a wav file using ffmpeg
+    silencedetect. Keeps audio up to the last detected sound, then
+    trims after a short padding. Returns output_wav_path if trimming
+    was applied, or input_wav_path if the file has no trailing silence.
+    """
+    if not os.path.exists(input_wav_path):
+        return input_wav_path
+    ffmpeg = _ffmpeg_path()
+    if not os.path.exists(ffmpeg):
+        return input_wav_path
+    os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
+    detect_cmd = [
+        ffmpeg, "-y", "-i", input_wav_path,
+        "-af", f"silencedetect=noise={silence_threshold}dB:d={min_silence_duration}",
+        "-f", "null", "-",
+    ]
+    try:
+        proc = subprocess.run(
+            detect_cmd, capture_output=True, text=True, timeout=60,
+            **_subprocess_run_kwargs(),
+        )
+    except subprocess.TimeoutExpired:
+        return input_wav_path
+    if proc.returncode != 0:
+        return input_wav_path
+
+    last_end = 0.0
+    for line in proc.stderr.splitlines():
+        if "silence_end" in line:
+            try:
+                parts = line.split()
+                for i, p in enumerate(parts):
+                    if p == "silence_end":
+                        last_end = float(parts[i + 1])
+                        break
+            except (ValueError, IndexError):
+                continue
+    if last_end <= 0.0:
+        return input_wav_path
+
+    padding = 0.1
+    trim_to = last_end + padding
+    cmd = [
+        ffmpeg, "-y", "-i", input_wav_path,
+        "-t", str(trim_to),
+        "-ar", "16000", "-ac", "1",
+        output_wav_path,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, **_subprocess_run_kwargs())
+    if proc.returncode != 0:
+        return input_wav_path
+    return output_wav_path
+
+
 def _require_pydub():
     try:
         ffmpeg = _ffmpeg_path()
