@@ -79,6 +79,12 @@ def sync_segments_to_dub_subtitle_layers(
         dub_text = str(
             d.get("dubbing_vi") or d.get("tts_text") or text
         )
+        # Stamp the segment's own _seg_index so downstream consumers
+        # (e.g. sync_tts_to_dub_subtitle_layers) can match segments to
+        # layers without having to walk the layer list. Without this,
+        # segments loaded fresh from translation_final.json (which has
+        # no _seg_index) would never reach the layer's metadata.
+        d["_seg_index"] = int(orig_idx)
 
         existing = existing_by_idx.pop(orig_idx, None)
         if existing is not None:
@@ -164,14 +170,9 @@ def sync_tts_to_dub_subtitle_layers(
         return
 
     index_to_audio_end: dict[int, float] = {}
+    positional_audio_end: list[tuple[float, float]] = []
     for seg in segments or []:
         if not isinstance(seg, dict):
-            continue
-        try:
-            idx = int(seg.get("_seg_index", -1))
-        except (TypeError, ValueError):
-            continue
-        if idx < 0:
             continue
         try:
             start_s = float(seg.get("start", 0.0))
@@ -179,13 +180,29 @@ def sync_tts_to_dub_subtitle_layers(
             audio_end = float(seg.get("_audio_end", end_s))
         except (TypeError, ValueError):
             continue
-        index_to_audio_end[idx] = (start_s, audio_end)
-    for layer in target.layers:
+        positional_audio_end.append((start_s, audio_end))
+        try:
+            idx = int(seg.get("_seg_index", -1))
+        except (TypeError, ValueError):
+            idx = -1
+        if idx >= 0:
+            index_to_audio_end[idx] = (start_s, audio_end)
+    for layer_pos, layer in enumerate(target.layers):
         idx = int(layer.metadata.get("_seg_index", -1)) if isinstance(layer.metadata, dict) else -1
         if idx in index_to_audio_end:
             _start, audio_end = index_to_audio_end[idx]
-            layer.audio_path = str(voice_track_path)
-            layer.metadata["_audio_end"] = audio_end
+        elif layer_pos < len(positional_audio_end):
+            # Fallback: match by layer position in the track, in case
+            # the segment dicts never got _seg_index stamped on them
+            # (e.g. when the timeline was hydrated from an older project
+            # state). Layers are appended in segment-start order by
+            # sync_segments_to_dub_subtitle_layers, so positional
+            # alignment is safe.
+            _start, audio_end = positional_audio_end[layer_pos]
+        else:
+            continue
+        layer.audio_path = str(voice_track_path)
+        layer.metadata["_audio_end"] = audio_end
 
 
 def sync_blur_regions_to_layers(

@@ -93,7 +93,14 @@ def format_segments_to_srt(segments):
     lines = []
     for idx, seg in enumerate(segments):
         start = format_timestamp(seg["start"])
-        end = format_timestamp(seg["end"])
+        end_s = float(seg.get("end", 0.0) or 0.0)
+        raw_audio_end = seg.get("_audio_end")
+        if raw_audio_end is not None:
+            try:
+                end_s = max(end_s, float(raw_audio_end))
+            except (TypeError, ValueError):
+                pass
+        end = format_timestamp(end_s)
         lines.append(f"{idx + 1}")
         lines.append(f"{start} --> {end}")
         lines.append(f"{seg['text'].strip()}\n")

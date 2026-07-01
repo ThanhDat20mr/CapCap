@@ -63,6 +63,7 @@ class EditorTimeline(QGraphicsView):
         self._selected_layer_id: str = ""
         self._segment_indices: dict[str, int] = {}
         self._has_add_btn = False
+        self._voice_sync_mode: str = "Smart"
 
         self._init_default_tracks()
 
@@ -323,6 +324,17 @@ class EditorTimeline(QGraphicsView):
     def set_position(self, ms: int) -> None:
         self.set_playhead(ms / 1000.0)
 
+    def set_voice_sync_mode(self, mode: str) -> None:
+        """Update the active voice-timing sync mode and re-stack the
+        tracks. Timeline Priority disables row stacking because the
+        audio is always cut to the segment window.
+        """
+        mode_key = (mode or "").strip()
+        if mode_key == self._voice_sync_mode:
+            return
+        self._voice_sync_mode = mode_key
+        self._redraw()
+
     def zoom_in(self) -> None:
         self.pixels_per_second = min(self.MAX_PPS, int(self.pixels_per_second * 1.25))
         self._redraw()
@@ -423,13 +435,21 @@ class EditorTimeline(QGraphicsView):
             return True
         return False
 
-    @classmethod
-    def _should_overlap_stack(cls, track) -> bool:
+    def _should_overlap_stack(self, track) -> bool:
         """True for tracks whose overlapping layers should stack vertically
         inside the same track. The new TS1 DubSubtitle layout inherits
         the stacking; legacy A2 Dub still does.
+
+        In Timeline Priority mode the audio is always cut to the
+        segment window, so no two layers can overlap in audio time.
+        Stacking is disabled and the track collapses to a single row.
         """
-        return cls._is_subtitle_track(track) or cls._is_dub_track(track)
+        is_subtitle = self._is_subtitle_track(track)
+        if is_subtitle:
+            sync_mode = (self._voice_sync_mode or "").strip().lower()
+            if sync_mode == "timeline priority":
+                return False
+        return is_subtitle or self._is_dub_track(track)
 
     @staticmethod
     def _compute_overlap_rows(visible_layers):
@@ -441,6 +461,12 @@ class EditorTimeline(QGraphicsView):
         existing row's last segment. Used for subtitle tracks so
         overlapping Sub N layers stack vertically inside the same TS1
         track, mirroring how Blur 1 and Blur 2 stack inside B1.
+
+        Overlap detection uses `_audio_end` from layer metadata when
+        present (the actual TTS audio length), so a layer whose
+        generated voice bleeds past its segment end still triggers
+        row stacking. The bar itself is drawn from layer.start to
+        layer.end — only the overlap comparison sees the audio end.
         """
         rows: list[float] = []
         layer_rows: list[int] = []
@@ -450,6 +476,15 @@ class EditorTimeline(QGraphicsView):
                 end = float(getattr(layer, "end", 0.0))
             except (TypeError, ValueError):
                 start = end = 0.0
+            audio_end = end
+            meta = getattr(layer, "metadata", None) or {}
+            if isinstance(meta, dict):
+                raw = meta.get("_audio_end")
+                if raw is not None:
+                    try:
+                        audio_end = max(end, float(raw))
+                    except (TypeError, ValueError):
+                        audio_end = end
             row_index = 0
             for r_idx, last_end in enumerate(rows):
                 if last_end <= start:
@@ -457,9 +492,9 @@ class EditorTimeline(QGraphicsView):
                     break
             else:
                 row_index = len(rows)
-                rows.append(end)
+                rows.append(audio_end)
             if row_index < len(rows):
-                rows[row_index] = max(rows[row_index], end)
+                rows[row_index] = max(rows[row_index], audio_end)
             layer_rows.append(row_index)
         return layer_rows, len(rows)
 
@@ -578,6 +613,7 @@ class EditorTimeline(QGraphicsView):
         is_blur = self._is_blur_track(track)
         overlap_stack = self._should_overlap_stack(track)
         visible_layers = [l for l in track.layers if l.visible]
+        layer_row_by_id: dict[str, int] = {}
         if overlap_stack:
             layer_rows, num_rows = self._compute_overlap_rows(visible_layers)
             num_rows = max(1, num_rows)
@@ -605,6 +641,7 @@ class EditorTimeline(QGraphicsView):
                     row = layer_rows[visible_idx]
                 except ValueError:
                     row = 0
+                layer_row_by_id[layer.id] = row
                 bar_y, slot_h = row_slots[row]
                 bar_h = max(slot_h - margin * 2, 8)
             elif is_blur:
@@ -621,12 +658,20 @@ class EditorTimeline(QGraphicsView):
             if clip_w <= 0:
                 continue
             is_selected = layer.id == self._selected_layer_id
+            is_overflow_row = overlap_stack and layer_row_by_id.get(layer.id, 0) > 0
             if layer.type == LayerType.BLUR:
                 self._draw_blur_layer_bar(painter, layer, x, bar_y, w, bar_h, is_selected)
             else:
-                self._draw_standard_layer_bar(painter, layer, x, bar_y, w, bar_h, view_w, is_selected)
+                self._draw_standard_layer_bar(
+                    painter, layer, x, bar_y, w, bar_h, view_w,
+                    is_selected, is_overflow_row=is_overflow_row,
+                )
 
-    def _draw_standard_layer_bar(self, painter, layer, x, y, w, h, view_w, is_selected):
+    def _draw_standard_layer_bar(self, painter, layer, x, y, w, h, view_w, is_selected, is_overflow_row: bool = False):
+        # Fill color is the same for every DubSubtitleLayer bar so the
+        # track reads as a single uniform subtitle strip — only the
+        # selection state and the overflow row get a different border
+        # to communicate stacking without changing the perceived color.
         color = self._layer_color(layer.type)
         if is_selected:
             color = color.lighter(130)
@@ -635,7 +680,14 @@ class EditorTimeline(QGraphicsView):
         path = QPainterPath()
         path.addRoundedRect(rect, 4, 4)
         painter.fillPath(path, color)
-        painter.setPen(QPen(color.darker(140), 1))
+        # Overflow-row bars get a slightly dashed border so the user can
+        # see they're stacked under a neighbor whose audio bleeds
+        # past the segment end — without changing the bar fill color.
+        if is_overflow_row and not is_selected:
+            pen = QPen(color.darker(160), 1, Qt.DashLine)
+            painter.setPen(pen)
+        else:
+            painter.setPen(QPen(color.darker(140), 1))
         painter.drawPath(path)
 
         if w > 40:

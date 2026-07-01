@@ -30,6 +30,35 @@ def _probe_wav_duration_seconds(wav_path: str) -> float:
     return max(0.0, float(frame_count) / float(frame_rate))
 
 
+def ffprobe_wav_duration(wav_path: str) -> float:
+    """Return the actual duration of a wav file via ffprobe.
+
+    Uses ffprobe's `format=duration` for the most accurate reading —
+    important for segment preview/regenerate flows where the wav
+    may have been re-encoded and the wave header is stale. Returns
+    0.0 if ffprobe is missing or the call fails.
+    """
+    ffprobe = _ffprobe_path()
+    if not os.path.exists(ffprobe):
+        return 0.0
+    try:
+        out = subprocess.run(
+            [
+                ffprobe, "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                wav_path,
+            ],
+            capture_output=True, text=True, timeout=10,
+            **_subprocess_run_kwargs(),
+        )
+        if out.returncode != 0:
+            return 0.0
+        return max(0.0, float(out.stdout.strip()))
+    except (ValueError, subprocess.TimeoutExpired, OSError):
+        return 0.0
+
+
 def _build_atempo_filter(speed_ratio: float) -> str:
     ratio = max(0.01, float(speed_ratio))
     filters = []
@@ -56,7 +85,7 @@ def fit_wav_to_duration(
     mode_key = (mode or "off").strip().lower()
     if mode_key == "force fit":
         mode_key = "force"
-    if mode_key not in {"smart", "force"}:
+    if mode_key not in {"smart", "force", "timeline"}:
         return input_wav_path
     if not os.path.exists(input_wav_path):
         raise FileNotFoundError(f"Input wav not found: {input_wav_path}")
@@ -67,19 +96,31 @@ def fit_wav_to_duration(
         return input_wav_path
 
     fit_ratio = target_duration / source_duration
-    if abs(fit_ratio - 1.0) < 0.02:
-        return input_wav_path
-
     ffmpeg = _ffmpeg_path()
     if not os.path.exists(ffmpeg):
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
 
     os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
 
-    if mode_key == "smart":
+    if mode_key == "timeline":
+        # Timeline Priority: always cut the audio to the segment
+        # window. The end of the speech may be skipped if it exceeds
+        # the segment duration — playback continues with the next
+        # segment immediately after. No atempo, no early return.
+        if abs(fit_ratio - 1.0) < 0.02:
+            return input_wav_path
+        cmd = [
+            ffmpeg, "-y", "-i", input_wav_path,
+            "-t", str(target_duration),
+            "-ar", "16000", "-ac", "1",
+            output_wav_path,
+        ]
+    elif mode_key == "smart":
         # Smart mode: when the audio is too long, TRIM (cut) it to
         # match the target duration instead of speeding it up. When it's
         # too short, stretch (atempo) up to the safe range.
+        if abs(fit_ratio - 1.0) < 0.02:
+            return input_wav_path
         if fit_ratio < 1.0:
             # Audio shorter than target — stretch to fit.
             if fit_ratio < smart_min_ratio:
@@ -104,6 +145,8 @@ def fit_wav_to_duration(
     else:
         # Force mode: use atempo to speed up the audio so it fits the
         # target duration. This is the legacy behaviour.
+        if abs(fit_ratio - 1.0) < 0.02:
+            return input_wav_path
         if fit_ratio > 1.0 and fit_ratio > smart_max_ratio:
             return input_wav_path
         filter_chain = _build_atempo_filter(1.0 / fit_ratio)

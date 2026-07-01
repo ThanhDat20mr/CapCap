@@ -1239,6 +1239,17 @@ class VoiceWorkflow:
                         target_duration_seconds=target_duration,
                         mode="smart",
                     )
+            if (sync_mode or "off").strip().lower() == "timeline":
+                # Timeline Priority: always cut audio to the segment
+                # window. End of speech may be skipped; next segment
+                # plays immediately after.
+                synced_path = os.path.join(tmp_dir, f"seg_{idx:04d}_timelinefit.wav")
+                polished_wavs[idx] = self.engine_runtime.fit_wav_to_duration(
+                    input_wav_path=polished_wavs[idx],
+                    output_wav_path=synced_path,
+                    target_duration_seconds=target_duration,
+                    mode="timeline",
+                )
         if abs(float(voice_speed) - 1.0) >= 0.02:
             polished_wavs = self._apply_segment_speed(
                 wavs=polished_wavs,
@@ -1321,7 +1332,7 @@ class VoiceWorkflow:
 
     def _fit_segment_wavs_to_timeline(self, *, segments, wavs, tmp_dir: str, sync_mode: str):
         mode_key = (sync_mode or "off").strip().lower()
-        if mode_key != "smart":
+        if mode_key not in {"smart", "timeline"}:
             return wavs
 
         synced_wavs = []
@@ -1330,7 +1341,8 @@ class VoiceWorkflow:
                 synced_wavs.append(wav_path)
                 continue
             target_duration = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
-            synced_path = os.path.join(tmp_dir, f"seg_{idx:04d}_smartfit.wav")
+            suffix = "timelinefit" if mode_key == "timeline" else "smartfit"
+            synced_path = os.path.join(tmp_dir, f"seg_{idx:04d}_{suffix}.wav")
             fitted_path = self.engine_runtime.fit_wav_to_duration(
                 input_wav_path=wav_path,
                 output_wav_path=synced_path,
@@ -1341,8 +1353,8 @@ class VoiceWorkflow:
         return synced_wavs
 
     def _extend_segment_ends_to_audio(self, *, segments, wavs) -> None:
-        """Extend each segment's `end` time to match the actual TTS wav
-        duration when the audio is longer than the original segment window.
+        """Record the actual TTS audio end on each segment when the audio
+        is longer than the original segment window.
 
         The SRT shipped to the renderer reflects the original translated
         times, which can be shorter than the Vietnamese TTS — particularly
@@ -1351,16 +1363,17 @@ class VoiceWorkflow:
         audio bleeds into the next segment's slot on the final track, but
         the subtitle stack never fires because the SRT still says the
         segment ends earlier than it actually does. To make the two match,
-        we push `seg["end"]` forward to `start + actual_wav_duration` when
-        the wav is longer than the segment window.
+        we record the audio end on `seg["_audio_end"]` (= start + wav
+        duration) so the timeline row-stacking can use the real TTS
+        length to decide whether to push the layer down a row.
 
-        The next segment's start is NOT touched — the overlap is real and
-        the row-stacking feature will draw both lines on the burned-in
-        subtitle.
+        `seg["end"]` is NOT mutated — the timeline bar keeps showing the
+        original segment window. The audio overlap is real, and the
+        row-stacking feature draws the subtitle on the next row when the
+        audio bleeds past the next segment's start.
 
-        The original end is preserved in `seg["_original_end"]` so the
-        timeline visual can keep showing the original window while the
-        audio plays the full TTS duration.
+        The original end is preserved in `seg["_original_end"]` for any
+        caller that still needs to know the pre-extension value.
         """
         for seg, wav_path in zip(segments, wavs or []):
             if not wav_path or not os.path.exists(wav_path):
@@ -1373,11 +1386,11 @@ class VoiceWorkflow:
                 end_s = float(seg.get("end", 0.0))
             except (TypeError, ValueError):
                 continue
-            target_d = end_s - start_s
-            if actual_d > target_d + 0.01:
+            audio_end = start_s + actual_d
+            if audio_end > end_s + 0.01:
                 if "end" in seg and "_original_end" not in seg:
                     seg["_original_end"] = end_s
-                seg["end"] = start_s + actual_d
+                seg["_audio_end"] = audio_end
 
     def _synthesize_segment_wavs(
         self,

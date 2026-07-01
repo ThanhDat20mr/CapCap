@@ -181,13 +181,14 @@ class TrackLabelBar(QFrame):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        # Change cursor to a pointing hand when hovering over an audio,
-        # blur, logo, or mask track label to signal it is clickable.
+        # Change cursor to a pointing hand when hovering over a
+        # clickable track label (audio, dub-subtitle mute, blur, logo,
+        # or mask) to signal it is clickable.
         idx = self._track_index_at(event.position().y())
         is_clickable = False
         if 0 <= idx < len(self._track_names):
             prefix = self._track_names[idx].split(" ")[0] if self._track_names[idx] else ""
-            if (prefix in AUDIO_PREFIXES or prefix in BLUR_PREFIXES
+            if (prefix in MUTE_PREFIXES or prefix in BLUR_PREFIXES
                     or prefix in LOGO_PREFIXES or prefix in MASK_PREFIXES):
                 is_clickable = True
         self.setCursor(Qt.PointingHandCursor if is_clickable else Qt.ArrowCursor)

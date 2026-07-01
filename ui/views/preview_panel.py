@@ -543,6 +543,8 @@ def build_preview_panel(gui):
     gui.video_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     gui.timeline = _import_editor_timeline()()
     gui.timeline.setMinimumHeight(360)
+    if hasattr(gui, "voice_timing_sync_combo"):
+        gui.timeline.set_voice_sync_mode(gui.voice_timing_sync_combo.currentText())
     gui.timeline.seekRequestedMs.connect(gui.set_position)
     gui.timeline.segmentSelected.connect(gui.on_timeline_segment_selected)
     gui.timeline.segmentTimingEditStarted.connect(gui.on_timeline_segment_timing_edit_started)
