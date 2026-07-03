@@ -176,6 +176,21 @@ def _build_filter_slider_row(title: str, slider: QSlider, value_label: QLabel):
     return wrapper
 
 
+def _update_device_label(gui):
+    import os
+    cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
+    if cpu_mode:
+        gui.device_mode_label.setText("CPU mode")
+        gui.device_mode_label.setStyleSheet("font-size: 11px; color: #ffa500;")
+    else:
+        gpu_name = os.getenv("CAPCAP_GPU_NAME", "").strip()
+        if gpu_name:
+            gui.device_mode_label.setText(gpu_name)
+        else:
+            gui.device_mode_label.setText("GPU mode")
+        gui.device_mode_label.setStyleSheet("font-size: 11px; color: #4ecdc4;")
+
+
 def build_start_group(gui, left_layout):
     _build_hidden_status_widgets(gui)
 
@@ -215,6 +230,11 @@ def build_start_group(gui, left_layout):
     workflow_title = QLabel("Workflow")
     workflow_title.setObjectName("statusHeadline")
     workflow_shell_layout.addWidget(workflow_title)
+
+    gui.device_mode_label = QLabel()
+    gui.device_mode_label.setObjectName("helperLabel")
+    _update_device_label(gui)
+    workflow_shell_layout.addWidget(gui.device_mode_label)
 
     tab_bar = QWidget()
     tab_bar_layout = QGridLayout(tab_bar)

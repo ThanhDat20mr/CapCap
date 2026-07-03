@@ -218,13 +218,14 @@ class LauncherWindow(QDialog):
         header_text.addWidget(title)
         header_text.addWidget(subtitle)
 
-        gpu_info = self._detect_gpu()
-        has_gpu = not gpu_info.startswith("CPU")
-        self.selected_device = "cuda" if has_gpu else "cpu"
+        has_gpu, gpu_name, cuda_ready = self._detect_gpu_with_cuda()
+        gpu_usable = has_gpu and cuda_ready
+        self.selected_device = "cuda" if gpu_usable else "cpu"
+        LauncherWindow._gpu_name = gpu_name if has_gpu else ""
 
-        gpu_label = QLabel(gpu_info)
-        gpu_label.setStyleSheet("font-size: 11px; color: #5a7a9a;")
-        header_text.addWidget(gpu_label)
+        self._gpu_label = QLabel()
+        header_text.addWidget(self._gpu_label)
+        self._update_gpu_label(has_gpu, gpu_name, cuda_ready)
 
         self._missing_label = QLabel("", self)
         self._missing_label.setWordWrap(True)
@@ -239,12 +240,12 @@ class LauncherWindow(QDialog):
         device_row.setSpacing(0)
         self.cpu_btn = QPushButton("CPU")
         self.cpu_btn.setCheckable(True)
-        self.cpu_btn.setChecked(not has_gpu)
+        self.cpu_btn.setChecked(not gpu_usable)
         self.cpu_btn.setEnabled(True)
-        self.gpu_btn = QPushButton("GPU (Recommended)" if has_gpu else "GPU (N/A)")
+        self.gpu_btn = QPushButton("GPU (Recommended)" if gpu_usable else "GPU (N/A)")
         self.gpu_btn.setCheckable(True)
-        self.gpu_btn.setChecked(has_gpu)
-        self.gpu_btn.setEnabled(has_gpu)
+        self.gpu_btn.setChecked(gpu_usable)
+        self.gpu_btn.setEnabled(gpu_usable)
 
         btn_style = """
             QPushButton {
@@ -449,8 +450,10 @@ class LauncherWindow(QDialog):
     @staticmethod
     def _save_device_env():
         device = getattr(LauncherWindow, "_selected_device", "cuda")
-        print(f"[Launcher] Saving CAPCAP_DEVICE={device}")
+        gpu_name = getattr(LauncherWindow, "_gpu_name", "")
+        print(f"[Launcher] Saving CAPCAP_DEVICE={device}, GPU={gpu_name}")
         os.environ["CAPCAP_DEVICE"] = device
+        os.environ["CAPCAP_GPU_NAME"] = gpu_name
         env_path = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
         try:
             lines = []
@@ -485,6 +488,31 @@ class LauncherWindow(QDialog):
         device = self.selected_device
         is_ok, missing = service.validate_device(device)
         self.new_btn.setEnabled(is_ok)
+        if device == "cuda":
+            has_gpu = True
+            gpu_name = ""
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    gpu_name = result.stdout.strip().split("\n")[0].strip()
+            except Exception:
+                pass
+            cuda_ready = is_ok
+            self._update_gpu_label(has_gpu, gpu_name, cuda_ready)
+            if not cuda_ready:
+                self.gpu_btn.setEnabled(False)
+                self.gpu_btn.setText("GPU (N/A)")
+        elif device == "cpu":
+            has_gpu, _gpu_name, cuda_ready = self._detect_gpu_with_cuda()
+            gpu_usable = has_gpu and cuda_ready
+            if gpu_usable:
+                self.gpu_btn.setEnabled(True)
+                self.gpu_btn.setText("GPU (Recommended)")
+                self._update_gpu_label(has_gpu, _gpu_name, cuda_ready)
         if is_ok:
             self._missing_label.hide()
             self._missing_label.setText("")
@@ -627,8 +655,10 @@ class LauncherWindow(QDialog):
         mb.setStyleSheet(MSG_STYLE)
         mb.exec()
 
-    @staticmethod
-    def _detect_gpu():
+    def _detect_gpu_with_cuda(self):
+        has_gpu = False
+        gpu_name = ""
+        cuda_ready = False
         try:
             import subprocess
             result = subprocess.run(
@@ -637,18 +667,38 @@ class LauncherWindow(QDialog):
             )
             if result.returncode == 0 and result.stdout.strip():
                 gpu_name = result.stdout.strip().split("\n")[0].strip()
-                return f"GPU: {gpu_name}"
+                has_gpu = True
         except Exception:
             pass
-        try:
-            import torch
-            if torch.cuda.is_available():
-                name = torch.cuda.get_device_name(0)
-                vram = torch.cuda.get_device_properties(0).total_mem // (1024 ** 3)
-                return f"GPU: {name} ({vram}GB)"
-        except Exception:
-            pass
-        return "CPU only"
+        if not has_gpu:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    name = torch.cuda.get_device_name(0)
+                    vram = torch.cuda.get_device_properties(0).total_mem // (1024 ** 3)
+                    gpu_name = f"{name} ({vram}GB)"
+                    has_gpu = True
+            except Exception:
+                pass
+        if has_gpu:
+            try:
+                service = self._resource_service()
+                cuda_ready = service.is_requirement_met("cuda:whisper")
+            except Exception:
+                pass
+        return has_gpu, gpu_name, cuda_ready
+
+    def _update_gpu_label(self, has_gpu: bool, gpu_name: str, cuda_ready: bool):
+        if has_gpu:
+            if cuda_ready:
+                self._gpu_label.setText(f"GPU: {gpu_name}  \u2713 CUDA ready")
+                self._gpu_label.setStyleSheet("font-size: 11px; color: #4ecdc4;")
+            else:
+                self._gpu_label.setText(f"GPU: {gpu_name}  \u2717 CUDA pack missing")
+                self._gpu_label.setStyleSheet("font-size: 11px; color: #ffa500;")
+        else:
+            self._gpu_label.setText("CPU only")
+            self._gpu_label.setStyleSheet("font-size: 11px; color: #5a7a9a;")
 
     @staticmethod
     def add_recent(settings_or_none, video_path: str):
