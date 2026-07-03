@@ -732,6 +732,7 @@ class TranslationOrchestrator:
                 updated['tts_group_id'] = group_id
                 updated['tts_group_start'] = round(start, 3)
                 updated['tts_group_end'] = round(end, 3)
+                updated.pop('_audio_end', None)
                 split_segments.append(updated)
                 continue
 
@@ -739,6 +740,7 @@ class TranslationOrchestrator:
             cursor = start
             for idx, chunk in enumerate(chunks):
                 updated = dict(seg)
+                updated.pop('_audio_end', None)
                 updated['text'] = chunk
                 updated['tts_group_id'] = group_id
                 updated['tts_group_start'] = round(start, 3)

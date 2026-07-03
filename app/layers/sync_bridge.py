@@ -108,6 +108,8 @@ def sync_segments_to_dub_subtitle_layers(
                     existing.metadata["_audio_end"] = float(raw_ae)
                 except (TypeError, ValueError):
                     existing.metadata.pop("_audio_end", None)
+            else:
+                existing.metadata.pop("_audio_end", None)
             layer = existing
         else:
             seg_speed = d.get("voice_speed", 1.0)
@@ -134,6 +136,8 @@ def sync_segments_to_dub_subtitle_layers(
                     layer.metadata["_audio_end"] = float(raw_ae)
                 except (TypeError, ValueError):
                     layer.metadata.pop("_audio_end", None)
+            else:
+                layer.metadata.pop("_audio_end", None)
             target.layers.append(layer)
         new_layers.append(layer)
 
