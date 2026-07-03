@@ -189,18 +189,11 @@ def build_start_group(gui, left_layout):
 
     gui.run_all_btn = QToolButton()
     gui.run_all_btn.setObjectName("mainActionBtn")
-    gui.run_all_btn.setText("Generate")
-    gui.run_all_btn.setPopupMode(QToolButton.InstantPopup)
-
-    gui._generate_menu = QMenu(gui.run_all_btn)
-    gui._generate_menu.setObjectName("generateMenu")
+    gui.run_all_btn.setPopupMode(QToolButton.MenuButtonPopup)
     gui._generate_full_action = QAction("Generate Full Pipeline", gui.run_all_btn)
     gui._generate_full_action.triggered.connect(gui.run_all_pipeline)
-    gui._generate_menu.addAction(gui._generate_full_action)
-    gui._regen_voice_action = QAction("Generate Voice Only", gui.run_all_btn)
-    gui._regen_voice_action.triggered.connect(gui.run_voiceover_with_progress)
-    gui._generate_menu.addAction(gui._regen_voice_action)
-    gui.run_all_btn.setMenu(gui._generate_menu)
+    gui.run_all_btn.setDefaultAction(gui._generate_full_action)
+    gui._generate_menu = None
 
     gui.export_btn = QPushButton("Export")
     gui.export_btn.setObjectName("mainActionBtn")

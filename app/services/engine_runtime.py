@@ -217,6 +217,21 @@ class EngineRuntime:
             smart_max_ratio=smart_max_ratio,
         )
 
+    def trim_trailing_silence(
+        self,
+        *,
+        input_wav_path: str,
+        output_wav_path: str,
+        silence_threshold: float = -40.0,
+        min_silence_duration: float = 0.5,
+    ) -> str:
+        return self.audio_mix.trim_trailing_silence(
+            input_wav_path=input_wav_path,
+            output_wav_path=output_wav_path,
+            silence_threshold=silence_threshold,
+            min_silence_duration=min_silence_duration,
+        )
+
     def change_wav_speed(
         self,
         *,

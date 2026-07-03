@@ -8599,6 +8599,8 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "timeline_delete_btn"):
             self.timeline_delete_btn.setEnabled(has_timeline_segments)
 
+        self._update_generate_button_menu(has_data=has_translated_text or has_timeline_segments)
+
         if hasattr(self, "clean_project_action"):
             self.clean_project_action.setEnabled(self._has_cleanable_project_data())
         self.run_all_btn.setEnabled(v_ok and not self._pipeline_active)
@@ -8617,6 +8619,25 @@ class VideoTranslatorGUI(QMainWindow):
         self.update_workflow_availability()
         self.update_guidance_panel()
         self._update_ocr_overlay()
+
+    def _update_generate_button_menu(self, has_data: bool):
+        if not hasattr(self, "run_all_btn"):
+            return
+        btn = self.run_all_btn
+        if has_data and btn.menu() is None:
+            from PySide6.QtWidgets import QMenu
+            from PySide6.QtGui import QAction
+            menu = QMenu(btn)
+            menu.setObjectName("generateMenu")
+            full_action = QAction("Generate Full Pipeline", btn)
+            full_action.triggered.connect(self.run_all_pipeline)
+            menu.addAction(full_action)
+            voice_action = QAction("Generate Voice Only", btn)
+            voice_action.triggered.connect(self.run_voiceover_with_progress)
+            menu.addAction(voice_action)
+            btn.setMenu(menu)
+        elif not has_data and btn.menu() is not None:
+            btn.setMenu(None)
 
     def dragEnterEvent(self, event):
         mime_data = event.mimeData()
