@@ -215,6 +215,8 @@ def load_user_settings(gui):
         gui.audio_handling_combo.setCurrentIndex(audio_handling_index)
     gui.voice_gender_combo.setCurrentText(s.value("voice_gender", gui.voice_gender_combo.currentText()))
     gui.voice_timing_sync_combo.setCurrentText(s.value("voice_timing_sync_mode", gui.voice_timing_sync_combo.currentText()))
+    if hasattr(gui, "timeline"):
+        gui.timeline.set_voice_sync_mode(gui.voice_timing_sync_combo.currentText())
     gui.voice_gain_spin.setValue(float(s.value("voice_gain", gui.voice_gain_spin.value())))
     gui.bg_gain_spin.setValue(float(s.value("bg_gain", gui.bg_gain_spin.value())))
     gui.ducking_amount_spin.setValue(float(s.value("ducking_amount", gui.ducking_amount_spin.value())))

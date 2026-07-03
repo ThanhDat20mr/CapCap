@@ -406,7 +406,9 @@ class EditorTimeline(QGraphicsView):
             return base * num_layers
         if self._should_overlap_stack(track):
             visible = [l for l in track.layers if l.visible]
-            _, num_rows = self._compute_overlap_rows(visible)
+            # Sort by start time for proper overlap detection
+            visible_sorted = sorted(visible, key=lambda l: float(getattr(l, "start", 0.0)))
+            _, num_rows = self._compute_overlap_rows(visible_sorted)
             return self.CHILD_TRACK_H * max(1, num_rows)
         return base
 
@@ -625,7 +627,9 @@ class EditorTimeline(QGraphicsView):
         force_subtitle_color = self._is_subtitle_track(track)
         visible_layers = [l for l in track.layers if l.visible]
         if overlap_stack:
-            layer_rows, num_rows = self._compute_overlap_rows(visible_layers)
+            # Sort by start time for proper overlap detection
+            visible_layers_sorted = sorted(visible_layers, key=lambda l: float(getattr(l, "start", 0.0)))
+            layer_rows, num_rows = self._compute_overlap_rows(visible_layers_sorted)
             num_rows = max(1, num_rows)
             # All rows (primary + overlap-child) share the same small
             # CHILD_TRACK_H height so the whole track stays compact.
@@ -640,27 +644,14 @@ class EditorTimeline(QGraphicsView):
         for row_index, layer in enumerate(track.layers):
             if not layer.visible:
                 continue
-            # Use _audio_end if available (Timeline Priority extended duration)
-            # Otherwise use layer.end for consistent display across UI/timeline/SRT
-            layer_start = layer.start
-            layer_end = layer.end
-            audio_end_meta = None
-            if hasattr(layer, 'metadata') and isinstance(layer.metadata, dict):
-                audio_end_meta = layer.metadata.get('_audio_end')
-            if audio_end_meta is not None:
-                try:
-                    layer_end = max(float(audio_end_meta), layer_end)
-                except (TypeError, ValueError):
-                    pass
-            
-            x = int(layer_start * self.pixels_per_second) - scroll_x
-            w = max(int((layer_end - layer_start) * self.pixels_per_second), 20)
+            x = int(layer.start * self.pixels_per_second) - scroll_x
+            w = max(int(layer.duration * self.pixels_per_second), 20)
             if overlap_stack:
-                # Look up the row assigned to this layer in the visible
-                # list (it was indexed in start-time order by
+                # Look up the row assigned to this layer in the sorted
+                # visible list (it was indexed in start-time order by
                 # _compute_overlap_rows).
                 try:
-                    visible_idx = visible_layers.index(layer)
+                    visible_idx = visible_layers_sorted.index(layer)
                     row = layer_rows[visible_idx]
                 except ValueError:
                     row = 0
@@ -866,17 +857,8 @@ class EditorTimeline(QGraphicsView):
         painter.drawPolygon(triangle)
 
     def _get_effective_layer_end(self, layer) -> float:
-        """Get the effective end time for a layer, considering _audio_end if available."""
-        layer_end = layer.end
-        audio_end_meta = None
-        if hasattr(layer, 'metadata') and isinstance(layer.metadata, dict):
-            audio_end_meta = layer.metadata.get('_audio_end')
-        if audio_end_meta is not None:
-            try:
-                layer_end = max(float(audio_end_meta), layer_end)
-            except (TypeError, ValueError):
-                pass
-        return layer_end
+        """Get the effective end time for a layer."""
+        return float(layer.end)
 
     def _hit_test_edge(self, pos, scroll_x: int, scroll_y: int = 0):
         """Return ('left'|'right', layer_id) if pos is near a bar edge,
@@ -899,7 +881,9 @@ class EditorTimeline(QGraphicsView):
             overlap_stack = self._should_overlap_stack(track)
             layers_in_row = []
             if overlap_stack and num_layers > 1:
-                layer_rows, num_rows = self._compute_overlap_rows(visible_layers)
+                # Sort by start time for proper overlap detection
+                visible_layers_sorted = sorted(visible_layers, key=lambda l: float(getattr(l, "start", 0.0)))
+                layer_rows, num_rows = self._compute_overlap_rows(visible_layers_sorted)
                 row_slots = []
                 cursor = y + margin
                 for r in range(num_rows):
@@ -912,7 +896,7 @@ class EditorTimeline(QGraphicsView):
                         break
                 if row < 0:
                     return None, ""
-                for visible_idx, layer in enumerate(visible_layers):
+                for visible_idx, layer in enumerate(visible_layers_sorted):
                     if layer_rows[visible_idx] == row:
                         layers_in_row.append(layer)
             elif is_blur and num_layers > 1:
@@ -920,21 +904,8 @@ class EditorTimeline(QGraphicsView):
             else:
                 layers_in_row = list(layers for layers in track.layers if layers.visible)
             for layer in layers_in_row:
-                # Use _audio_end if available (Timeline Priority extended duration)
-                # Otherwise use layer.end for consistent hit testing
-                layer_start = layer.start
-                layer_end = layer.end
-                audio_end_meta = None
-                if hasattr(layer, 'metadata') and isinstance(layer.metadata, dict):
-                    audio_end_meta = layer.metadata.get('_audio_end')
-                if audio_end_meta is not None:
-                    try:
-                        layer_end = max(float(audio_end_meta), layer_end)
-                    except (TypeError, ValueError):
-                        pass
-                
-                lx = self.TRACK_HEADER_W + int(layer_start * self.pixels_per_second) - scroll_x
-                lw = max(int((layer_end - layer_start) * self.pixels_per_second), 20)
+                lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
+                lw = max(int(layer.duration * self.pixels_per_second), 20)
                 if lx - 4 <= pos.x() <= lx + lw + 4:
                     dx = pos.x() - lx
                     if dx <= self.HANDLE_W:
@@ -1085,7 +1056,9 @@ class EditorTimeline(QGraphicsView):
             is_blur = self._is_blur_track(track)
             overlap_stack = self._should_overlap_stack(track)
             if overlap_stack and num_layers > 1:
-                layer_rows, num_rows = self._compute_overlap_rows(visible_layers)
+                # Sort by start time for proper overlap detection
+                visible_layers_sorted = sorted(visible_layers, key=lambda l: float(getattr(l, "start", 0.0)))
+                layer_rows, num_rows = self._compute_overlap_rows(visible_layers_sorted)
                 num_rows = max(1, num_rows)
                 # All rows are the same CHILD_TRACK_H tall. Recompute the
                 # same Y positions the painter uses.
@@ -1101,14 +1074,11 @@ class EditorTimeline(QGraphicsView):
                         break
                 if row < 0:
                     return ""
-                for visible_idx, layer in enumerate(visible_layers):
+                for visible_idx, layer in enumerate(visible_layers_sorted):
                     if layer_rows[visible_idx] != row:
                         continue
-                    # Use _audio_end if available (Timeline Priority extended duration)
-                    layer_start = layer.start
-                    layer_end = self._get_effective_layer_end(layer)
-                    lx = self.TRACK_HEADER_W + int(layer_start * self.pixels_per_second) - scroll_x
-                    lw = max(int((layer_end - layer_start) * self.pixels_per_second), 20)
+                    lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
+                    lw = max(int(layer.duration * self.pixels_per_second), 20)
                     if lx - 4 <= pos.x() <= lx + lw + 4:
                         return layer.id
                 return ""
@@ -1122,11 +1092,8 @@ class EditorTimeline(QGraphicsView):
                     if not layer.visible:
                         continue
                     if visible_count == row:
-                        # Use _audio_end if available (Timeline Priority extended duration)
-                        layer_start = layer.start
-                        layer_end = self._get_effective_layer_end(layer)
-                        lx = self.TRACK_HEADER_W + int(layer_start * self.pixels_per_second) - scroll_x
-                        lw = max(int((layer_end - layer_start) * self.pixels_per_second), 20)
+                        lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
+                        lw = max(int(layer.duration * self.pixels_per_second), 20)
                         if lx - 4 <= pos.x() <= lx + lw + 4:
                             return layer.id
                         break
@@ -1135,11 +1102,8 @@ class EditorTimeline(QGraphicsView):
             for layer in track.layers:
                 if not layer.visible:
                     continue
-                # Use _audio_end if available (Timeline Priority extended duration)
-                layer_start = layer.start
-                layer_end = self._get_effective_layer_end(layer)
-                lx = self.TRACK_HEADER_W + int(layer_start * self.pixels_per_second) - scroll_x
-                lw = max(int((layer_end - layer_start) * self.pixels_per_second), 20)
+                lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
+                lw = max(int(layer.duration * self.pixels_per_second), 20)
                 if lx - 4 <= pos.x() <= lx + lw + 4:
                     return layer.id
             return ""

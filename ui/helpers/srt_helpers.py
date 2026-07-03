@@ -95,12 +95,6 @@ def format_segments_to_srt(segments, max_gap_ms: float = 100.0):
     for idx, seg in enumerate(segments):
         start = format_timestamp(seg["start"])
         end_s = float(seg.get("end", 0.0) or 0.0)
-        raw_audio_end = seg.get("_audio_end")
-        if raw_audio_end is not None:
-            try:
-                end_s = max(end_s, float(raw_audio_end))
-            except (TypeError, ValueError):
-                pass
         if idx + 1 < len(segments):
             next_start = float(segments[idx + 1].get("start", 0.0))
             gap = next_start - end_s

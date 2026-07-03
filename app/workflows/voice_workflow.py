@@ -1391,25 +1391,10 @@ class VoiceWorkflow:
     def _extend_segment_ends_to_audio(self, *, segments, wavs) -> None:
         """Record the actual TTS audio end on each segment when the audio
         is longer than the original segment window.
-
-        The SRT shipped to the renderer reflects the original translated
-        times, which can be shorter than the Vietnamese TTS — particularly
-        when the user picked Off/Smart sync and the time-stretch bailed out
-        because the ratio was outside the safe range. In that case the
-        audio bleeds into the next segment's slot on the final track, but
-        the subtitle stack never fires because the SRT still says the
-        segment ends earlier than it actually does. To make the two match,
-        we record the audio end on `seg["_audio_end"]` (= start + wav
-        duration) so the timeline row-stacking can use the real TTS
-        length to decide whether to push the layer down a row.
-
-        `seg["end"]` is NOT mutated — the timeline bar keeps showing the
-        original segment window. The audio overlap is real, and the
-        row-stacking feature draws the subtitle on the next row when the
-        audio bleeds past the next segment's start.
-
-        The original end is preserved in `seg["_original_end"]` for any
-        caller that still needs to know the pre-extension value.
+        
+        This is used for overlap detection in the timeline, NOT for visual display.
+        The visual display uses layer.end strictly, but overlap detection needs
+        to know the actual audio duration to determine when segments should stack.
         """
         for seg, wav_path in zip(segments, wavs or []):
             if not wav_path or not os.path.exists(wav_path):

@@ -2893,11 +2893,6 @@ class VideoTranslatorGUI(QMainWindow):
         self.current_translated_segment_models = context["current_translated_segment_models"]
         self.current_segments = context["current_segments"]
         self.current_translated_segments = context["current_translated_segments"]
-        # Restore `_audio_end` (actual TTS audio end) from the saved
-        # voice_segments.json so the live overlay and row-stacking can
-        # detect audio bleed into the next segment without requiring the
-        # user to re-run voiceover.
-        self._restore_audio_end_from_project(state)
         if self.current_translated_segments:
             self.refresh_auto_keyword_highlights(force=True)
         if self.get_audio_handling_mode() == "clean" and self.last_vocals_path and os.path.exists(self.last_vocals_path):
@@ -4089,20 +4084,11 @@ class VideoTranslatorGUI(QMainWindow):
             base = base_segments[idx] if idx < len(base_segments) else {}
             translated = translated_segments[idx] if idx < len(translated_segments) else {}
             reference = translated or base
-            # Use _audio_end if available (Timeline Priority extended duration)
-            # Otherwise fall back to the segment's end time
-            end_time = float(reference.get("end", 0.0))
-            audio_end = reference.get("_audio_end")
-            if audio_end is not None:
-                try:
-                    end_time = max(end_time, float(audio_end))
-                except (TypeError, ValueError):
-                    pass
             rows.append(
                 {
                     "segment_index": idx,
                     "start": float(reference.get("start", 0.0)),
-                    "end": end_time,
+                    "end": float(reference.get("end", 0.0)),
                     "original": str(base.get("text", "")),
                     "translated": str(translated.get("text", "")),
                     "spoken": str(translated.get("tts_text") or translated.get("dubbing_vi") or translated.get("text", "")),
@@ -5742,74 +5728,6 @@ class VideoTranslatorGUI(QMainWindow):
                 except Exception:
                     pass
 
-    def _restore_audio_end_from_project(self, state) -> None:
-        """Read `_audio_end` values from the saved `voice_segments.json`
-        artifact and stamp them onto `current_translated_segments` so the
-        live overlay + row-stacking see the actual TTS audio end on
-        project open, without requiring a re-run of voiceover.
-
-        The voice workflow records `_audio_end` on every segment whose
-        generated audio was longer than the segment window. Persisting
-        it alongside the segments means the next session can detect
-        audio bleed immediately.
-        """
-        if not state or not self.current_translated_segments:
-            return
-        artifacts = getattr(state, "artifacts", {}) or {}
-        voice_json = artifacts.get("voice_segments", "")
-        if not voice_json or not os.path.exists(voice_json):
-            return
-        try:
-            with open(voice_json, "r", encoding="utf-8") as fh:
-                voice_data = json.load(fh)
-        except Exception:
-            return
-        if not isinstance(voice_data, list):
-            return
-        # Build a lookup by (start, original/tts text) so reorders or
-        # slight edits don't misalign. Fall back to positional matching
-        # when the counts line up.
-        base_segments = self.current_translated_segments
-        by_key: dict[tuple, list[int]] = {}
-        for idx, seg in enumerate(base_segments):
-            key = (
-                round(float(seg.get("start", 0.0)), 3),
-                str(seg.get("text", "") or "").strip(),
-            )
-            by_key.setdefault(key, []).append(idx)
-        used = set()
-        for vseg in voice_data:
-            if not isinstance(vseg, dict):
-                continue
-            raw = vseg.get("_audio_end")
-            if raw is None:
-                continue
-            try:
-                audio_end = float(raw)
-            except (TypeError, ValueError):
-                continue
-            key = (
-                round(float(vseg.get("start", 0.0)), 3),
-                str(vseg.get("text", "") or "").strip(),
-            )
-            candidates = [i for i in by_key.get(key, []) if i not in used]
-            target_idx = None
-            if candidates:
-                target_idx = candidates[0]
-                used.add(target_idx)
-            elif len(voice_data) == len(base_segments):
-                target_idx = base_segments.index(vseg) if vseg in base_segments else None
-            if target_idx is None:
-                continue
-            try:
-                seg_end = float(base_segments[target_idx].get("end", 0.0))
-            except (TypeError, ValueError):
-                seg_end = 0.0
-            if audio_end > seg_end + 0.01:
-                base_segments[target_idx]["_audio_end"] = audio_end
-            else:
-                base_segments[target_idx].pop("_audio_end", None)
-
     def _sync_timeline_mute_to_gui(self):
         """Pull the current timeline track mute state into the GUI and backend."""
         if not hasattr(self, "timeline") or not self.timeline._timeline:
@@ -6143,7 +6061,6 @@ class VideoTranslatorGUI(QMainWindow):
     def _apply_segment_timing(self, segment: dict, start: float, end: float):
         segment["start"] = float(start)
         segment["end"] = float(end)
-        segment.pop("_audio_end", None)  # Clear stale audio metadata when user manually adjusts timing
         if "tts_group_start" in segment or "tts_group_end" in segment:
             segment["tts_group_start"] = float(start)
             segment["tts_group_end"] = float(end)
@@ -7936,12 +7853,6 @@ class VideoTranslatorGUI(QMainWindow):
             btn.setEnabled(True)
             btn.setText("Regenerate voice")
 
-        # Probe the actual wav duration with ffprobe so the timeline
-        # bar (segment window) and the row-stacking comparison can
-        # reflect the real audio length. Accuracy beats latency here
-        # because Regenerate Voice is not a performance-critical path.
-        self._apply_segment_audio_end_to_timeline(index=index, audio_path=audio_path)
-
         if getattr(self, "last_voice_vi_path", "") and os.path.exists(self.last_voice_vi_path):
             self.run_voiceover()
         else:
@@ -7949,63 +7860,6 @@ class VideoTranslatorGUI(QMainWindow):
                 self.play_audio_preview_file(audio_path)
             except Exception as exc:
                 self.show_error("Audio Preview Failed", "Could not play the generated preview audio.", str(exc))
-
-    def _apply_segment_audio_end_to_timeline(self, *, index: int, audio_path: str) -> None:
-        """Probe the generated wav and store `_audio_end` on the
-        corresponding segment + its DubSubtitleLayer. The timeline bar
-        keeps showing the segment window (start -> end); only the row
-        overlap check sees the audio length, so a regenerate that
-        produces a longer/shorter clip pushes the layer down a row (or
-        pulls it back to row 0) when needed.
-        """
-        if not audio_path or not os.path.exists(audio_path):
-            return
-        actual_d = ffprobe_wav_duration(audio_path)
-        if actual_d <= 0.0:
-            return
-        segs = self.current_translated_segments or self.current_segments
-        if not segs or index < 0 or index >= len(segs):
-            return
-        seg = segs[index]
-        try:
-            start_s = float(seg.get("start", 0.0))
-        except (TypeError, ValueError):
-            return
-        audio_end = start_s + actual_d
-        try:
-            cur_end = float(seg.get("end", audio_end))
-        except (TypeError, ValueError):
-            cur_end = audio_end
-        if audio_end > cur_end + 0.01:
-            seg["_audio_end"] = audio_end
-        else:
-            seg.pop("_audio_end", None)
-        # Push the new audio end onto the matching layer metadata so
-        # the row-stacking comparison sees it on the next paint.
-        timeline = getattr(self, "timeline", None)
-        if timeline is None:
-            return
-        timeline_model = getattr(timeline, "_timeline", None)
-        if timeline_model is None:
-            return
-        from app.layers.sync_bridge import DUB_SUBTITLE_TRACK_NAME
-        target_track = None
-        for t in timeline_model.tracks:
-            if t.name == DUB_SUBTITLE_TRACK_NAME:
-                target_track = t
-                break
-        if target_track is None:
-            return
-        for layer in target_track.layers:
-            meta = getattr(layer, "metadata", None) or {}
-            if not isinstance(meta, dict):
-                continue
-            try:
-                if int(meta.get("_seg_index", -1)) == index:
-                    meta["_audio_end"] = audio_end
-            except (TypeError, ValueError):
-                continue
-        timeline._redraw()
 
     def download_subtitle(self):
         srt_text = self.translated_text.toPlainText().strip()
@@ -8174,8 +8028,9 @@ class VideoTranslatorGUI(QMainWindow):
         if self.keep_timeline_cb.isChecked() and base_segments:
             edited_texts = self.extract_subtitle_text_entries(srt_text)
             if edited_texts and len(edited_texts) == len(base_segments):
-                return [
-                    {
+                out = []
+                for idx, base in enumerate(base_segments):
+                    d = {
                         "start": float(base["start"]),
                         "end": float(base["end"]),
                         "text": edited_texts[idx],
@@ -8185,10 +8040,15 @@ class VideoTranslatorGUI(QMainWindow):
                         "tts_group_end": float(base.get("tts_group_end", base.get("end", 0.0)) or 0.0),
                         "words": list(base.get("words", [])),
                         "manual_highlights": list(base.get("manual_highlights", [])),
-                        "_audio_end": float(base["_audio_end"]) if base.get("_audio_end") is not None else None,
                     }
-                    for idx, base in enumerate(base_segments)
-                ]
+                    raw = base.get("_audio_end")
+                    if raw is not None:
+                        try:
+                            d["_audio_end"] = float(raw)
+                        except (TypeError, ValueError):
+                            pass
+                    out.append(d)
+                return out
 
         parsed_segments = self.parse_srt_to_segments(srt_text)
         if base_segments and len(parsed_segments) == len(base_segments):
@@ -8201,12 +8061,6 @@ class VideoTranslatorGUI(QMainWindow):
                     segment["tts_group_id"] = base.get("tts_group_id", "")
                     segment["tts_group_start"] = float(base.get("tts_group_start", base.get("start", 0.0)) or 0.0)
                     segment["tts_group_end"] = float(base.get("tts_group_end", base.get("end", 0.0)) or 0.0)
-                raw_audio_end = base.get("_audio_end")
-                if raw_audio_end is not None:
-                    try:
-                        segment["_audio_end"] = float(raw_audio_end)
-                    except (TypeError, ValueError):
-                        pass
         return parsed_segments
 
     def _write_live_preview_assets(self, segments):
@@ -8317,37 +8171,6 @@ class VideoTranslatorGUI(QMainWindow):
         self.live_preview_editor_name = editor_name
         return self._write_live_preview_assets(segments)
 
-    def _enrich_segments_with_audio_end(self, segments):
-        """Merge `_audio_end` from `current_translated_segments` (the source
-        of truth set by the voice workflow) into the live preview segment
-        list. This guarantees the active-segment check sees the actual TTS
-        audio length even when the live preview segments were rebuilt from
-        the editor SRT (which may have lost the audio-end annotation along
-        the way). Only the in-memory dicts are touched; nothing is written
-        back to the editor.
-        """
-        if not segments:
-            return segments
-        base = self.current_translated_segments or self.current_segments or []
-        if not base or len(base) != len(segments):
-            return segments
-        for idx, seg in enumerate(segments):
-            if not isinstance(seg, dict):
-                continue
-            if seg.get("_audio_end") is not None:
-                continue
-            base_seg = base[idx]
-            if not isinstance(base_seg, dict):
-                continue
-            raw = base_seg.get("_audio_end")
-            if raw is None:
-                continue
-            try:
-                seg["_audio_end"] = float(raw)
-            except (TypeError, ValueError):
-                continue
-        return segments
-
     def _find_active_segment_index(self, position_ms: int, segments):
         position_seconds = max(0.0, float(position_ms) / 1000.0)
         for idx, seg in enumerate(segments or []):
@@ -8358,14 +8181,7 @@ class VideoTranslatorGUI(QMainWindow):
                 end_s = float(seg.get("end", 0.0))
             except (TypeError, ValueError):
                 continue
-            audio_end = end_s
-            raw_audio_end = seg.get("_audio_end")
-            if raw_audio_end is not None:
-                try:
-                    audio_end = max(end_s, float(raw_audio_end))
-                except (TypeError, ValueError):
-                    audio_end = end_s
-            if start_s <= position_seconds <= audio_end:
+            if start_s <= position_seconds <= end_s:
                 return idx
         return -1
 
@@ -8373,11 +8189,6 @@ class VideoTranslatorGUI(QMainWindow):
         """Return the indices of every segment whose [start, end] contains
         position_ms. Multiple entries are returned when segments overlap in
         time, so the live overlay can stack them on separate lines.
-
-        Uses `_audio_end` (if present) as the effective end so a segment
-        whose generated TTS audio bleeds past the segment window still
-        shows its subtitle on the overlay until the audio actually ends.
-        The burned-in SRT / original segment window is unchanged.
         """
         position_seconds = max(0.0, float(position_ms) / 1000.0)
         result: list[int] = []
@@ -8389,14 +8200,7 @@ class VideoTranslatorGUI(QMainWindow):
                 end_s = float(seg.get("end", 0.0))
             except (TypeError, ValueError):
                 continue
-            audio_end = end_s
-            raw_audio_end = seg.get("_audio_end")
-            if raw_audio_end is not None:
-                try:
-                    audio_end = max(end_s, float(raw_audio_end))
-                except (TypeError, ValueError):
-                    audio_end = end_s
-            if start_s <= position_seconds <= audio_end:
+            if start_s <= position_seconds <= end_s:
                 result.append(idx)
         return result
 
@@ -8431,7 +8235,6 @@ class VideoTranslatorGUI(QMainWindow):
     def update_playback_subtitle_highlight(self, position_ms: int):
         try:
             segments = self.live_preview_segments or self.get_active_segments()
-            segments = self._enrich_segments_with_audio_end(segments)
             active_index = self._find_active_segment_index(position_ms, segments)
             self.timeline.set_active_segment_index(active_index)
             inspector_visible = self._is_subtitle_inspector_details_visible()
@@ -9750,6 +9553,8 @@ class VideoTranslatorGUI(QMainWindow):
             new_audio_end = next_payload.get("_audio_end")
             if new_audio_end is not None:
                 seg["_audio_end"] = new_audio_end
+            else:
+                seg.pop("_audio_end", None)
         return updated
 
     def _regenerate_translated_srt_from_segments(self):
