@@ -565,6 +565,7 @@ class VideoTranslatorGUI(QMainWindow):
         # Keys are stable IDs, values are absolute file paths.
         self.processed_artifacts = {}
         self.workspace_root = workspace_root()
+        self._cleanup_temp_root()
         self.project_service = ProjectService(self.workspace_root)
         self.project_bridge = GUIProjectBridge(self.project_service)
         self.voice_catalog_service = VoiceCatalogService(self.workspace_root)
@@ -3228,6 +3229,19 @@ class VideoTranslatorGUI(QMainWindow):
         if create:
             os.makedirs(root, exist_ok=True)
         return root
+
+    def _cleanup_temp_root(self) -> None:
+        root = self.get_workspace_temp_root()
+        if not os.path.isdir(root):
+            return
+        for entry in os.listdir(root):
+            fpath = os.path.join(root, entry)
+            if not os.path.isfile(fpath):
+                continue
+            try:
+                os.remove(fpath)
+            except OSError:
+                pass
 
     def get_current_project_temp_key(self) -> str:
         state = getattr(self, "current_project_state", None)
@@ -7856,10 +7870,62 @@ class VideoTranslatorGUI(QMainWindow):
         if getattr(self, "last_voice_vi_path", "") and os.path.exists(self.last_voice_vi_path):
             self.run_voiceover()
         else:
+            self._apply_segment_audio_end_to_timeline(index=index, audio_path=audio_path)
             try:
                 self.play_audio_preview_file(audio_path)
             except Exception as exc:
                 self.show_error("Audio Preview Failed", "Could not play the generated preview audio.", str(exc))
+
+    def _apply_segment_audio_end_to_timeline(self, *, index: int, audio_path: str) -> None:
+        if not audio_path or not os.path.exists(audio_path):
+            return
+        actual_d = ffprobe_wav_duration(audio_path)
+        if actual_d <= 0.0:
+            return
+        segs = self.current_translated_segments or self.current_segments
+        if not segs or index < 0 or index >= len(segs):
+            return
+        seg = segs[index]
+        try:
+            start_s = float(seg.get("start", 0.0))
+        except (TypeError, ValueError):
+            return
+        audio_end = start_s + actual_d
+        try:
+            cur_end = float(seg.get("end", audio_end))
+        except (TypeError, ValueError):
+            cur_end = audio_end
+        if audio_end > cur_end + 0.01:
+            seg["_audio_end"] = audio_end
+        else:
+            seg.pop("_audio_end", None)
+        timeline = getattr(self, "timeline", None)
+        if timeline is None:
+            return
+        timeline_model = getattr(timeline, "_timeline", None)
+        if timeline_model is None:
+            return
+        from app.layers.sync_bridge import DUB_SUBTITLE_TRACK_NAME
+        target_track = None
+        for t in timeline_model.tracks:
+            if t.name == DUB_SUBTITLE_TRACK_NAME:
+                target_track = t
+                break
+        if target_track is None:
+            return
+        for layer in target_track.layers:
+            meta = getattr(layer, "metadata", None) or {}
+            if not isinstance(meta, dict):
+                continue
+            try:
+                if int(meta.get("_seg_index", -1)) == index:
+                    if audio_end > cur_end + 0.01:
+                        meta["_audio_end"] = audio_end
+                    else:
+                        meta.pop("_audio_end", None)
+            except (TypeError, ValueError):
+                continue
+        timeline._redraw()
 
     def download_subtitle(self):
         srt_text = self.translated_text.toPlainText().strip()
