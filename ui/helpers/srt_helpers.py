@@ -89,8 +89,9 @@ def format_timestamp(seconds):
     return f"{hrs:02d}:{mins:02d}:{sec:02d},{ms:03d}"
 
 
-def format_segments_to_srt(segments):
+def format_segments_to_srt(segments, max_gap_ms: float = 100.0):
     lines = []
+    max_gap_s = max_gap_ms / 1000.0
     for idx, seg in enumerate(segments):
         start = format_timestamp(seg["start"])
         end_s = float(seg.get("end", 0.0) or 0.0)
@@ -100,6 +101,11 @@ def format_segments_to_srt(segments):
                 end_s = max(end_s, float(raw_audio_end))
             except (TypeError, ValueError):
                 pass
+        if idx + 1 < len(segments):
+            next_start = float(segments[idx + 1].get("start", 0.0))
+            gap = next_start - end_s
+            if 0 < gap <= max_gap_s:
+                end_s = next_start
         end = format_timestamp(end_s)
         lines.append(f"{idx + 1}")
         lines.append(f"{start} --> {end}")

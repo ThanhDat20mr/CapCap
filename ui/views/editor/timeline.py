@@ -640,8 +640,21 @@ class EditorTimeline(QGraphicsView):
         for row_index, layer in enumerate(track.layers):
             if not layer.visible:
                 continue
-            x = int(layer.start * self.pixels_per_second) - scroll_x
-            w = max(int(layer.duration * self.pixels_per_second), 20)
+            # Use _audio_end if available (Timeline Priority extended duration)
+            # Otherwise use layer.end for consistent display across UI/timeline/SRT
+            layer_start = layer.start
+            layer_end = layer.end
+            audio_end_meta = None
+            if hasattr(layer, 'metadata') and isinstance(layer.metadata, dict):
+                audio_end_meta = layer.metadata.get('_audio_end')
+            if audio_end_meta is not None:
+                try:
+                    layer_end = max(float(audio_end_meta), layer_end)
+                except (TypeError, ValueError):
+                    pass
+            
+            x = int(layer_start * self.pixels_per_second) - scroll_x
+            w = max(int((layer_end - layer_start) * self.pixels_per_second), 20)
             if overlap_stack:
                 # Look up the row assigned to this layer in the visible
                 # list (it was indexed in start-time order by
@@ -852,6 +865,19 @@ class EditorTimeline(QGraphicsView):
         triangle = [QPointF(x - 6, 0), QPointF(x + 6, 0), QPointF(x, 8)]
         painter.drawPolygon(triangle)
 
+    def _get_effective_layer_end(self, layer) -> float:
+        """Get the effective end time for a layer, considering _audio_end if available."""
+        layer_end = layer.end
+        audio_end_meta = None
+        if hasattr(layer, 'metadata') and isinstance(layer.metadata, dict):
+            audio_end_meta = layer.metadata.get('_audio_end')
+        if audio_end_meta is not None:
+            try:
+                layer_end = max(float(audio_end_meta), layer_end)
+            except (TypeError, ValueError):
+                pass
+        return layer_end
+
     def _hit_test_edge(self, pos, scroll_x: int, scroll_y: int = 0):
         """Return ('left'|'right', layer_id) if pos is near a bar edge,
         or ('body', layer_id) if inside the bar, or (None, '')."""
@@ -894,8 +920,21 @@ class EditorTimeline(QGraphicsView):
             else:
                 layers_in_row = list(layers for layers in track.layers if layers.visible)
             for layer in layers_in_row:
-                lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
-                lw = max(int(layer.duration * self.pixels_per_second), 20)
+                # Use _audio_end if available (Timeline Priority extended duration)
+                # Otherwise use layer.end for consistent hit testing
+                layer_start = layer.start
+                layer_end = layer.end
+                audio_end_meta = None
+                if hasattr(layer, 'metadata') and isinstance(layer.metadata, dict):
+                    audio_end_meta = layer.metadata.get('_audio_end')
+                if audio_end_meta is not None:
+                    try:
+                        layer_end = max(float(audio_end_meta), layer_end)
+                    except (TypeError, ValueError):
+                        pass
+                
+                lx = self.TRACK_HEADER_W + int(layer_start * self.pixels_per_second) - scroll_x
+                lw = max(int((layer_end - layer_start) * self.pixels_per_second), 20)
                 if lx - 4 <= pos.x() <= lx + lw + 4:
                     dx = pos.x() - lx
                     if dx <= self.HANDLE_W:
@@ -932,18 +971,19 @@ class EditorTimeline(QGraphicsView):
             if lid and edge in ("left", "right"):
                 _, layer = self._find_layer_by_id(lid)
                 if layer:
+                    effective_end = self._get_effective_layer_end(layer)
                     self._drag_state = {
                         "type": f"resize_{edge}",
                         "layer_id": lid,
                         "start_time": float(layer.start),
-                        "end_time": float(layer.end),
+                        "end_time": float(effective_end),
                         "layer_start_x": float(self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x),
                     }
                     self._selected_layer_id = lid
                     self.layerSelected.emit(lid)
                     idx = self._segment_indices.get(lid, -1)
                     if idx >= 0:
-                        self.segmentTimingEditStarted.emit(idx, float(layer.start), float(layer.end))
+                        self.segmentTimingEditStarted.emit(idx, float(layer.start), float(effective_end))
                         self.segmentSelected.emit(idx)
                     self.viewport().update()
                     event.accept()
@@ -968,7 +1008,7 @@ class EditorTimeline(QGraphicsView):
             _, layer = self._find_layer_by_id(lid)
             if layer:
                 start = float(layer.start)
-                end = float(layer.end)
+                end = float(self._get_effective_layer_end(layer))
                 idx = self._segment_indices.get(lid, -1)
                 if idx >= 0:
                     self.segmentTimingChanged.emit(idx, start, end)
@@ -1064,8 +1104,11 @@ class EditorTimeline(QGraphicsView):
                 for visible_idx, layer in enumerate(visible_layers):
                     if layer_rows[visible_idx] != row:
                         continue
-                    lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
-                    lw = max(int(layer.duration * self.pixels_per_second), 20)
+                    # Use _audio_end if available (Timeline Priority extended duration)
+                    layer_start = layer.start
+                    layer_end = self._get_effective_layer_end(layer)
+                    lx = self.TRACK_HEADER_W + int(layer_start * self.pixels_per_second) - scroll_x
+                    lw = max(int((layer_end - layer_start) * self.pixels_per_second), 20)
                     if lx - 4 <= pos.x() <= lx + lw + 4:
                         return layer.id
                 return ""
@@ -1079,8 +1122,11 @@ class EditorTimeline(QGraphicsView):
                     if not layer.visible:
                         continue
                     if visible_count == row:
-                        lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
-                        lw = max(int(layer.duration * self.pixels_per_second), 20)
+                        # Use _audio_end if available (Timeline Priority extended duration)
+                        layer_start = layer.start
+                        layer_end = self._get_effective_layer_end(layer)
+                        lx = self.TRACK_HEADER_W + int(layer_start * self.pixels_per_second) - scroll_x
+                        lw = max(int((layer_end - layer_start) * self.pixels_per_second), 20)
                         if lx - 4 <= pos.x() <= lx + lw + 4:
                             return layer.id
                         break
@@ -1089,8 +1135,11 @@ class EditorTimeline(QGraphicsView):
             for layer in track.layers:
                 if not layer.visible:
                     continue
-                lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
-                lw = max(int(layer.duration * self.pixels_per_second), 20)
+                # Use _audio_end if available (Timeline Priority extended duration)
+                layer_start = layer.start
+                layer_end = self._get_effective_layer_end(layer)
+                lx = self.TRACK_HEADER_W + int(layer_start * self.pixels_per_second) - scroll_x
+                lw = max(int((layer_end - layer_start) * self.pixels_per_second), 20)
                 if lx - 4 <= pos.x() <= lx + lw + 4:
                     return layer.id
             return ""

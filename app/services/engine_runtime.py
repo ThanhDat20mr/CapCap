@@ -175,8 +175,8 @@ class EngineRuntime:
     def get_video_dimensions(self, video_path: str):
         return self.ffmpeg.get_video_dimensions(video_path)
 
-    def generate_srt(self, segments, output_path: str) -> str:
-        return self.subtitle.generate_srt(segments, output_path)
+    def generate_srt(self, segments, output_path: str, max_gap_ms: float = 100.0) -> str:
+        return self.subtitle.generate_srt(segments, output_path, max_gap_ms=max_gap_ms)
 
     def synthesize_segment(
         self,

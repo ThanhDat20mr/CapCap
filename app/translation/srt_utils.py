@@ -25,11 +25,21 @@ def parse_srt(srt_text: str) -> list[dict]:
     return segments
 
 
-def to_srt(segments: list[dict]) -> str:
+def to_srt(segments: list[dict], max_gap_ms: float = 100.0) -> str:
     lines = []
+    max_gap_s = max_gap_ms / 1000.0
     for idx, seg in enumerate(segments, 1):
         lines.append(str(idx))
-        lines.append(f"{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}")
+        end_time = seg['end']
+        
+        # Close small gaps to next segment
+        if idx < len(segments):
+            next_seg = segments[idx]
+            gap = next_seg['start'] - end_time
+            if 0 < gap <= max_gap_s:
+                end_time = next_seg['start']
+        
+        lines.append(f"{format_timestamp(seg['start'])} --> {format_timestamp(end_time)}")
         lines.append((seg.get("text") or "").strip())
         lines.append("")
     return "\n".join(lines).strip() + "\n"

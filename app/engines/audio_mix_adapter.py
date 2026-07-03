@@ -1,4 +1,4 @@
-from audio_mixer import build_voice_track_from_srt_segments, change_wav_speed, fit_wav_to_duration, mix_voice_with_background
+from audio_mixer import build_voice_track_from_srt_segments, change_wav_speed, fit_wav_to_duration, mix_voice_with_background, trim_trailing_silence
 
 
 class AudioMixAdapter:
@@ -32,6 +32,21 @@ class AudioMixAdapter:
             mode=mode,
             smart_min_ratio=smart_min_ratio,
             smart_max_ratio=smart_max_ratio,
+        )
+
+    def trim_trailing_silence(
+        self,
+        *,
+        input_wav_path: str,
+        output_wav_path: str,
+        silence_threshold: float = -40.0,
+        min_silence_duration: float = 0.5,
+    ) -> str:
+        return trim_trailing_silence(
+            input_wav_path=input_wav_path,
+            output_wav_path=output_wav_path,
+            silence_threshold=silence_threshold,
+            min_silence_duration=min_silence_duration,
         )
 
     def build_voice_track(self, *, segments, tts_wav_paths, output_wav_path: str, gain_db: float = 0.0) -> str:

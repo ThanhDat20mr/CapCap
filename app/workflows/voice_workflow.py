@@ -1262,15 +1262,25 @@ class VoiceWorkflow:
                         target_duration_seconds=target_duration,
                         mode="smart",
                     )
-            if (sync_mode or "off").strip().lower() == "timeline":
-                # Timeline Priority: always cut audio to the segment
-                # window. End of speech may be skipped; next segment
-                # plays immediately after.
+            if (sync_mode or "off").strip().lower() in ("timeline", "timeline priority"):
+                # Timeline Priority: cut audio to fit the segment window,
+                # but extend to fill gaps to the next segment to minimize cutting.
+                # Calculate extended duration if there's a gap to next segment
+                extended_duration = target_duration
+                if idx + 1 < len(segments):
+                    next_seg = segments[idx + 1]
+                    next_start = float(next_seg.get("start", 0.0))
+                    seg_end = float(seg.get("end", 0.0))
+                    gap = next_start - seg_end
+                    if gap > 0.01:  # Only extend if gap is meaningful (>10ms)
+                        extended_duration = target_duration + gap
+                        print(f"[Timeline Priority] Segment {idx+1}: extending by {gap:.3f}s to fill gap")
+                
                 synced_path = os.path.join(tmp_dir, f"seg_{idx:04d}_timelinefit.wav")
                 polished_wavs[idx] = self.engine_runtime.fit_wav_to_duration(
                     input_wav_path=polished_wavs[idx],
                     output_wav_path=synced_path,
-                    target_duration_seconds=target_duration,
+                    target_duration_seconds=extended_duration,
                     mode="timeline",
                 )
         if abs(float(voice_speed) - 1.0) >= 0.02 or any(

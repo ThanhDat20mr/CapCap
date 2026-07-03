@@ -4089,11 +4089,20 @@ class VideoTranslatorGUI(QMainWindow):
             base = base_segments[idx] if idx < len(base_segments) else {}
             translated = translated_segments[idx] if idx < len(translated_segments) else {}
             reference = translated or base
+            # Use _audio_end if available (Timeline Priority extended duration)
+            # Otherwise fall back to the segment's end time
+            end_time = float(reference.get("end", 0.0))
+            audio_end = reference.get("_audio_end")
+            if audio_end is not None:
+                try:
+                    end_time = max(end_time, float(audio_end))
+                except (TypeError, ValueError):
+                    pass
             rows.append(
                 {
                     "segment_index": idx,
                     "start": float(reference.get("start", 0.0)),
-                    "end": float(reference.get("end", 0.0)),
+                    "end": end_time,
                     "original": str(base.get("text", "")),
                     "translated": str(translated.get("text", "")),
                     "spoken": str(translated.get("tts_text") or translated.get("dubbing_vi") or translated.get("text", "")),
@@ -6134,6 +6143,7 @@ class VideoTranslatorGUI(QMainWindow):
     def _apply_segment_timing(self, segment: dict, start: float, end: float):
         segment["start"] = float(start)
         segment["end"] = float(end)
+        segment.pop("_audio_end", None)  # Clear stale audio metadata when user manually adjusts timing
         if "tts_group_start" in segment or "tts_group_end" in segment:
             segment["tts_group_start"] = float(start)
             segment["tts_group_end"] = float(end)
@@ -9799,6 +9809,8 @@ class VideoTranslatorGUI(QMainWindow):
                     voice_track,
                     segments=self.current_translated_segments or self.current_segments,
                 )
+                if hasattr(self, "voice_timing_sync_combo"):
+                    self.timeline.set_voice_sync_mode(self.voice_timing_sync_combo.currentText())
             self._sync_timeline_mute_to_gui()
             self.persist_current_timeline_project_data()
             # Regenerate the project SRT from the updated segments so it

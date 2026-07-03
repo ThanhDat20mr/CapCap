@@ -441,7 +441,6 @@ def build_start_group(gui, left_layout):
     def _on_voice_timing_sync_changed(_value: str = ""):
         if hasattr(gui, "timeline") and gui.timeline is not None:
             gui.timeline.set_voice_sync_mode(gui.voice_timing_sync_combo.currentText())
-    gui.voice_timing_sync_combo.currentTextChanged.connect(_on_voice_timing_sync_changed)
     _on_voice_timing_sync_changed()
     gui.audio_handling_combo = QComboBox()
     gui.audio_handling_combo.addItem("Fast (recommended)", "fast")
