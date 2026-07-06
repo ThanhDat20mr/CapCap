@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -7,6 +8,24 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 from runtime_paths import bin_path
 from video_processor import srt_to_ass
+
+
+def _ffprobe_video_duration(video_path: str) -> float:
+    """Get video duration using ffprobe as fallback."""
+    try:
+        ffprobe = os.path.join(bin_path("ffmpeg"), "ffprobe.exe")
+        if not os.path.exists(ffprobe):
+            return 0.0
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except Exception:
+        pass
+    return 0.0
 
 
 class QtMediaPlayerBackend(QObject):
@@ -367,6 +386,14 @@ class MpvMediaPlayerBackend(QObject):
         self._state = QMediaPlayer.PausedState
         self._player.pause = True
         self._player.command("loadfile", source_path, "replace")
+        
+        # Use ffprobe as fallback for duration detection
+        # mpv might not report duration immediately after loading
+        ffprobe_duration = _ffprobe_video_duration(source_path)
+        if ffprobe_duration > 0:
+            self._duration_ms = int(ffprobe_duration * 1000)
+            self.durationChanged.emit(self._duration_ms)
+        
         # Reset applied tracking on source change
         self._applied_subtitle_path = ""
         # Pause both audio sidecars at 0 until user plays.

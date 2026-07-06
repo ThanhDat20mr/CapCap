@@ -23,12 +23,6 @@ class ResourceDownloadService:
         "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
     ).strip() or "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
 
-    _AUTO_DOWNLOAD_IDS = {
-        "voice:pack",
-        "sensevoice:model",
-        "cuda:whisper",
-    }
-
     def __init__(self, workspace_root: str):
         self.workspace_root = workspace_root
         self.repo_id = self.HF_RESOURCE_REPO
@@ -308,19 +302,6 @@ class ResourceDownloadService:
         )
 
     def list_resources(self) -> list[dict]:
-        whisper_folder_url = (
-            f"https://huggingface.co/{self.HF_RESOURCE_REPO}/"
-            f"tree/{self.HF_RESOURCE_REVISION}/faster_whisper"
-        )
-        cuda_folder_url = (
-            f"https://huggingface.co/{self.HF_RESOURCE_REPO}/"
-            f"tree/{self.HF_RESOURCE_REVISION}/cuda12_fw"
-        )
-        piper_dir_url = (
-            f"https://huggingface.co/{self.HF_RESOURCE_REPO}/"
-            f"tree/{self.HF_RESOURCE_REVISION}/piper"
-        )
-
         resources: list[dict] = [
             {
                 "id": self.NORMAL_AI_RESOURCE_ID,
@@ -356,13 +337,13 @@ class ResourceDownloadService:
                 "kind": "whisper",
                 "status": "installed" if self.is_resource_installed("whisper:medium") else "missing",
                 "target_dir": self._whisper_cache_root(),
-                "download_url": whisper_folder_url,
-                "expected_filename": "medium (full snapshot folder)",
+                "download_url": self._hf_blob_url("zipResource/models--Systran--faster-whisper-medium.zip"),
+                "expected_filename": "models--Systran--faster-whisper-medium.zip",
                 "auto_download_supported": True,
                 "description": (
                     "Higher accuracy, larger download size. "
-                    "Click 'Auto Download' to fetch from Hugging Face, or open the URL to download manually "
-                    "and place files into models/faster_whisper/medium/. "
+                    "Click 'Auto Download' to fetch from Hugging Face, or open the URL to download the zip manually "
+                    "and extract into models/faster_whisper/medium/. "
                     "faster-whisper will also auto-download on first use if the folder is empty."
                 ),
             },
@@ -372,13 +353,13 @@ class ResourceDownloadService:
                 "kind": "cuda",
                 "status": "installed" if self.is_resource_installed("cuda:whisper") else "missing",
                 "target_dir": join_root("bin", "cuda12_fw"),
-                "download_url": cuda_folder_url,
-                "expected_filename": "cuda12_fw/ contents (cuBLAS + cuDNN)",
+                "download_url": self._hf_blob_url("zipResource/cuda12_fw.zip"),
+                "expected_filename": "cuda12_fw.zip",
                 "auto_download_supported": True,
                 "description": (
                     "CUDA 12 runtime + ONNX GPU provider. "
                     "Required for GPU acceleration on Whisper, OCR, and local AI. "
-                    "Click 'Auto Download' to fetch from Hugging Face, or open the URL to download manually."
+                    "Click 'Auto Download' to fetch from Hugging Face, or open the URL to download the zip manually."
                 ),
             },
             {
@@ -387,13 +368,13 @@ class ResourceDownloadService:
                 "kind": "sensevoice",
                 "status": "installed" if self.is_resource_installed("sensevoice:model") else "missing",
                 "target_dir": models_path("sensevoice"),
-                "download_url": f"https://huggingface.co/{self.SENSEVOICE_REPO}",
-                "expected_filename": "model.int8.onnx + tokens.txt",
+                "download_url": self._hf_blob_url("zipResource/sensevoice.zip"),
+                "expected_filename": "sensevoice.zip",
                 "auto_download_supported": True,
                 "description": (
                     "Multilingual SenseVoice model for CPU-based speech recognition. "
-                    "Click 'Auto Download' to fetch from Hugging Face, or open the URL to download manually "
-                    "and drop model.int8.onnx + tokens.txt into models/sensevoice/."
+                    "Click 'Auto Download' to fetch from Hugging Face, or open the URL to download the zip manually "
+                    "and extract model.int8.onnx + tokens.txt into models/sensevoice/."
                 ),
             },
         ]
@@ -407,24 +388,18 @@ class ResourceDownloadService:
                     "kind": "voice",
                     "status": self._voice_pack_status(),
                     "target_dir": models_path("piper"),
-                    "download_url": piper_dir_url,
-                    "expected_filename": "*.onnx + *.onnx.json pairs",
+                    "download_url": self._hf_blob_url("zipResource/piper.zip"),
+                    "expected_filename": "piper.zip",
                     "auto_download_supported": True,
                     "description": (
                         f"Local Piper TTS voices. The catalog lists {len(piper_entries)} Vietnamese voice(s). "
                         "Click 'Auto Download' to fetch every voice from Hugging Face, "
-                        "or open the URL to download individual voices manually "
-                        "and place each .onnx + .onnx.json pair into models/piper/."
+                        "or open the URL to download the zip manually "
+                        "and extract each .onnx + .onnx.json pair into models/piper/."
                     ),
                 }
             )
         return resources
-
-    def supports_auto_download(self, resource_id: str) -> bool:
-        rid = str(resource_id or "")
-        if rid.startswith("whisper:"):
-            return True
-        return rid in self._AUTO_DOWNLOAD_IDS
 
     def is_resource_installed(self, resource_id: str) -> bool:
         if resource_id in {self.NORMAL_AI_RESOURCE_ID, "ai:local-gguf"}:
@@ -435,13 +410,7 @@ class ResourceDownloadService:
             return self.is_ocr_ready()
         if resource_id == "cuda:whisper":
             fw_dir = join_root("bin", "cuda12_fw")
-            cuda_ok = os.path.exists(os.path.join(fw_dir, "cublas64_12.dll"))
-            try:
-                import onnxruntime
-                ort_ok = os.path.isfile(os.path.join(os.path.dirname(onnxruntime.__file__), "capi", "onnxruntime_providers_cuda.dll"))
-            except Exception:
-                ort_ok = False
-            return cuda_ok and ort_ok
+            return os.path.exists(os.path.join(fw_dir, "cublas64_12.dll"))
         if resource_id == "sensevoice:model":
             return os.path.isfile(os.path.join(models_path("sensevoice"), "model.int8.onnx"))
         if resource_id.startswith("whisper:"):
@@ -479,6 +448,51 @@ class ResourceDownloadService:
                 return voice
         return None
 
+    def _download_and_extract_zip(self, zip_url: str, extract_to: str, progress_cb=None) -> None:
+        import tempfile
+        import urllib.request
+        import zipfile
+
+        print(f"[Download] Starting download: {zip_url}")
+        print(f"[Download] Target directory: {extract_to}")
+        os.makedirs(extract_to, exist_ok=True)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_file:
+            tmp_path = tmp_file.name
+
+        try:
+            if progress_cb:
+                progress_cb(-1, "Downloading zip file...")
+
+            def _report_progress(block_num, block_size, total_size):
+                if progress_cb and total_size > 0:
+                    downloaded = block_num * block_size
+                    percent = min(99, int((downloaded / total_size) * 100))
+                    progress_cb(percent, f"Downloading... ({percent}%)")
+                if block_num % 10 == 0:  # Log every 10 blocks
+                    print(f"[Download] Progress: block {block_num}, size {block_size}, total {total_size}")
+
+            print(f"[Download] Calling urlretrieve...")
+            urllib.request.urlretrieve(zip_url, tmp_path, reporthook=_report_progress)
+            print(f"[Download] Download complete. File size: {os.path.getsize(tmp_path)} bytes")
+
+            if progress_cb:
+                progress_cb(90, "Extracting zip file...")
+
+            print(f"[Download] Extracting zip to {extract_to}...")
+            with zipfile.ZipFile(tmp_path, "r") as zip_ref:
+                zip_ref.extractall(extract_to)
+            print(f"[Download] Extraction complete.")
+
+            if progress_cb:
+                progress_cb(100, "Extraction complete.")
+        except Exception as e:
+            print(f"[Download] ERROR: {e}")
+            raise
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
     def download_resource(self, resource_id: str, progress_cb=None) -> None:
         if resource_id.startswith("whisper:"):
             model_name = resource_id.split(":", 1)[1].strip().lower()
@@ -496,46 +510,15 @@ class ResourceDownloadService:
             return
 
         if resource_id == "sensevoice:model":
-            sensevoice_repo = self.SENSEVOICE_REPO
+            zip_url = self._hf_blob_url("zipResource/sensevoice.zip")
             target_dir = models_path("sensevoice")
-            os.makedirs(target_dir, exist_ok=True)
-            if progress_cb:
-                progress_cb(-1, "Downloading SenseVoice model from Hugging Face...")
-            try:
-                from huggingface_hub import hf_hub_download
-                for fname in ("model.int8.onnx", "tokens.txt"):
-                    hf_hub_download(
-                        repo_id=sensevoice_repo,
-                        filename=fname,
-                        local_dir=target_dir,
-                        local_dir_use_symlinks=False,
-                    )
-            except Exception as exc:
-                if progress_cb:
-                    progress_cb(0, f"Download failed: {exc}")
-                raise
-            if progress_cb:
-                progress_cb(100, "SenseVoice model downloaded.")
+            self._download_and_extract_zip(zip_url, target_dir, progress_cb)
             return
 
-        try:
-            from huggingface_hub import hf_hub_download, hf_hub_url, snapshot_download
-            from huggingface_hub.errors import RemoteEntryNotFoundError
-            from huggingface_hub.file_download import get_hf_file_metadata
-        except Exception as exc:
-            raise ImportError(
-                "huggingface_hub is not installed. Run `pip install huggingface_hub` first."
-            ) from exc
-
         if resource_id == "cuda:whisper":
-            if progress_cb:
-                progress_cb(-1, "Downloading CUDA runtime and ONNX GPU provider from Hugging Face...")
-            snapshot_download(
-                repo_id=self.repo_id,
-                revision=self.revision,
-                local_dir=join_root("bin"),
-                allow_patterns=["cuda12_fw/*"],
-            )
+            zip_url = self._hf_blob_url("zipResource/cuda12_fw.zip")
+            target_dir = join_root("bin")
+            self._download_and_extract_zip(zip_url, target_dir, progress_cb)
             try:
                 from huggingface_hub import hf_hub_download, hf_hub_url
                 from huggingface_hub.file_download import get_hf_file_metadata
@@ -580,59 +563,9 @@ class ResourceDownloadService:
 
         if resource_id.startswith("voice:"):
             if resource_id == "voice:pack":
-                entries = self._piper_voice_entries()
-                if not entries:
-                    raise ValueError("No Piper voices were found in the local catalog.")
-                total = len(entries)
-                skipped: list[str] = []
-                for index, voice_entry in enumerate(entries, start=1):
-                    voice_id = str(voice_entry.get("id", "")).strip()
-                    remote_model, remote_config = self._voice_remote_paths(voice_entry)
-                    try:
-                        model_start = int(((index - 1) / total) * 100)
-                        model_end = int((((index - 1) + 0.5) / total) * 100)
-                        config_end = int((index / total) * 100)
-                        model_download = self._download_hf_file(
-                            repo_id=self.repo_id,
-                            revision=self.revision,
-                            filename=remote_model,
-                            local_dir=join_root("models"),
-                            hf_hub_download=hf_hub_download,
-                            hf_hub_url=hf_hub_url,
-                            get_hf_file_metadata=get_hf_file_metadata,
-                            progress_cb=progress_cb,
-                            start_percent=model_start,
-                            end_percent=model_end,
-                            label=f"Downloading voice {index}/{total}: {voice_id} (model)",
-                        )
-                        self._finalize_voice_download(model_download, voice_entry, is_config=False)
-                        config_download = self._download_hf_file(
-                            repo_id=self.repo_id,
-                            revision=self.revision,
-                            filename=remote_config,
-                            local_dir=join_root("models"),
-                            hf_hub_download=hf_hub_download,
-                            hf_hub_url=hf_hub_url,
-                            get_hf_file_metadata=get_hf_file_metadata,
-                            progress_cb=progress_cb,
-                            start_percent=model_end,
-                            end_percent=config_end,
-                            label=f"Downloading voice {index}/{total}: {voice_id} (config)",
-                        )
-                        self._finalize_voice_download(config_download, voice_entry, is_config=True)
-                    except RemoteEntryNotFoundError:
-                        skipped.append(voice_id)
-                        if progress_cb:
-                            progress_cb(
-                                int((index / total) * 100),
-                                f"Skipping missing voice {index}/{total}: {voice_id}",
-                            )
-                        continue
-                if progress_cb:
-                    if skipped:
-                        progress_cb(100, f"Voice Pack completed. Skipped missing voices: {', '.join(skipped)}")
-                    else:
-                        progress_cb(100, "Vietnamese Voice Pack is ready.")
+                zip_url = self._hf_blob_url("zipResource/piper.zip")
+                target_dir = models_path("piper")
+                self._download_and_extract_zip(zip_url, target_dir, progress_cb)
                 return
 
             voice_id = resource_id.split(":", 1)[1].strip()
@@ -642,6 +575,12 @@ class ResourceDownloadService:
             remote_model, remote_config = self._voice_remote_paths(voice_entry)
             if progress_cb:
                 progress_cb(10, f"Downloading voice model: {voice_id}...")
+            try:
+                from huggingface_hub import hf_hub_download
+            except Exception as exc:
+                raise ImportError(
+                    "huggingface_hub is not installed. Run `pip install huggingface_hub` first."
+                ) from exc
             model_download = hf_hub_download(
                 repo_id=self.repo_id,
                 revision=self.revision,

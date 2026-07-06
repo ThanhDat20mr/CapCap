@@ -114,6 +114,182 @@ def _build_blur_filter_chain(blur_region, video_width, video_height):
     return f"split={len(regions) + 1}{split_outputs};" + ";".join(crop_parts + overlay_parts)
 
 
+def _build_mask_filter_chain(mask_regions, video_width, video_height):
+    """Build FFmpeg filter chain for mask layers.
+    
+    Mask modes:
+    - solid: Fill with color (black by default)
+    - pixelate: Apply pixelation effect
+    - blur: Apply blur effect
+    
+    Args:
+        mask_regions: List of mask region dicts with keys:
+            x, y, width, height (normalized 0-1)
+            mode: "solid" | "pixelate" | "blur"
+            color: hex color string (for solid mode)
+            pixelate_size: int (for pixelate mode)
+            blur_strength: int (for blur mode)
+        video_width: Video width in pixels
+        video_height: Video height in pixels
+    
+    Returns:
+        FFmpeg filter chain string or empty string if no valid regions
+    """
+    raw_regions = mask_regions
+    if isinstance(raw_regions, dict):
+        raw_regions = [raw_regions]
+    if not isinstance(raw_regions, list):
+        return ""
+    if video_width <= 0 or video_height <= 0:
+        return ""
+
+    regions = []
+    for region in raw_regions:
+        if not isinstance(region, dict):
+            continue
+        try:
+            x_norm = float(region.get("x", 0.0))
+            y_norm = float(region.get("y", 0.0))
+            w_norm = float(region.get("width", 0.0))
+            h_norm = float(region.get("height", 0.0))
+            mode = str(region.get("mode", "solid")).strip().lower()
+            color = str(region.get("color", "#000000")).strip()
+            pixelate_size = int(region.get("pixelate_size", 12))
+            blur_strength = int(region.get("blur_strength", 20))
+        except (TypeError, ValueError):
+            continue
+        if w_norm <= 0 or h_norm <= 0:
+            continue
+
+        x = max(0, min(video_width - 2, int(round(x_norm * video_width))))
+        y = max(0, min(video_height - 2, int(round(y_norm * video_height))))
+        w = max(2, min(video_width - x, int(round(w_norm * video_width))))
+        h = max(2, min(video_height - y, int(round(h_norm * video_height))))
+        regions.append((x, y, w, h, mode, color, pixelate_size, blur_strength))
+    
+    if not regions:
+        return ""
+
+    filter_statements = []
+    current_input = "[0:v]"
+
+    for index, (x, y, w, h, mode, color, pixelate_size, blur_strength) in enumerate(regions):
+        output_label = f"[m{index}]"
+
+        if mode == "solid":
+            color_clean = color.lstrip("#")
+            if len(color_clean) != 6:
+                color_clean = "000000"
+            filter_statements.append(
+                f"color=c=0x{color_clean}:s={w}x{h}:d=1[solid{index}]"
+            )
+            filter_statements.append(f"{current_input}[solid{index}]overlay={x}:{y}{output_label}")
+
+        elif mode == "pixelate":
+            pixel_size = max(1, min(50, pixelate_size))
+            scale_factor = 1.0 / pixel_size
+            small_w = max(1, int(w * scale_factor))
+            small_h = max(1, int(h * scale_factor))
+            filter_statements.append(
+                f"{current_input}split=2[main{index}][tmp{index}];"
+                f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},"
+                f"scale={small_w}:{small_h},scale={w}:{h}[pix{index}];"
+                f"[main{index}][pix{index}]overlay={x}:{y}{output_label}"
+            )
+
+        elif mode == "blur":
+            min_dimension = min(w, h)
+            luma_radius = max(1, min(20, int(min_dimension // 2)))
+            chroma_radius = max(0, min(20, int(min_dimension // 4)))
+            filter_statements.append(
+                f"{current_input}split=2[main{index}][tmp{index}];"
+                f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},boxblur={luma_radius}:3:{chroma_radius}:3[blur{index}];"
+                f"[main{index}][blur{index}]overlay={x}:{y}{output_label}"
+            )
+
+        current_input = output_label
+
+    if not filter_statements:
+        return ""
+
+    return ";".join(filter_statements)
+
+
+def _build_logo_filter_chain(logo_layers, video_width, video_height):
+    """Build FFmpeg filter chain for logo/image overlay layers.
+    
+    Args:
+        logo_layers: List of logo layer dicts with keys:
+            source: path to image file
+            x, y, width, height (normalized 0-1)
+            opacity: float 0-1
+            rotation: float degrees
+        video_width: Video width in pixels
+        video_height: Video height in pixels
+    
+    Returns:
+        FFmpeg filter chain string or empty string if no valid layers
+    """
+    if not isinstance(logo_layers, list):
+        return ""
+    if video_width <= 0 or video_height <= 0:
+        return ""
+
+    layers = []
+    for layer in logo_layers:
+        if not isinstance(layer, dict):
+            continue
+        try:
+            source = str(layer.get("source", "")).strip()
+            if not source or not os.path.exists(source):
+                continue
+            x_norm = float(layer.get("x", 0.0))
+            y_norm = float(layer.get("y", 0.0))
+            w_norm = float(layer.get("width", 0.0))
+            h_norm = float(layer.get("height", 0.0))
+            opacity = float(layer.get("opacity", 1.0))
+            rotation = float(layer.get("rotation", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if w_norm <= 0 or h_norm <= 0:
+            continue
+
+        x = max(0, min(video_width - 2, int(round(x_norm * video_width))))
+        y = max(0, min(video_height - 2, int(round(y_norm * video_height))))
+        w = max(2, min(video_width - x, int(round(w_norm * video_width))))
+        h = max(2, min(video_height - y, int(round(h_norm * video_height))))
+        layers.append((source, x, y, w, h, opacity, rotation))
+    
+    if not layers:
+        return ""
+
+    # Build filter chain for each logo
+    # Note: Logo overlay requires complex filter graph with multiple inputs
+    # For simplicity, we'll use the overlay filter with scale
+    filter_parts = []
+    for index, (source, x, y, w, h, opacity, rotation) in enumerate(layers):
+        escaped_source = _escape_path_for_filter(source)
+        # Scale logo to target size
+        scale_filter = f"[{index}:v]scale={w}:{h}[logo{index}]"
+        filter_parts.append(scale_filter)
+        
+        # Apply opacity if needed
+        if opacity < 1.0:
+            opacity_filter = f"[logo{index}]format=rgba,colorchannelmixer=aa={opacity}[logo{index}]"
+            filter_parts.append(opacity_filter)
+        
+        # Apply rotation if needed
+        if abs(rotation) > 0.1:
+            rotation_rad = rotation * 3.14159265 / 180.0
+            rotate_filter = f"[logo{index}]rotate={rotation_rad}:c=none:ow={w}:oh={h}[logo{index}]"
+            filter_parts.append(rotate_filter)
+    
+    # This is a simplified approach - full implementation would require
+    # complex filter graph with multiple video inputs
+    # For now, return empty string as logo export needs more work
+    return ""
+
+
 def _build_canvas_filter_chain(target_width=None, target_height=None, scale_mode: str = "fit", focus_x: float = 0.5, focus_y: float = 0.5):
     try:
         if target_width and target_height:
@@ -822,8 +998,9 @@ def srt_to_ass(srt_path: str,
     return ass_path
 
 
-def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None):
+def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None):
     """Burn subtitles into video using an already-prepared ASS file."""
+    print(f"[FFmpeg] embed_ass_subtitles called with mask_regions={mask_regions}, logo_layers={logo_layers}")
     ffmpeg = _ffmpeg_path(ffmpeg_path)
     if not os.path.exists(ffmpeg):
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
@@ -844,41 +1021,82 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
         pass
 
     blur_chain = _build_blur_filter_chain(blur_region, video_w, video_h)
-    filter_parts = []
-    if scale_chain:
-        filter_parts.append(scale_chain)
-    filter_video_chain = _build_video_filter_chain(video_filter_state)
-    if filter_video_chain:
-        filter_parts.append(filter_video_chain)
-    if blur_chain:
-        filter_parts.append(blur_chain)
-    filter_parts.append(f"ass='{escaped_ass}'")
-    filter_complex = ",".join(part for part in filter_parts if part)
-    video_encoder_args = _preferred_h264_encoder_args(ffmpeg)
+    mask_chain = _build_mask_filter_chain(mask_regions, video_w, video_h)
+    print(f"[FFmpeg] mask_chain={mask_chain[:100] if mask_chain else 'empty'}")
+    
+    # Check if we have logo layers
+    has_logos = logo_layers and len(logo_layers) > 0
+    print(f"[FFmpeg] has_logos={has_logos}, logo_layers count={len(logo_layers) if logo_layers else 0}")
+    
+    # Build command based on whether we have logos
+    if has_logos:
+        # Complex filter graph with multiple inputs
+        command = _build_logo_overlay_command(
+            ffmpeg, video_path, ass_path, output_path, logo_layers,
+            blur_region, mask_regions, video_w, video_h,
+            scale_chain, blur_chain, mask_chain,
+            output_fps, video_filter_state
+        )
+    else:
+        # Simple filter chain (no logos)
+        filter_parts = []
+        if scale_chain:
+            filter_parts.append(f"[0:v]{scale_chain}[scaled]")
+            current_label = "[scaled]"
+        else:
+            current_label = "[0:v]"
+        
+        filter_video_chain = _build_video_filter_chain(video_filter_state)
+        if filter_video_chain:
+            filter_parts.append(f"{current_label}{filter_video_chain}[filtered]")
+            current_label = "[filtered]"
+        
+        if mask_chain:
+            # mask_chain is a complete filter graph starting with [0:v] and ending with [mN]
+            # Replace [0:v] with current_label
+            mask_chain = mask_chain.replace("[0:v]", current_label, 1)
+            filter_parts.append(mask_chain)
+            # Extract the final output label from mask_chain
+            if "[m" in mask_chain:
+                # Find the last [mN] label
+                import re
+                matches = re.findall(r'\[m\d+\]', mask_chain)
+                if matches:
+                    current_label = matches[-1]
+        
+        if blur_chain:
+            filter_parts.append(f"{current_label}{blur_chain}[blurred]")
+            current_label = "[blurred]"
+        
+        filter_parts.append(f"{current_label}ass='{escaped_ass}'[out]")
+        filter_complex = ";".join(part for part in filter_parts if part)
+        
+        video_encoder_args = _preferred_h264_encoder_args(ffmpeg)
 
-    command = [
-        ffmpeg,
-        '-hide_banner',
-        '-loglevel',
-        'error',
-        '-y',
-        '-i', video_path,
-        '-map', '0:v:0',
-        '-map', '0:a?',
-        '-vf', filter_complex,
-        *video_encoder_args,
-        '-c:a', 'aac', '-b:a', '128k',
-        '-movflags', '+faststart',
-    ]
-    try:
-        if output_fps:
-            parsed_fps = int(float(output_fps))
-            if parsed_fps > 0:
-                command += ['-r', str(parsed_fps)]
-    except Exception:
-        pass
-    command += [output_path]
-    encoder_name = video_encoder_args[1] if len(video_encoder_args) > 1 else 'unknown'
+        command = [
+            ffmpeg,
+            '-hide_banner',
+            '-loglevel',
+            'error',
+            '-y',
+            '-i', video_path,
+            '-map', '[out]',
+            '-map', '0:a?',
+            '-filter_complex', filter_complex,
+            *video_encoder_args,
+            '-c:a', 'aac', '-b:a', '128k',
+            '-movflags', '+faststart',
+        ]
+        try:
+            if output_fps:
+                parsed_fps = int(float(output_fps))
+                if parsed_fps > 0:
+                    command += ['-r', str(parsed_fps)]
+        except Exception:
+            pass
+        command += [output_path]
+    
+    encoder_name = 'libx264' if 'libx264' in ' '.join(command) else 'h264_nvenc'
     print(f"Executing ({encoder_name}): {' '.join(command)}")
 
     try:
@@ -887,39 +1105,160 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
         return True
     except subprocess.CalledProcessError as e:
         if encoder_name != 'libx264':
-            fallback_args = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p']
-            fallback_command = [
-                ffmpeg,
-                '-hide_banner',
-                '-loglevel',
-                'error',
-                '-y',
-                '-i', video_path,
-                '-map', '0:v:0',
-                '-map', '0:a?',
-                '-vf', filter_complex,
-                *fallback_args,
-                '-c:a', 'aac', '-b:a', '128k',
-                '-movflags', '+faststart',
-            ]
+            # Retry with libx264
+            command = [c if c != 'h264_nvenc' else 'libx264' for c in command]
+            if '-preset' in command:
+                idx = command.index('-preset')
+                if idx + 1 < len(command):
+                    command[idx + 1] = 'medium'
+            if '-cq' in command:
+                idx = command.index('-cq')
+                command[idx] = '-crf'
+                if idx + 1 < len(command):
+                    command[idx + 1] = '18'
+            
+            print(f"NVENC failed, retrying with libx264. Error:\n{e.stderr}")
             try:
-                if output_fps:
-                    parsed_fps = int(float(output_fps))
-                    if parsed_fps > 0:
-                        fallback_command += ['-r', str(parsed_fps)]
-            except Exception:
-                pass
-            fallback_command += [output_path]
-            print(f"NVENC subtitle burn failed, retrying with libx264. Error:\n{e.stderr}")
-            try:
-                subprocess.run(fallback_command, capture_output=True, text=True, check=True, **_subprocess_run_kwargs())
+                subprocess.run(command, capture_output=True, text=True, check=True, **_subprocess_run_kwargs())
                 print("ASS subtitles embedded successfully using libx264 fallback.")
                 return True
             except subprocess.CalledProcessError as fallback_error:
-                print(f"Error during ASS embedding fallback:\n{fallback_error.stderr}")
+                print(f"Error during fallback:\n{fallback_error.stderr}")
                 return False
         print(f"Error during ASS embedding:\n{e.stderr}")
         return False
+
+
+def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_layers,
+                                 blur_region, mask_regions, video_w, video_h,
+                                 scale_chain, blur_chain, mask_chain,
+                                 output_fps, video_filter_state):
+    """Build FFmpeg command with logo overlay using filter_complex."""
+    
+    # Start building the command with video input
+    command = [
+        ffmpeg,
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-y',
+        '-i', video_path,
+    ]
+    
+    # Add logo image inputs
+    for i, logo in enumerate(logo_layers):
+        source = logo.get('source', '')
+        if source and os.path.exists(source):
+            command += ['-i', source]
+    
+    # Build filter_complex
+    filter_parts = []
+    
+    # 1. Apply video filters to main video
+    if scale_chain:
+        filter_parts.append(f"[0:v]{scale_chain}[scaled]")
+        main_label = "scaled"
+    else:
+        main_label = "0:v"
+    
+    # Apply video filter chain
+    filter_video_chain = _build_video_filter_chain(video_filter_state)
+    if filter_video_chain:
+        filter_parts.append(f"[{main_label}]{filter_video_chain}[filtered]")
+        main_label = "filtered"
+    
+    # Apply mask chain
+    if mask_chain:
+        # mask_chain is a complete filter graph starting with [0:v] and ending with [mN]
+        # Replace [0:v] with the actual current label
+        adjusted_mask_chain = mask_chain.replace("[0:v]", f"[{main_label}]", 1)
+        filter_parts.append(adjusted_mask_chain)
+        # Extract the final output label from mask_chain
+        import re
+        matches = re.findall(r'\[m\d+\]', adjusted_mask_chain)
+        if matches:
+            main_label = matches[-1].strip("[]")
+        else:
+            main_label = "masked"
+    
+    # Apply blur chain
+    if blur_chain:
+        filter_parts.append(f"[{main_label}]{blur_chain}[blurred]")
+        main_label = "blurred"
+    
+    # 2. Process each logo layer
+    logo_input_idx = 1
+    current_label = main_label
+    
+    for i, logo in enumerate(logo_layers):
+        source = logo.get('source', '')
+        if not source or not os.path.exists(source):
+            continue
+        
+        x = float(logo.get('x', 0.1))
+        y = float(logo.get('y', 0.1))
+        width = float(logo.get('width', 0.2))
+        height = float(logo.get('height', 0.2))
+        opacity = float(logo.get('opacity', 1.0))
+        rotation = float(logo.get('rotation', 0.0))
+        
+        # Calculate pixel dimensions
+        logo_w = int(video_w * width)
+        logo_h = int(video_h * height)
+        logo_x = int(video_w * x)
+        logo_y = int(video_h * y)
+        
+        # Scale logo
+        filter_parts.append(f"[{logo_input_idx}:v]scale={logo_w}:{logo_h}[logo{i}_scaled]")
+        
+        # Apply opacity if needed
+        if opacity < 1.0:
+            filter_parts.append(f"[logo{i}_scaled]format=rgba,colorchannelmixer=aa={opacity}[logo{i}_opacity]")
+            logo_label = f"logo{i}_opacity"
+        else:
+            logo_label = f"logo{i}_scaled"
+        
+        # Apply rotation if needed
+        if abs(rotation) > 0.1:
+            # FFmpeg uses radians, convert from degrees
+            rotation_rad = rotation * 3.14159265 / 180.0
+            filter_parts.append(f"[{logo_label}]rotate={rotation_rad}:c=none:ow={logo_w}:oh={logo_h}[logo{i}_rotated]")
+            logo_label = f"logo{i}_rotated"
+        
+        # Overlay logo on video
+        next_label = f"with_logo{i}"
+        filter_parts.append(f"[{current_label}][{logo_label}]overlay={logo_x}:{logo_y}[{next_label}]")
+        current_label = next_label
+        logo_input_idx += 1
+    
+    # 3. Burn subtitles
+    escaped_ass = _escape_path_for_filter(ass_path)
+    filter_parts.append(f"[{current_label}]ass='{escaped_ass}'[final]")
+    
+    # Join all filter parts
+    filter_complex = ";".join(filter_parts)
+    
+    # Complete the command
+    video_encoder_args = _preferred_h264_encoder_args(ffmpeg)
+    command += [
+        '-filter_complex', filter_complex,
+        '-map', '[final]',
+        '-map', '0:a?',
+        *video_encoder_args,
+        '-c:a', 'aac', '-b:a', '128k',
+        '-movflags', '+faststart',
+    ]
+    
+    try:
+        if output_fps:
+            parsed_fps = int(float(output_fps))
+            if parsed_fps > 0:
+                command += ['-r', str(parsed_fps)]
+    except Exception:
+        pass
+    
+    command += [output_path]
+    return command
 
 
 # ---------------------------------------------------------------------------
@@ -971,6 +1310,8 @@ def embed_subtitles(video_path, srt_path, output_path,
                     custom_position_y=86.0,
                     single_line=False,
                     blur_region=None,
+                    mask_regions=None,
+                    logo_layers=None,
                      target_width=None,
                      target_height=None,
                      output_scale_mode="fit",
@@ -987,6 +1328,7 @@ def embed_subtitles(video_path, srt_path, output_path,
     3. Apply with FFmpeg's  ass=  filter (no force_style hacks).
     4. Remove the temporary ASS after success.
     """
+    print(f"[FFmpeg] embed_subtitles called with mask_regions={mask_regions}, logo_layers={logo_layers}")
     ffmpeg = _ffmpeg_path(ffmpeg_path)
     if not os.path.exists(ffmpeg):
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
@@ -1035,6 +1377,8 @@ def embed_subtitles(video_path, srt_path, output_path,
         output_path,
         ffmpeg_path=ffmpeg,
         blur_region=blur_region,
+        mask_regions=mask_regions,
+        logo_layers=logo_layers,
         target_width=target_width,
         target_height=target_height,
         output_scale_mode=output_scale_mode,

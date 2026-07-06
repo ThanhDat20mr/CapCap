@@ -239,10 +239,12 @@ def _find_audio_track(gui, name: str):
 
 
 def _compute_base_volume(gui, track, meta) -> float:
+    track_name = getattr(track, "name", "") or ""
+    default_vol = 50.0 if track_name.startswith("A1") else 100.0
     try:
-        vol = float(meta.get("_volume", 100.0))
+        vol = float(meta.get("_volume", default_vol))
     except (TypeError, ValueError):
-        vol = 100.0
+        vol = default_vol
     try:
         gain_db = float(meta.get("_gain_db", 0.0))
     except (TypeError, ValueError):

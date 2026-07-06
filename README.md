@@ -32,13 +32,19 @@
 - Translation-to-TTS cache prefetch to reduce voice generation wait time
 - Subtitle + voice export with FFmpeg
 - **TTS speed highlighting** — audio timeline segments show predicted voice-over timing fit via 5 color levels (green/cyan/yellow/orange/red)
-- **Per-track inspectors** — clicking a layer on any track opens a dedicated inspector card (Subtitle, Audio, Blur, Logo, Mask, Video) with controls tailored to the track
+- **Hybrid DubSubtitle Layer (TS1)** — single track replaces old separate subtitle + dub audio tracks. Each segment holds both display text and TTS voice data. Generated audio shows a speaker glyph on the bar.
+- **Audio overlap row stacking** — when TTS audio bleeds past a segment's time window, the bar is pushed down a row in the TS1 track (like blur regions in B1). Overlap is detected via the actual `.wav` duration from `_audio_end`, not the segment window. A dashed border marks overflow-row bars.
+- **Timeline Priority sync mode** (Off / Smart / Timeline Priority / Force) — controls what happens when TTS audio is longer than the segment. Smart trims or stretches within safe range. Force uses atempo speed-up. **Timeline Priority** always cuts to the segment window — audio stops at the segment end, next segment plays immediately, and row stacking is disabled. Off = no adjustment.
+- **Single-segment Regenerate Voice** — probes the generated `.wav` with ffprobe for the exact duration, updates the segment + layer `_audio_end`, and redraws the timeline immediately so audio bleed is reflected in real time.
+- **Per-track inspectors** — clicking a layer on any track opens a dedicated inspector card (Subtitle, Audio, Blur, Logo, Mask, Video) with controls tailored to the track. The subtitle inspector is a flat single panel (no tabs) with action buttons at top, shared original text, segment editor, and voice widgets below.
+- **TS1 track label mute** — clicking the TS1 label toggles dubbed audio mute (same as A1/A2). Hover cursor now uses `MUTE_PREFIXES` so the pointing hand shows on all clickable labels.
 - **Drag-to-position overlay regions** — Blur, Logo, and Mask regions share the same overlay UX: drag the middle to move, drag corner handles to resize, X to delete
 - **Logo / Watermark track (L1)** — add an image and place it on the video; pick colour / opacity / rotation from the inspector. The overlay stays in sync with the layer position.
 - **Mask track (M1)** — paint a solid-colour rectangle on the video to recolour a region (e.g. hide a watermark, redact a face). The colour is only applied while the video is playing to keep the drag smooth and avoid preview lag.
 - **Blur inspector** — per-region blur radius (1-20), opacity, and pixelate (mosaic) toggle
 - **Vietnamese normalizer dictionary manager** (More → Normalizer Dictionary) — CRUD editor for custom acronym/non-Vietnamese word mappings
 - **GGUF translator improvements** — automatic enable when provider is local, absolute model paths, smarter CJK quality validation, increased token limit
+- **Label mode** — toggles the track label bar visibility
 
 ## Quick Start
 
@@ -116,8 +122,8 @@ Videos over 2 hours are blocked from opening. Use the **Split Video** button to 
 ### Track Inspector (Right Panel)
 The inspector always stays expanded and swaps its card to match the track type you click. Each card is wrapped in a scroll view so tall content doesn't clip.
 
-- **Subtitle** (idx 0) — `Rewrite`, `Rewrite Selected Subtitle`, `Import SRT`, `Show original`, prev/next navigation, timing info, original text, tabbed editor (`Subtitle` / `Voice`).
-- **Audio** (idx 1) — per-track volume (0-200%), gain in dB, speed, fade-in / fade-out, mute / solo, A1 vs A2 (Dub) selection. The Dub track also exposes a per-segment voice editor (`Use voice for subtitle`, `Regenerate voice`).
+- **Subtitle / Dub** (flat single panel, no tabs) — `Rewrite`, `Rewrite Selected`, `Import SRT`, `Regenerate Voice` (top action row), shared `Original text` label, segment timing chips, segment editor (180px height).
+- **Audio** (idx 1) — per-track volume (0-200%), gain in dB, speed, fade-in / fade-out, mute / solo, A1 vs A2 (Dub) selection.
 - **Blur** (idx 2) — B1 Blur track on/off toggle + per-region controls: `Blur radius` (1-20), `Opacity` (0-100%), `Pixelate` (mosaic) + `Pixel size` (2-60). Multiple regions stack vertically in the timeline so overlapping blurs stay visible.
 - **Video** (idx 3) — V1 Video track filter. Preset + intensity sliders, plus per-channel adjust sliders (brightness, contrast, saturation, temperature, gamma, hue), Apply / Revert.
 - **Default** (idx 4) — fallback card when no track layer is selected.
@@ -125,20 +131,23 @@ The inspector always stays expanded and swaps its card to match the track type y
 - **Mask (M1)** (idx 6) — `Colour` (background swatch), `Opacity` (0-100%). Drag the mask on the video to move; drag a corner to resize; X to delete. The colour is **only applied while the video is playing** — moving the mask does not trigger any mpv filter update, so dragging stays smooth. The overlay is locked (`set_editable(False)`) while playing so you cannot accidentally move a region during playback.
 
 Behavior notes:
-- By default, TTS reads the same text shown in the subtitle.
-- A separate voice text is only used when you explicitly edit it in the inspector and regenerate voice.
+- By default, TTS reads the same text shown in the subtitle. A separate voice text is only used when you explicitly edit it in the inspector and regenerate voice.
+- The "Show original" checkbox is removed — original text is always shown.
+- Shared timing chips and "Add highlight" button were removed from the inspector; each segment card shows its own timing info.
 - The Logo, Blur, and Mask overlay regions use the same drag/resize/delete UX inherited from the blur overlay.
-- Timeline track labels (left strip) are clickable: A1 / A2 toggle mute, B1 toggles the blur effect, L1 toggles the logo, M1 toggles the mask.
+- Timeline track labels (left strip) are clickable: A1 / A2 / TS1 toggle mute, B1 toggles the blur effect, L1 toggles the logo, M1 toggles the mask.
 
 ### Timeline
-- Multi-lane: V1 Video, A1 Audio, A2 Dub, B1 Blur, L1 Logo, M1 Mask, S1 Subtitle
-- **Track label bar** (left strip) — fixed-width column with the track name + icon (▶ V1, ♪ A1/A2, ▣ B1, ■ M1, T S1, etc.) and mute / effect toggle on click. The label bar scrolls in sync with the timeline's vertical scroll.
+- Multi-lane: V1 Video, A1 Audio, TS1 Subtitle+Dub, B1 Blur, L1 Logo, M1 Mask
+- **Hybrid TS1 track** — single lane replaces the old S1 + A2 two-track layout. Each segment is a `DubSubtitleLayer` holding both display text and TTS voice data. Audio-blending segments stack vertically into child rows (like B1 blur regions).
+- **Track label bar** (left strip) — fixed-width column with the track name + icon (▶ V1, ♪ A1, T TS1, ▣ B1, ■ M1, ⬖ L1, etc.) and mute / effect toggle on click. The label bar scrolls in sync with the timeline's vertical scroll. Toggle visibility via **Label mode** button.
 - Undo/Redo, Split, Delete, Nudge, Ripple controls
 - Zoom and Fit controls
-- **Voice timing sync** combo (Off/Smart/Force Fit)
+- **Voice timing sync** combo (Off / Smart / Timeline Priority / Force) — controls TTS timing adjustment strategy
 - Time display
-- Blur layers are stacked vertically in the B1 row (one full-height row per region) so overlapping regions are all visible. Other tracks (Subtitle, Audio) draw side-by-side segments in a single row.
+- Blur, Logo, and Mask layers are stacked vertically inside their tracks (one full-height row per region) so overlapping regions are all visible.
 - Mask layers span the full timeline duration (like the audio track) so the M1 row matches the video length.
+- **Row stacking** — DubSubtitleLayer bars that overlap in audio time (via `_audio_end`) are pushed down a row so both are visible. Overflow-row bars get a dashed border.
 
 ## Technical Stack
 
@@ -345,19 +354,20 @@ CapCap/
 │   │   ├── resource_download_service.py  # Resource catalog + status checks + Auto Download backend
 │   │   └── ...                       # + GPU scheduling, ASR merge, etc.
 │   ├── utils/                        # Voice preview utilities
-│   ├── layers/                       # Track / clip / layer domain model
-│   │   ├── base.py                   # BaseLayer + LayerType + BlendMode
-│   │   ├── video.py                  # V1 Video layer
-│   │   ├── audio.py                  # A1 / A2 Audio layers
-│   │   ├── subtitle.py               # S1 Subtitle layer
-│   │   ├── image.py                  # L1 Logo / image layer
-│   │   ├── blur.py                   # B1 Blur layer
-│   │   ├── mask.py                   # M1 Mask layer (solid colour region)
-│   │   ├── transform.py              # Transform (x/y/scale/rotation/keyframes)
-│   │   ├── keyframe.py              # Keyframe animation
-│   │   ├── timeline.py               # Timeline + Track + Clip containers
-│   │   ├── text.py / sticker.py      # Text / sticker layers
-│   │   └── sync_bridge.py            # Timeline <-> track layer sync helpers
+   │   ├── layers/                       # Track / clip / layer domain model
+   │   │   ├── base.py                   # BaseLayer + LayerType + BlendMode
+   │   │   ├── video.py                  # V1 Video layer
+   │   │   ├── audio.py                  # A1 Audio layer
+   │   │   ├── subtitle.py               # S1 Subtitle layer (legacy)
+   │   │   ├── dub_subtitle.py           # TS1 hybrid subtitle+dub layer (current)
+   │   │   ├── image.py                  # L1 Logo / image layer
+   │   │   ├── blur.py                   # B1 Blur layer
+   │   │   ├── mask.py                   # M1 Mask layer (solid colour region)
+   │   │   ├── transform.py              # Transform (x/y/scale/rotation/keyframes)
+   │   │   ├── keyframe.py              # Keyframe animation
+   │   │   ├── timeline.py               # Timeline + Track + Clip containers
+   │   │   ├── text.py / sticker.py      # Text / sticker layers
+   │   │   └── sync_bridge.py            # Timeline <-> track layer sync helpers
 │   ├── ocr_processor.py             # RapidOCR subtitle extraction + cleanup
 │   ├── whisper_processor.py         # Whisper ASR with CUDA/CPU fallback
 │   ├── sensevoice_processor.py      # SenseVoice ASR (sherpa-onnx, CPU)

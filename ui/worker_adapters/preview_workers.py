@@ -15,7 +15,7 @@ from services import EngineRuntime
 class PreviewMuxWorker(QThread):
     finished = Signal(str, str)
 
-    def __init__(self, video_path, audio_path, output_path, mode="voice", srt_path="", subtitle_style=None, render_subtitles=True, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, temp_dir=""):
+    def __init__(self, video_path, audio_path, output_path, mode="voice", srt_path="", subtitle_style=None, render_subtitles=True, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, mask_regions=None, logo_layers=None, temp_dir=""):
         super().__init__()
         self.video_path = video_path
         self.audio_path = audio_path
@@ -30,6 +30,8 @@ class PreviewMuxWorker(QThread):
         self.output_fill_focus_x = output_fill_focus_x
         self.output_fill_focus_y = output_fill_focus_y
         self.video_filter_state = video_filter_state or {}
+        self.mask_regions = mask_regions or []
+        self.logo_layers = logo_layers or []
         self.temp_dir = temp_dir
 
     def run(self):
@@ -61,6 +63,8 @@ class PreviewMuxWorker(QThread):
                     self.srt_path,
                     self.output_path,
                     subtitle_style=self.subtitle_style,
+                    mask_regions=self.mask_regions,
+                    logo_layers=self.logo_layers,
                     target_width=self.target_width,
                     target_height=self.target_height,
                     output_scale_mode=self.output_scale_mode,
@@ -90,7 +94,7 @@ class PreviewMuxWorker(QThread):
 class QuickPreviewWorker(QThread):
     finished = Signal(str, str)
 
-    def __init__(self, video_path, output_path, mode, start_seconds, duration_seconds, srt_path="", audio_path="", subtitle_style=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, temp_dir=""):
+    def __init__(self, video_path, output_path, mode, start_seconds, duration_seconds, srt_path="", audio_path="", subtitle_style=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, mask_regions=None, logo_layers=None, temp_dir=""):
         super().__init__()
         self.video_path = video_path
         self.output_path = output_path
@@ -106,6 +110,8 @@ class QuickPreviewWorker(QThread):
         self.output_fill_focus_x = output_fill_focus_x
         self.output_fill_focus_y = output_fill_focus_y
         self.video_filter_state = video_filter_state or {}
+        self.mask_regions = mask_regions or []
+        self.logo_layers = logo_layers or []
         self.temp_dir = temp_dir
 
     def run(self):
@@ -146,6 +152,8 @@ class QuickPreviewWorker(QThread):
                     self.srt_path,
                     self.output_path,
                     subtitle_style=self.subtitle_style,
+                    mask_regions=self.mask_regions,
+                    logo_layers=self.logo_layers,
                     target_width=self.target_width,
                     target_height=self.target_height,
                     output_scale_mode=self.output_scale_mode,

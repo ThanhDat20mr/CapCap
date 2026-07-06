@@ -17,6 +17,94 @@ class PreviewController:
     def __init__(self, gui):
         self.gui = gui
 
+    def _extract_overlay_layers(self):
+        mask_regions = []
+        logo_layers = []
+        try:
+            if hasattr(self.gui, "_current_mask_regions_payload"):
+                raw_masks = self.gui._current_mask_regions_payload()
+                print(f"[Preview] Found {len(raw_masks)} mask region(s) from M1 track")
+                for region in raw_masks:
+                    mask_regions.append({
+                        "x": float(region.get("x", 0.3)),
+                        "y": float(region.get("y", 0.4)),
+                        "width": float(region.get("width", 0.4)),
+                        "height": float(region.get("height", 0.2)),
+                        "mode": str(region.get("mode", "solid")),
+                        "color": str(region.get("color", "#000000")),
+                        "opacity": float(region.get("opacity", 1.0)),
+                        "pixelate_size": int(region.get("pixelate_size", 12)),
+                        "blur_strength": int(region.get("blur_strength", 20)),
+                    })
+        except Exception as e:
+            print(f"Warning: Failed to extract mask regions: {e}")
+
+        try:
+            if hasattr(self.gui, "timeline") and hasattr(self.gui.timeline, "_timeline"):
+                timeline_obj = self.gui.timeline._timeline
+                if timeline_obj:
+                    for tr in timeline_obj.tracks:
+                        track_type = tr.type.value if hasattr(tr.type, "value") else str(tr.type)
+                        print(f"[Preview] Checking track: name={tr.name} type={track_type}")
+                        if track_type == "mask":
+                            for layer in tr.layers:
+                                try:
+                                    mask_regions.append({
+                                        "x": float(getattr(layer, "position_x", 0.3)),
+                                        "y": float(getattr(layer, "position_y", 0.4)),
+                                        "width": float(getattr(layer, "width", 0.4)),
+                                        "height": float(getattr(layer, "height", 0.2)),
+                                        "mode": str(getattr(layer, "mode", "solid")),
+                                        "color": str(getattr(layer, "color", "#000000")),
+                                        "opacity": float(getattr(layer, "opacity", 1.0)),
+                                        "pixelate_size": int(getattr(layer, "pixelate_size", 12)),
+                                        "blur_strength": int(getattr(layer, "blur_strength", 20)),
+                                    })
+                                except (TypeError, ValueError):
+                                    continue
+                        elif track_type == "image":
+                            for layer in tr.layers:
+                                try:
+                                    if not getattr(layer, "visible", True):
+                                        continue
+                                    source = getattr(layer, "source", "")
+                                    if not source:
+                                        continue
+                                    transform = getattr(layer, "transform", None)
+                                    if transform:
+                                        # Transform x,y are in pixels or percentage, normalize to 0-1
+                                        x = float(getattr(transform, "x", 10.0)) / 100.0
+                                        y = float(getattr(transform, "y", 10.0)) / 100.0
+                                        scale_x = float(getattr(transform, "scale_x", 1.0))
+                                        scale_y = float(getattr(transform, "scale_y", 1.0))
+                                        w = 0.2 * scale_x
+                                        h = 0.2 * scale_y
+                                        rotation = float(getattr(transform, "rotation", 0.0))
+                                    else:
+                                        x = 0.1
+                                        y = 0.1
+                                        w = 0.2
+                                        h = 0.2
+                                        rotation = 0.0
+                                    logo_layers.append({
+                                        "source": str(source),
+                                        "x": x,
+                                        "y": y,
+                                        "width": w,
+                                        "height": h,
+                                        "opacity": float(getattr(layer, "opacity", 1.0)),
+                                        "rotation": rotation,
+                                    })
+                                    print(f"[Preview] Added logo layer: source={source}, x={x}, y={y}")
+                                except (TypeError, ValueError) as e:
+                                    print(f"[Preview] Failed to extract logo layer: {e}")
+                                    continue
+        except Exception as e:
+            print(f"Warning: Failed to extract logo layers: {e}")
+
+        print(f"[Preview] Final overlay extraction: {len(mask_regions)} mask(s), {len(logo_layers)} logo(s)")
+        return mask_regions, logo_layers
+
     @staticmethod
     def _format_duration_ms(duration_ms: int) -> str:
         total_seconds = max(0, int(round(float(duration_ms or 0) / 1000.0)))
@@ -278,7 +366,7 @@ class PreviewController:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def _build_styled_preview_signature(self, *, video_path: str, audio_path: str, mode: str, srt_path: str, subtitle_style: dict) -> str:
+    def _build_styled_preview_signature(self, *, video_path: str, audio_path: str, mode: str, srt_path: str, subtitle_style: dict, mask_regions=None, logo_layers=None) -> str:
         payload = {
             "kind": "styled_preview_v2",
             "mode": mode,
@@ -293,6 +381,8 @@ class PreviewController:
             "output_fill_focus": self.gui.get_output_fill_focus(),
             "output_fps": self.gui.get_output_fps_key(),
             "video_filter": self.gui.get_video_filter_state() if hasattr(self.gui, "get_video_filter_state") else {},
+            "mask_regions": mask_regions or [],
+            "logo_layers": logo_layers or [],
         }
         return hashlib.sha1(json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -357,6 +447,10 @@ class PreviewController:
             audio_path=chosen_audio,
         ):
             return
+
+        # Persist timeline data before export so mask/logo layers are available
+        if hasattr(self.gui, "persist_current_timeline_project_data"):
+            self.gui.persist_current_timeline_project_data()
 
         self.gui.export_btn.setEnabled(False)
         self.gui.export_btn.setText("Exporting...")
@@ -426,6 +520,7 @@ class PreviewController:
         duration_seconds = 5.0
         target_width, target_height = self._resolve_output_canvas_dimensions(video_path)
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
+        mask_regions, logo_layers = self._extract_overlay_layers()
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         self.gui.cleanup_file_if_exists(self.gui.last_exact_preview_5s_path)
         preview_output = os.path.join(out_dir, f"{video_name}_preview5s_{int(time.time())}.mp4")
@@ -462,6 +557,8 @@ class PreviewController:
             output_fill_focus_x=fill_focus_x,
             output_fill_focus_y=fill_focus_y,
             video_filter_state=self.gui.get_video_filter_state() if hasattr(self.gui, "get_video_filter_state") else {},
+            mask_regions=mask_regions,
+            logo_layers=logo_layers,
             temp_dir=self.gui.get_project_temp_dir("preview"),
         )
         self.gui.quick_preview_thread.finished.connect(self.gui.on_quick_preview_ready)
@@ -678,10 +775,12 @@ class PreviewController:
             return
 
         has_active_video_filters = bool(hasattr(self.gui, "has_active_video_filters") and self.gui.has_active_video_filters())
-        self.gui._preview_video_has_burned_subtitles = bool(mode == "subtitle" and has_active_video_filters)
+        mask_regions, logo_layers = self._extract_overlay_layers()
+        has_overlays = bool(mask_regions or logo_layers)
+        self.gui._preview_video_has_burned_subtitles = bool(mode == "subtitle" and (has_active_video_filters or has_overlays))
 
-        # Subtitle-only preview can stay live when no canvas/filter processing is needed.
-        if mode == "subtitle" and not has_active_video_filters:
+        # Subtitle-only preview can stay live when no canvas/filter/overlay processing is needed.
+        if mode == "subtitle" and not has_active_video_filters and not has_overlays:
             try:
                 self.gui._preview_video_has_burned_subtitles = False
                 if hasattr(self.gui.video_view, "set_preview_aspect_ratio"):
@@ -713,6 +812,8 @@ class PreviewController:
                 mode=mode,
                 srt_path=preview_srt_path,
                 subtitle_style=subtitle_style,
+                mask_regions=mask_regions,
+                logo_layers=logo_layers,
             )
             cached_preview = str(getattr(self.gui, "last_styled_preview_path", "") or "").strip()
             cached_signature = str(getattr(self.gui, "last_styled_preview_signature", "") or "").strip()
@@ -761,13 +862,15 @@ class PreviewController:
             mode=mode,
             srt_path=preview_srt_path,
             subtitle_style=subtitle_style,
-            render_subtitles=bool(mode == "subtitle" and has_active_video_filters),
+            render_subtitles=bool(mode == "subtitle" and (has_active_video_filters or has_overlays)),
             target_width=target_width,
             target_height=target_height,
             output_scale_mode=self.gui.get_output_scale_mode_key(),
             output_fill_focus_x=fill_focus_x,
             output_fill_focus_y=fill_focus_y,
             video_filter_state=self.gui.get_video_filter_state() if hasattr(self.gui, "get_video_filter_state") else {},
+            mask_regions=mask_regions,
+            logo_layers=logo_layers,
             temp_dir=self.gui.get_project_temp_dir("preview"),
         )
         self.gui.preview_thread.finished.connect(

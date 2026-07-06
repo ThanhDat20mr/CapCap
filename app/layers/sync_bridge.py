@@ -292,3 +292,6 @@ def ensure_v1_a1_tracks(timeline: Timeline, video_path: str, duration: float) ->
         end=duration,
         volume=1.0,
     ))
+    if not isinstance(a1.metadata, dict):
+        a1.metadata = {}
+    a1.metadata.setdefault("_volume", 50.0)

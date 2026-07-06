@@ -91,6 +91,11 @@ from workflows.voice_workflow import predict_speed_ratios
 from audio_mixer import mix_voice_with_background
 
 
+def _default_asr_engine() -> str:
+    cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
+    return "sensevoice" if cpu_mode else "whisper"
+
+
 class _BootstrapMediaBackend:
     backend_name = "bootstrap"
     _source_path = ""
@@ -1585,7 +1590,7 @@ class VideoTranslatorGUI(QMainWindow):
         missing: list[tuple[str, str]] = []
 
         if include_whisper and not is_remote_profile():
-            engine = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower()
+            engine = os.getenv("TRANSCRIPTION_ENGINE", _default_asr_engine()).strip().lower()
             if engine == "sensevoice":
                 if not service.is_resource_installed("sensevoice:model"):
                     missing.append(("sensevoice:model", "SenseVoice model"))
@@ -2844,6 +2849,18 @@ class VideoTranslatorGUI(QMainWindow):
             )
             if voice_signature:
                 state.set_setting("voice_signature", voice_signature)
+        
+        # Save timeline data (includes mask and logo layers)
+        if hasattr(self, "timeline") and self.timeline._timeline:
+            import json
+            timeline_data = self.timeline._timeline.to_dict()
+            # Save timeline to a file in the project directory
+            timeline_path = os.path.join(state.project_root, "timeline", "timeline.json")
+            os.makedirs(os.path.dirname(timeline_path), exist_ok=True)
+            with open(timeline_path, "w", encoding="utf-8") as f:
+                json.dump(timeline_data, f, ensure_ascii=False, indent=2)
+            state.set_artifact("timeline", timeline_path)
+        
         self.project_service.save_project(state)
 
     def load_project_context(self, state):
@@ -3151,7 +3168,7 @@ class VideoTranslatorGUI(QMainWindow):
             self._update_ocr_overlay()
             if (
                 bool(getattr(self, "_filter_preview_ocr_was_editable", False))
-                and os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr"
+                and os.getenv("TRANSCRIPTION_ENGINE", _default_asr_engine()).strip().lower() == "ocr"
             ):
                 overlay.set_editable(True)
                 overlay.sync_to_view()
@@ -3187,7 +3204,7 @@ class VideoTranslatorGUI(QMainWindow):
         overlay = getattr(self, "ocr_region_overlay", None)
         if overlay is None:
             return
-        is_ocr = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr"
+        is_ocr = os.getenv("TRANSCRIPTION_ENGINE", _default_asr_engine()).strip().lower() == "ocr"
         btn = getattr(self, "ocr_region_btn", None)
         if btn:
             btn.setVisible(is_ocr)
@@ -4558,7 +4575,11 @@ class VideoTranslatorGUI(QMainWindow):
             layer.transform = transform
         except Exception:
             pass
-        pass
+        # Save timeline data (includes logo layer changes)
+        try:
+            self.persist_current_timeline_project_data()
+        except Exception:
+            pass
 
     def _show_mask_overlay(self, track, layer):
         """Show the draggable mask overlay for the selected mask layer."""
@@ -4647,6 +4668,11 @@ class VideoTranslatorGUI(QMainWindow):
         try:
             if hasattr(self, "persist_project_mask_state"):
                 self.persist_project_mask_state()
+        except Exception:
+            pass
+        # Save timeline data (includes mask layer changes)
+        try:
+            self.persist_current_timeline_project_data()
         except Exception:
             pass
         # Keep the spinboxes in sync so the inspector shows the new
@@ -5596,10 +5622,11 @@ class VideoTranslatorGUI(QMainWindow):
 
     def _get_audio_track_volume(self, track_name: str) -> float:
         meta = self._get_audio_track_meta(track_name)
+        default_vol = 50.0 if track_name.startswith("A1") else 100.0
         try:
-            return float(meta.get("_volume", 100.0))
+            return float(meta.get("_volume", default_vol))
         except (TypeError, ValueError):
-            return 100.0
+            return default_vol
 
     def _get_audio_track_gain_db(self, track_name: str) -> float:
         meta = self._get_audio_track_meta(track_name)
@@ -5629,10 +5656,11 @@ class VideoTranslatorGUI(QMainWindow):
 
     def _compute_audio_track_volume(self, track_name: str, base: float = 100.0) -> float:
         meta = self._get_audio_track_meta(track_name)
+        default_base = 50.0 if track_name.startswith("A1") else base
         try:
-            v = float(meta.get("_volume", base))
+            v = float(meta.get("_volume", default_base))
         except (TypeError, ValueError):
-            v = base
+            v = default_base
         return max(0.0, min(200.0, v))
 
     def on_track_mute_toggled(self, track_name: str, is_muted: bool):
@@ -6062,6 +6090,12 @@ class VideoTranslatorGUI(QMainWindow):
                 self._show_mask_overlay(mask_track, layer)
             except Exception:
                 pass
+        
+        # Save timeline data (includes mask and logo layers)
+        try:
+            self.persist_current_timeline_project_data()
+        except Exception:
+            pass
 
     def _sync_hidden_transcript_text_from_segments(self):
         if getattr(self, "_syncing_segment_editor", False):
@@ -7127,7 +7161,7 @@ class VideoTranslatorGUI(QMainWindow):
         overlay = getattr(self, "ocr_region_overlay", None)
         if overlay is None:
             return
-        engine = os.getenv("TRANSCRIPTION_ENGINE", "whisper")
+        engine = os.getenv("TRANSCRIPTION_ENGINE", _default_asr_engine())
         if not checked or engine != "ocr":
             overlay.hide()
             overlay.set_editable(False)
@@ -8660,7 +8694,7 @@ class VideoTranslatorGUI(QMainWindow):
         self.refresh_ui_state()
 
     def run_transcription(self):
-        is_ocr = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr"
+        is_ocr = os.getenv("TRANSCRIPTION_ENGINE", _default_asr_engine()).strip().lower() == "ocr"
         if not is_ocr and not self.ensure_required_resources("Transcription", include_whisper=True):
             return
         self.subtitle_controller.run_transcription()
@@ -8833,9 +8867,7 @@ class VideoTranslatorGUI(QMainWindow):
             engine_combo.addItem("Audio (Whisper)", "whisper")
         engine_combo.addItem("Audio (SenseVoice)", "sensevoice")
         engine_combo.addItem("Video (OCR)", "ocr")
-        current_engine = (os.getenv("TRANSCRIPTION_ENGINE") or "whisper").strip().lower()
-        if cpu_mode and current_engine == "whisper":
-            current_engine = "sensevoice"
+        current_engine = (os.getenv("TRANSCRIPTION_ENGINE") or _default_asr_engine()).strip().lower()
         idx = engine_combo.findData(current_engine)
         if idx >= 0:
             engine_combo.setCurrentIndex(idx)
@@ -9755,7 +9787,7 @@ class VideoTranslatorGUI(QMainWindow):
     def run_all_pipeline(self):
         mode = self.get_output_mode_key()
         include_voice = mode in ("voice", "both")
-        is_ocr = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower() == "ocr"
+        is_ocr = os.getenv("TRANSCRIPTION_ENGINE", _default_asr_engine()).strip().lower() == "ocr"
         if not self.ensure_required_resources("Generate", include_whisper=not is_ocr, include_voice=include_voice):
             return
         self.pipeline_controller.run_all_pipeline()

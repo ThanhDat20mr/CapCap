@@ -1,5 +1,4 @@
 import os
-import traceback
 
 from PySide6.QtCore import QUrl, Qt
 from PySide6.QtGui import QDesktopServices
@@ -8,7 +7,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -19,7 +17,6 @@ from PySide6.QtWidgets import (
 
 from runtime_paths import workspace_root as default_workspace_root
 from services import ResourceDownloadService
-from worker_adapters.processing_workers import ResourceDownloadWorker
 
 
 _STATUS_STYLES = {
@@ -40,21 +37,6 @@ def _status_pill_widget(status_key: str, parent: QWidget) -> QLabel:
     )
     pill.setFixedHeight(24)
     return pill
-
-
-def _make_progress_widget(parent: QWidget) -> QProgressBar:
-    bar = QProgressBar(parent)
-    bar.setRange(0, 100)
-    bar.setValue(0)
-    bar.setTextVisible(True)
-    bar.setFormat("%p%")
-    bar.setFixedHeight(20)
-    bar.setStyleSheet(
-        "QProgressBar { background-color: #1b3b2c; color: #3ddc97; border: 1px solid #2f4868;"
-        " border-radius: 8px; text-align: center; font-size: 11px; font-weight: 600; }"
-        " QProgressBar::chunk { background-color: #3ddc97; border-radius: 6px; }"
-    )
-    return bar
 
 
 def _open_url(url: str) -> bool:
@@ -82,11 +64,6 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         workspace_root = default_workspace_root()
 
     service = ResourceDownloadService(workspace_root)
-    state = {"resource_id": "", "running": False}
-    worker = [None]
-    active_resource_id = [""]
-    dialog_ref = [None]
-    progress_widgets: dict[str, tuple[QWidget, QWidget]] = {}
 
     dialog = QDialog(parent)
     dialog.setWindowTitle("Manage Resources")
@@ -107,14 +84,10 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         QPushButton:hover { background-color: #29405d; }
         QPushButton:disabled { color: #8ea3bb; background-color: #182636; border-color: #29405d; }
         QPushButton#primaryBtn {
-            background-color: #2563eb; border-color: #3b82f6;
+            background-color: #1a3a5c; color: #8ad7ff; border: 1px solid #4ecdc4;
+            font-weight: 700;
         }
-        QPushButton#primaryBtn:hover { background-color: #1d4ed8; }
-        QPushButton#autoBtn {
-            background-color: #1e6b3e; border-color: #2d9c5c;
-        }
-        QPushButton#autoBtn:hover { background-color: #247a48; }
-        QPushButton#autoBtn:disabled { color: #8ea3bb; background-color: #182636; border-color: #29405d; }
+        QPushButton#primaryBtn:hover { background-color: #224a6e; }
     """)
 
     layout = QVBoxLayout(dialog)
@@ -127,8 +100,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
 
     hint = QLabel(
         "Each resource shows its target folder and download link. "
-        "Download the file yourself and drop it into the target folder, "
-        "or click 'Auto Download' to fetch it directly from Hugging Face. "
+        "Download the file yourself and drop it into the target folder. "
         "Use 'Refresh' to re-check status.",
         dialog,
     )
@@ -156,47 +128,6 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         row["status_pill"].deleteLater()
         row["status_pill"] = new_pill
         row["status_pill"].show()
-        if row.get("progress_wrap") is not None:
-            row["progress_wrap"].hide()
-
-    def _show_progress(row, indeterminate: bool = False):
-        if row.get("progress_bar") is None:
-            return
-        bar = row["progress_bar"]
-        wrap = row["progress_wrap"]
-        row["status_pill"].hide()
-        if indeterminate:
-            bar.setRange(0, 0)
-        else:
-            bar.setRange(0, 100)
-        wrap.show()
-
-    def _set_progress_value(row, percent: int, message: str = ""):
-        if row.get("progress_bar") is None:
-            return
-        bar = row["progress_bar"]
-        if bar.maximum() == 0:
-            bar.setRange(0, 100)
-        bar.setValue(max(0, min(100, percent)))
-        if message:
-            bar.setFormat(f"{percent}%  {message[:40]}")
-        else:
-            bar.setFormat(f"{percent}%")
-
-    def _update_buttons_state():
-        for resource_id, row in dialog._resource_rows.items():
-            is_active = state["running"] and resource_id == active_resource_id[0]
-            auto_btn = row.get("auto_btn")
-            if auto_btn is not None:
-                if is_active:
-                    auto_btn.setText("Downloading...")
-                    auto_btn.setEnabled(False)
-                elif row.get("auto_download_supported", False):
-                    auto_btn.setText("Auto Download")
-                    auto_btn.setEnabled(True)
-                else:
-                    auto_btn.setText("Manual only")
-                    auto_btn.setEnabled(False)
 
     def _add_card(item, target_layout):
         card = QFrame(dialog)
@@ -213,17 +144,6 @@ def open_resource_manager(workspace_root: str = None, parent=None,
 
         status_pill = _status_pill_widget(item.get("status", "missing"), dialog)
         header_row.addWidget(status_pill, 0, Qt.AlignVCenter | Qt.AlignRight)
-
-        progress_bar = _make_progress_widget(dialog)
-        progress_bar.setFixedWidth(180)
-        progress_wrap = QWidget(dialog)
-        progress_wrap.setFixedWidth(180)
-        pw_layout = QHBoxLayout(progress_wrap)
-        pw_layout.setContentsMargins(0, 2, 0, 0)
-        pw_layout.setSpacing(0)
-        pw_layout.addWidget(progress_bar)
-        progress_wrap.hide()
-        header_row.addWidget(progress_wrap, 0, Qt.AlignVCenter | Qt.AlignRight)
 
         outer.addLayout(header_row)
 
@@ -277,17 +197,6 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         )
         button_row.addWidget(download_btn)
 
-        auto_download_supported = bool(item.get("auto_download_supported", False))
-        auto_btn = QPushButton("Auto Download", dialog)
-        auto_btn.setObjectName("autoBtn")
-        auto_btn.setEnabled(auto_download_supported)
-        if not auto_download_supported:
-            auto_btn.setText("Manual only")
-        auto_btn.clicked.connect(
-            lambda _checked=False, rid=item["id"]: _start_download(rid)
-        )
-        button_row.addWidget(auto_btn)
-
         open_folder_btn = QPushButton("Open Storage Folder", dialog)
         open_folder_btn.setEnabled(bool(target_dir))
         open_folder_btn.clicked.connect(
@@ -302,11 +211,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             "item": item,
             "name_label": name_label,
             "status_pill": status_pill,
-            "progress_bar": progress_bar,
-            "progress_wrap": progress_wrap,
             "header_row": header_row,
-            "auto_btn": auto_btn,
-            "auto_download_supported": auto_download_supported,
         }
 
     def _make_section(title_text, expanded):
@@ -348,11 +253,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             item = resources.get(resource_id, row.get("item", {}))
             row["item"] = item
             status = str(item.get("status", "missing")).strip().lower()
-            auto_supported = bool(item.get("auto_download_supported", False))
-            row["auto_download_supported"] = auto_supported
-            if not state["running"] or resource_id != active_resource_id[0]:
-                _show_status_pill(row, status)
-            _update_buttons_state()
+            _show_status_pill(row, status)
 
     def _populate():
         for i in reversed(range(content_layout.count())):
@@ -361,7 +262,6 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             if widget is not None:
                 widget.deleteLater()
         dialog._resource_rows = {}
-        progress_widgets.clear()
 
         resources = service.list_resources()
         cpu_items = [r for r in resources if r.get("kind") == "sensevoice"]
@@ -391,79 +291,6 @@ def open_resource_manager(workspace_root: str = None, parent=None,
 
         content_layout.addStretch()
 
-    def _start_download(resource_id: str):
-        rid = str(resource_id or "").strip()
-        if not rid:
-            return
-        if state["running"]:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(dialog, "Download in Progress",
-                                    "Another resource is already downloading. Please wait for it to finish.")
-            return
-        if not service.supports_auto_download(rid):
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(
-                dialog, "Manual Download",
-                "This resource can only be downloaded manually. Use 'Open Download Page' instead."
-            )
-            return
-        row = dialog._resource_rows.get(rid)
-        if row is None:
-            return
-        dialog_ref[0] = dialog
-        active_resource_id[0] = rid
-        state["resource_id"] = rid
-        state["running"] = True
-        _show_progress(row, indeterminate=True)
-        _update_buttons_state()
-        w = ResourceDownloadWorker(workspace_root, rid)
-        w.progress.connect(_on_progress)
-        w.finished.connect(_on_finished)
-        worker[0] = w
-        w.start()
-
-    def _on_progress(percent: int, message: str):
-        rid = active_resource_id[0]
-        row = dialog._resource_rows.get(rid)
-        if row is None:
-            return
-        try:
-            value = int(percent)
-        except Exception:
-            value = -1
-        if value < 0:
-            _show_progress(row, indeterminate=True)
-        else:
-            _show_progress(row, indeterminate=False)
-            _set_progress_value(row, value, message)
-
-    def _on_finished(resource_id: str, error: str):
-        worker[0] = None
-        state["running"] = False
-        state["resource_id"] = ""
-        active_resource_id[0] = ""
-        row = dialog._resource_rows.get(resource_id)
-        if row is not None:
-            row["progress_bar"].setRange(0, 100)
-            row["progress_bar"].setValue(100 if not error else 0)
-        if not error:
-            _refresh()
-            if on_finished:
-                try:
-                    on_finished()
-                except Exception:
-                    pass
-        else:
-            if row is not None:
-                _show_status_pill(row, "missing")
-            _update_buttons_state()
-            from PySide6.QtWidgets import QMessageBox
-            details = traceback.format_exc() if False else ""
-            QMessageBox.warning(
-                dialog, "Download Failed",
-                f"Could not download resource '{resource_id}'.\n\n{error}"
-            )
-
     _populate()
 
     footer_row = QHBoxLayout()
@@ -487,16 +314,6 @@ def open_resource_manager(workspace_root: str = None, parent=None,
     layout.addLayout(footer_row)
 
     def _on_dialog_closed():
-        w = worker[0]
-        if w is not None and w.isRunning():
-            print("[ResourceMgr] Dialog closed, terminating active download...")
-            w.quit()
-            w.wait(3000)
-            if w.isRunning():
-                w.terminate()
-                w.wait(2000)
-            state.update({"running": False, "resource_id": ""})
-        worker[0] = None
         if on_finished:
             try:
                 on_finished()
