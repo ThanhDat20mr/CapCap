@@ -1084,7 +1084,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             '-map', '0:a?',
             '-filter_complex', filter_complex,
             *video_encoder_args,
-            '-c:a', 'aac', '-b:a', '128k',
+            '-c:a', 'aac', '-b:a', '192k',
             '-movflags', '+faststart',
         ]
         try:
@@ -1245,7 +1245,7 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
         '-map', '[final]',
         '-map', '0:a?',
         *video_encoder_args,
-        '-c:a', 'aac', '-b:a', '128k',
+        '-c:a', 'aac', '-b:a', '192k',
         '-movflags', '+faststart',
     ]
     

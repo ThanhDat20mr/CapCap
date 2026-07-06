@@ -323,6 +323,60 @@ class PreviewController:
         box.exec()
         return box.clickedButton() is start_btn
 
+    def _check_audio_freshness(self, audio_path: str) -> bool:
+        """Check if the audio file matches current voice settings.
+        
+        Returns True if audio is fresh or user chooses to proceed anyway.
+        Returns False if user cancels to regenerate audio first.
+        """
+        if not hasattr(self.gui, "build_current_voice_signature"):
+            return True
+        
+        # Get current voice signature
+        segments = self.gui.get_active_segments()
+        bg_path = self.gui._resolve_preview_background_audio_path() if hasattr(self.gui, "_resolve_preview_background_audio_path") else ""
+        current_signature = self.gui.build_current_voice_signature(segments=segments, background_path=bg_path)
+        
+        if not current_signature:
+            return True
+        
+        # Get cached signature from project state
+        state = getattr(self.gui, "current_project_state", None)
+        if not state:
+            return True
+        
+        cached_signature = str(state.settings.get("voice_signature", "") or "").strip()
+        
+        if not cached_signature:
+            return True
+        
+        # Signatures match - audio is fresh
+        if cached_signature == current_signature:
+            return True
+        
+        # Signatures don't match - audio is stale
+        from PySide6.QtWidgets import QMessageBox
+        result = QMessageBox.question(
+            self.gui,
+            "Audio Settings Changed",
+            "Voice or audio settings have changed since the last generation.\n\n"
+            "The exported audio may not match your current settings.\n\n"
+            "Do you want to regenerate the audio first?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        
+        if result == QMessageBox.Yes:
+            # User wants to regenerate - trigger voiceover workflow
+            self.gui.log("[Export] Audio is stale, triggering voiceover regeneration...")
+            if hasattr(self.gui, "generate_voiceover"):
+                self.gui.generate_voiceover()
+            return False
+        
+        # User chose to proceed anyway
+        self.gui.log("[Export] User chose to proceed with stale audio.")
+        return True
+
     def _prepare_current_export_srt(self) -> str:
         segments = list(self.gui.get_active_segments() or [])
         if not segments:
@@ -397,6 +451,11 @@ class PreviewController:
         translated_srt_path = self.gui.last_translated_srt_path
         translated_ass_path = self.gui.live_preview_ass_path
         chosen_audio = self.gui.resolve_selected_audio_path()
+
+        # Check if audio needs regeneration due to changed settings
+        if mode in ("voice", "both") and chosen_audio:
+            if not self._check_audio_freshness(chosen_audio):
+                return
 
         if mode in ("subtitle", "both"):
             translated_srt_path = self._prepare_current_export_srt()
