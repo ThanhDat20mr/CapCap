@@ -520,7 +520,7 @@ class VoiceOverWorker(QThread):
     finished = Signal(str, str, object, str)
     progress = Signal(str)  # New signal for progress messages
 
-    def __init__(self, workspace_root, segments, output_dir, background_path, audio_handling_mode, voice_name, voice_speed, timing_sync_mode, voice_gain_db, bg_gain_db, ducking_amount_db, project_state_path="", project_temp_dir="", ai_rewrite_dubbing=False, dubbing_style_instruction="", source_language="auto"):
+    def __init__(self, workspace_root, segments, output_dir, background_path, audio_handling_mode, voice_name, voice_speed, timing_sync_mode, original_volume, dub_volume, project_state_path="", project_temp_dir="", ai_rewrite_dubbing=False, dubbing_style_instruction="", source_language="auto"):
         super().__init__()
         self.workspace_root = workspace_root
         self.segments = segments
@@ -530,9 +530,8 @@ class VoiceOverWorker(QThread):
         self.voice_name = voice_name
         self.voice_speed = voice_speed
         self.timing_sync_mode = timing_sync_mode
-        self.voice_gain_db = voice_gain_db
-        self.bg_gain_db = bg_gain_db
-        self.ducking_amount_db = ducking_amount_db
+        self.original_volume = original_volume
+        self.dub_volume = dub_volume
         self.project_state_path = project_state_path
         self.project_temp_dir = project_temp_dir
         self.ai_rewrite_dubbing = ai_rewrite_dubbing
@@ -558,9 +557,8 @@ class VoiceOverWorker(QThread):
                         "voice_name": self.voice_name,
                         "voice_speed": self.voice_speed,
                         "timing_sync_mode": self.timing_sync_mode,
-                        "voice_gain_db": self.voice_gain_db,
-                        "bg_gain_db": self.bg_gain_db,
-                        "ducking_amount_db": self.ducking_amount_db,
+                        "original_volume": self.original_volume,
+                        "dub_volume": self.dub_volume,
                         "project_state_path": self.project_state_path,
                         "project_temp_dir": self.project_temp_dir,
                         "ai_rewrite_dubbing": self.ai_rewrite_dubbing,
@@ -587,9 +585,8 @@ class VoiceOverWorker(QThread):
                     voice_name=self.voice_name,
                     voice_speed=float(self.voice_speed),
                     timing_sync_mode=self.timing_sync_mode,
-                    voice_gain_db=float(self.voice_gain_db),
-                    bg_gain_db=float(self.bg_gain_db),
-                    ducking_amount_db=float(self.ducking_amount_db),
+                    original_volume=int(self.original_volume),
+                    dub_volume=int(self.dub_volume),
                     project_state_path=self.project_state_path,
                     project_temp_dir=self.project_temp_dir,
                     ai_rewrite_dubbing=self.ai_rewrite_dubbing,

@@ -54,6 +54,8 @@ def toggle_play(gui):
 
         if gui.media_player.is_playing():
             gui.media_player.pause()
+            if hasattr(gui, "refresh_play_button_icon"):
+                gui.refresh_play_button_icon()
             if hasattr(gui, "media_player"):
                 gui.media_player.clear_blur_region()
             if hasattr(gui, "_sync_blur_controls"):
@@ -115,6 +117,8 @@ def toggle_play(gui):
             # The track inspector is always expanded - no auto-collapse.
             gui.media_player.play()
             gui.timeline.set_playing(True)
+            if hasattr(gui, "refresh_play_button_icon"):
+                gui.refresh_play_button_icon()
             # Apply the M1 mask filter on play so the colour shows
             # while the video is playing. Use force=True to bypass
             # the is_playing() check (the play() call above already
@@ -137,6 +141,8 @@ def stop_video(gui):
     if hasattr(gui, "audio_preview_player"):
         gui.audio_preview_player.stop()
     gui.media_player.stop()
+    if hasattr(gui, "refresh_play_button_icon"):
+        gui.refresh_play_button_icon()
     if hasattr(gui, "media_player"):
         gui.media_player.clear_blur_region()
     if hasattr(gui, "_sync_blur_controls"):
@@ -201,7 +207,7 @@ def _apply_audio_fade(gui, position_ms: int):
     if duration_ms <= 0:
         return
     pos_s = position_ms / 1000.0
-    for track_name in ("A1 Audio", "A2 Dub"):
+    for track_name in ("A1 Audio", "TS1"):
         track, _ = _find_audio_track(gui, track_name)
         if track is None:
             continue
@@ -224,7 +230,7 @@ def _apply_audio_fade(gui, position_ms: int):
         if track_name == "A1 Audio":
             if hasattr(gui.media_player, "set_original_volume"):
                 gui.media_player.set_original_volume(effective)
-        elif track_name == "A2 Dub":
+        elif track_name == "TS1":
             if hasattr(gui.media_player, "set_dubbed_volume"):
                 gui.media_player.set_dubbed_volume(effective)
 

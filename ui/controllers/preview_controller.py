@@ -326,56 +326,65 @@ class PreviewController:
     def _check_audio_freshness(self, audio_path: str) -> bool:
         """Check if the audio file matches current voice settings.
         
-        Returns True if audio is fresh or user chooses to proceed anyway.
-        Returns False if user cancels to regenerate audio first.
+        Always returns True - no popup, just proceed with export.
         """
-        if not hasattr(self.gui, "build_current_voice_signature"):
-            return True
-        
-        # Get current voice signature
-        segments = self.gui.get_active_segments()
-        bg_path = self.gui._resolve_preview_background_audio_path() if hasattr(self.gui, "_resolve_preview_background_audio_path") else ""
-        current_signature = self.gui.build_current_voice_signature(segments=segments, background_path=bg_path)
-        
-        if not current_signature:
-            return True
-        
-        # Get cached signature from project state
-        state = getattr(self.gui, "current_project_state", None)
-        if not state:
-            return True
-        
-        cached_signature = str(state.settings.get("voice_signature", "") or "").strip()
-        
-        if not cached_signature:
-            return True
-        
-        # Signatures match - audio is fresh
-        if cached_signature == current_signature:
-            return True
-        
-        # Signatures don't match - audio is stale
-        from PySide6.QtWidgets import QMessageBox
-        result = QMessageBox.question(
-            self.gui,
-            "Audio Settings Changed",
-            "Voice or audio settings have changed since the last generation.\n\n"
-            "The exported audio may not match your current settings.\n\n"
-            "Do you want to regenerate the audio first?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
-        
-        if result == QMessageBox.Yes:
-            # User wants to regenerate - trigger voiceover workflow
-            self.gui.log("[Export] Audio is stale, triggering voiceover regeneration...")
-            if hasattr(self.gui, "generate_voiceover"):
-                self.gui.generate_voiceover()
-            return False
-        
-        # User chose to proceed anyway
-        self.gui.log("[Export] User chose to proceed with stale audio.")
         return True
+    
+    def _regenerate_mixed_audio_with_current_volumes(self) -> str:
+        """Regenerate the mixed audio file using current volume settings from Audio tab.
+        
+        Returns the path to the newly generated mixed audio file, or empty string if failed.
+        """
+        if not hasattr(self.gui, 'last_voice_vi_path') or not self.gui.last_voice_vi_path:
+            print("[Export] No voice file path available")
+            return ""
+        
+        voice_path = self.gui.last_voice_vi_path
+        if not os.path.exists(voice_path):
+            print(f"[Export] Voice file not found at: {voice_path}")
+            return ""
+        
+        # Get current volume settings from Audio tab
+        original_volume = int(self.gui.audio_a1_volume_slider.value()) if hasattr(self.gui, 'audio_a1_volume_slider') else 50
+        dub_volume = int(self.gui.audio_a2_volume_slider.value()) if hasattr(self.gui, 'audio_a2_volume_slider') else 100
+        
+        # Get background audio path
+        bg_path = self.gui._resolve_preview_background_audio_path() if hasattr(self.gui, '_resolve_preview_background_audio_path') else ""
+        
+        if not bg_path or not os.path.exists(bg_path):
+            # No background, just use voice with dub volume
+            print(f"[Export] No background audio, using voice only: {voice_path}")
+            return voice_path
+        
+        # Generate new mixed audio with current volumes
+        try:
+            from audio_mixer import mix_original_with_dub
+            
+            # Create output path in temp directory
+            temp_dir = os.path.join(self.gui.workspace_root, "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            output_path = os.path.join(temp_dir, "export_mixed_temp.wav")
+            
+            # Convert percentages to dB
+            original_gain_db = self.gui._percent_to_db(original_volume) if hasattr(self.gui, '_percent_to_db') else 0.0
+            dub_gain_db = self.gui._percent_to_db(dub_volume) if hasattr(self.gui, '_percent_to_db') else 0.0
+            
+            # Mix the audio
+            mix_original_with_dub(
+                original_wav_path=bg_path,
+                dub_wav_path=voice_path,
+                output_wav_path=output_path,
+                original_gain_db=original_gain_db,
+                dub_gain_db=dub_gain_db,
+            )
+            
+            print(f"[Export] Mixed audio created: {output_path}")
+            return output_path
+        except Exception as e:
+            print(f"[Export] Failed to regenerate mixed audio: {e}")
+            import traceback
+            traceback.print_exc()
+            return ""
 
     def _prepare_current_export_srt(self) -> str:
         segments = list(self.gui.get_active_segments() or [])
@@ -450,7 +459,16 @@ class PreviewController:
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         translated_srt_path = self.gui.last_translated_srt_path
         translated_ass_path = self.gui.live_preview_ass_path
-        chosen_audio = self.gui.resolve_selected_audio_path()
+        
+        # For voice/both modes, regenerate mixed audio with current volume settings
+        chosen_audio = ""
+        if mode in ("voice", "both"):
+            chosen_audio = self._regenerate_mixed_audio_with_current_volumes()
+            if not chosen_audio:
+                # Fallback to cached audio if regeneration failed
+                chosen_audio = self.gui.resolve_selected_audio_path()
+        else:
+            chosen_audio = self.gui.resolve_selected_audio_path()
 
         # Check if audio needs regeneration due to changed settings
         if mode in ("voice", "both") and chosen_audio:
@@ -561,7 +579,13 @@ class PreviewController:
         os.makedirs(out_dir, exist_ok=True)
 
         translated_srt_path = self.gui.last_translated_srt_path
-        chosen_audio = self.gui.resolve_selected_audio_path()
+        chosen_audio = ""
+        if mode in ("voice", "both"):
+            chosen_audio = self._regenerate_mixed_audio_with_current_volumes()
+            if not chosen_audio:
+                chosen_audio = self.gui.resolve_selected_audio_path()
+        else:
+            chosen_audio = self.gui.resolve_selected_audio_path()
 
         if mode in ("subtitle", "both") and (not translated_srt_path or not os.path.exists(translated_srt_path)):
             QMessageBox.warning(self.gui, "Error", "Vietnamese subtitle file not found. Please run translation first.")
@@ -820,8 +844,14 @@ class PreviewController:
         if hasattr(self.gui, "ensure_media_backend_ready"):
             self.gui.ensure_media_backend_ready()
         video_path = self.gui.video_path_edit.text().strip()
-        audio_path = self.gui.resolve_selected_audio_path()
         mode = self.gui.get_output_mode_key()
+        audio_path = ""
+        if mode in ("voice", "both"):
+            audio_path = self._regenerate_mixed_audio_with_current_volumes()
+            if not audio_path:
+                audio_path = self.gui.resolve_selected_audio_path()
+        else:
+            audio_path = self.gui.resolve_selected_audio_path()
         if not video_path or not os.path.exists(video_path):
             QMessageBox.warning(self.gui, "Error", "Video file not found. Please select a video first.")
             return

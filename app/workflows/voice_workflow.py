@@ -114,6 +114,13 @@ class VoiceWorkflow:
             print(f"[Voice Workflow] Auto-gain compensation failed: {exc}")
             return 0.0
 
+    def _percent_to_db(self, percent: int) -> float:
+        """Convert volume percentage (0-200) to dB gain."""
+        if percent <= 0:
+            return -60.0
+        import math
+        return 20.0 * math.log10(percent / 100.0)
+
     def _mark_started(self, state, *, with_background: bool):
         if not state:
             return
@@ -1613,9 +1620,8 @@ class VoiceWorkflow:
         voice_name: str = "ngochuyen",
         voice_speed: float = 1.0,
         timing_sync_mode: str = "off",
-        voice_gain_db: float = 0.0,
-        bg_gain_db: float = 0.0,
-        ducking_amount_db: float = -6.0,
+        original_volume: int = 50,
+        dub_volume: int = 100,
         project_state_path: str = "",
         project_temp_dir: str = "",
         ai_rewrite_dubbing: bool = False,
@@ -1708,51 +1714,20 @@ class VoiceWorkflow:
             f"requested={safe_voice_speed:.2f}, native={provider_speed:.2f}, residual={residual_speed:.2f}"
         )
 
-        voice_track = os.path.join(output_dir, "voice_vi.wav")
+        voice_track = os.path.join(tmp_dir, "voice_vi.wav")
         build_started = time.perf_counter()
         self.engine_runtime.build_voice_track(
             segments=segments,
             tts_wav_paths=wavs,
             output_wav_path=voice_track,
-            gain_db=float(voice_gain_db),
+            gain_db=0.0,
         )
         build_elapsed = time.perf_counter() - build_started
 
+        # Skip mixed audio creation - will be generated at export time with current volumes
         mixed = ""
-        if background_path and os.path.exists(background_path):
-            mixed = os.path.normpath(os.path.join(output_dir, "mixed_vi.wav"))
-            effective_bg_gain = float(bg_gain_db)
-            # Auto-gain compensation for Demucs-separated background
-            if audio_mode_key == "clean" and state:
-                original_audio = state.artifacts.get("extracted_audio", "")
-                if original_audio and os.path.exists(original_audio):
-                    auto_compensation = self._compute_background_gain_compensation(original_audio, background_path)
-                    if auto_compensation != 0.0:
-                        effective_bg_gain += auto_compensation
-                        print(
-                            f"[Voice Workflow] Auto-gain applied: +{auto_compensation:+.2f}dB "
-                            f"(manual={bg_gain_db:+.2f}dB, total={effective_bg_gain:+.2f}dB)"
-                        )
-            if audio_mode_key == "fast":
-                print(f"[Voice Workflow] Fast Mode mix: ducking original/extracted background source {background_path}")
-            else:
-                print(f"[Voice Workflow] Clean Voice mix: overlaying TTS with separated background stem {background_path}")
-            mix_started = time.perf_counter()
-            self.engine_runtime.mix_voice_with_background(
-                background_wav_path=background_path,
-                voice_wav_path=voice_track,
-                output_wav_path=mixed,
-                background_gain_db=effective_bg_gain,
-                voice_gain_db=0.0,
-                ducking_mode="timeline" if audio_mode_key == "fast" else "off",
-                ducking_segments=segments if audio_mode_key == "fast" else None,
-                ducking_amount_db=float(ducking_amount_db),
-            )
-            mix_elapsed = time.perf_counter() - mix_started
-            print(f"[Voice Workflow] Mixed output created: {mixed}")
-        else:
-            mix_elapsed = 0.0
-            print("[Voice Workflow] No background source found. Generating voice track only.")
+        mix_elapsed = 0.0
+        print(f"[Voice Workflow] Voice track created at {voice_track}. Mixed audio will be generated at export time.")
 
         self._mark_completed(
             state,

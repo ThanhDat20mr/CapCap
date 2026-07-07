@@ -200,9 +200,8 @@ class ProjectService:
         voice_speed: float = 1.0,
         timing_sync_mode: str = "off",
         background_path: str = "",
-        voice_gain_db: float = 0.0,
-        bg_gain_db: float = 0.0,
-        ducking_amount_db: float = -6.0,
+        original_volume: int = 50,
+        dub_volume: int = 100,
     ) -> str:
         safe_voice_speed = max(0.5, min(1.30, float(voice_speed or 1.0)))
         def _segment_voice_text(seg) -> str:
@@ -219,9 +218,8 @@ class ProjectService:
             "voice_speed": round(safe_voice_speed, 3),
             "timing_sync_mode": str(timing_sync_mode or "off").strip().lower(),
             "background": self._file_signature(background_path),
-            "voice_gain_db": round(float(voice_gain_db or 0.0), 3),
-            "bg_gain_db": round(float(bg_gain_db or 0.0), 3),
-            "ducking_amount_db": round(float(ducking_amount_db or 0.0), 3),
+            "original_volume": int(original_volume or 50),
+            "dub_volume": int(dub_volume or 100),
             "segments": [
                 {
                     "start": round(float((seg or {}).get("start", 0.0) or 0.0), 3),

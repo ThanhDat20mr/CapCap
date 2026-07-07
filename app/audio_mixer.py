@@ -435,7 +435,7 @@ def mix_voice_with_background(
     voice_gain_db: float = 0.0,
     ducking_mode: str = "off",
     ducking_segments: list | None = None,
-    ducking_amount_db: float = -6.0,
+    ducking_amount_db: float = 0.0,
     ducking_threshold: float = 0.015,
     ducking_ratio: float = 10.0,
     ducking_attack_ms: float = 15.0,
@@ -542,6 +542,42 @@ def mix_voice_with_background(
         vc = vc + AudioSegment.silent(duration=(len(bg) - len(vc)), frame_rate=16000)
 
     mixed = bg.overlay(vc)
+    os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
+    mixed.export(output_wav_path, format="wav")
+    return output_wav_path
+
+
+def mix_original_with_dub(
+    *,
+    original_wav_path: str,
+    dub_wav_path: str,
+    output_wav_path: str,
+    original_gain_db: float = 0.0,
+    dub_gain_db: float = 0.0,
+) -> str:
+    """Mix original audio (A1) with dub audio (A2) at specified gain levels."""
+    if not os.path.exists(original_wav_path):
+        raise FileNotFoundError(f"Original file not found: {original_wav_path}")
+    if not os.path.exists(dub_wav_path):
+        raise FileNotFoundError(f"Dub file not found: {dub_wav_path}")
+
+    _require_pydub()
+    from pydub import AudioSegment
+
+    original = AudioSegment.from_file(original_wav_path).set_frame_rate(16000).set_channels(1)
+    dub = AudioSegment.from_file(dub_wav_path).set_frame_rate(16000).set_channels(1)
+
+    if original_gain_db:
+        original = original + original_gain_db
+    if dub_gain_db:
+        dub = dub + dub_gain_db
+
+    if len(dub) > len(original):
+        original = original + AudioSegment.silent(duration=(len(dub) - len(original)), frame_rate=16000)
+    elif len(original) > len(dub):
+        dub = dub + AudioSegment.silent(duration=(len(original) - len(dub)), frame_rate=16000)
+
+    mixed = original.overlay(dub)
     os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
     mixed.export(output_wav_path, format="wav")
     return output_wav_path

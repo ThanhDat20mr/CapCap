@@ -76,13 +76,8 @@ def save_user_settings(gui):
     s.setValue("audio_handling_mode", gui.get_audio_handling_mode())
     s.setValue("voice_gender", gui.voice_gender_combo.currentText())
     s.setValue("voice_timing_sync_mode", gui.voice_timing_sync_combo.currentText())
-    s.setValue("voice_gain", gui.voice_gain_spin.value())
-    s.setValue("bg_gain", gui.bg_gain_spin.value())
-    s.setValue("ducking_amount", gui.ducking_amount_spin.value())
     if hasattr(gui, "ai_dubbing_rewrite_cb"):
         s.setValue("ai_dubbing_rewrite", gui.ai_dubbing_rewrite_cb.isChecked())
-    if hasattr(gui, "audio_mix_preset_combo"):
-        s.setValue("audio_mix_preset", gui.audio_mix_preset_combo.currentData())
     if hasattr(gui, "toggle_advanced_btn"):
         s.setValue("advanced_section_open", gui.toggle_advanced_btn.isChecked())
 
@@ -217,16 +212,9 @@ def load_user_settings(gui):
     gui.voice_timing_sync_combo.setCurrentText(s.value("voice_timing_sync_mode", gui.voice_timing_sync_combo.currentText()))
     if hasattr(gui, "timeline"):
         gui.timeline.set_voice_sync_mode(gui.voice_timing_sync_combo.currentText())
-    gui.voice_gain_spin.setValue(float(s.value("voice_gain", gui.voice_gain_spin.value())))
-    gui.bg_gain_spin.setValue(float(s.value("bg_gain", gui.bg_gain_spin.value())))
-    gui.ducking_amount_spin.setValue(float(s.value("ducking_amount", gui.ducking_amount_spin.value())))
+    
     if hasattr(gui, "ai_dubbing_rewrite_cb"):
         gui.ai_dubbing_rewrite_cb.setChecked(str(s.value("ai_dubbing_rewrite", "true")).lower() == "true")
-    if hasattr(gui, "audio_mix_preset_combo"):
-        preset_value = str(s.value("audio_mix_preset", gui.audio_mix_preset_combo.currentData() or "custom")).strip().lower()
-        preset_index = gui.audio_mix_preset_combo.findData(preset_value)
-        if preset_index >= 0:
-            gui.audio_mix_preset_combo.setCurrentIndex(preset_index)
     use_existing = str(s.value("use_existing_audio", "false")).lower() == "true"
     gui.use_existing_audio_radio.setChecked(use_existing)
     gui.use_generated_audio_radio.setChecked(not use_existing)

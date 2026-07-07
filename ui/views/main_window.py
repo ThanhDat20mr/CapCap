@@ -198,17 +198,17 @@ def _connect_ui_signals(gui):
     if hasattr(gui, "output_quality_combo"):
         gui.output_quality_combo.currentIndexChanged.connect(gui.refresh_ui_state)
     gui.audio_handling_combo.currentTextChanged.connect(gui.refresh_ui_state)
-    if hasattr(gui, "audio_inspector_volume_slider"):
-        gui.audio_inspector_volume_slider.valueChanged.connect(
-            gui.on_audio_inspector_volume_changed
+    if hasattr(gui, "audio_mix_preset_combo"):
+        gui.audio_mix_preset_combo.currentIndexChanged.connect(
+            gui.on_audio_mix_preset_changed
         )
-    if hasattr(gui, "audio_inspector_volume_up_btn"):
-        gui.audio_inspector_volume_up_btn.clicked.connect(
-            gui.on_audio_inspector_volume_up
+    if hasattr(gui, "audio_a1_volume_slider"):
+        gui.audio_a1_volume_slider.valueChanged.connect(
+            gui.on_audio_a1_volume_changed
         )
-    if hasattr(gui, "audio_inspector_volume_down_btn"):
-        gui.audio_inspector_volume_down_btn.clicked.connect(
-            gui.on_audio_inspector_volume_down
+    if hasattr(gui, "audio_a2_volume_slider"):
+        gui.audio_a2_volume_slider.valueChanged.connect(
+            gui.on_audio_a2_volume_changed
         )
     if hasattr(gui, "audio_inspector_gain_spin"):
         gui.audio_inspector_gain_spin.valueChanged.connect(

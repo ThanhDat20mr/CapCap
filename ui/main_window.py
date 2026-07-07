@@ -1312,23 +1312,6 @@ class VideoTranslatorGUI(QMainWindow):
             self.preview_voice_btn.setVisible(mode in ("voice", "both"))
         self._update_voice_preview_meta()
 
-    def on_audio_mix_preset_changed(self):
-        if not hasattr(self, "audio_mix_preset_combo"):
-            return
-        preset_key = str(self.audio_mix_preset_combo.currentData() or "custom").strip().lower()
-        presets = {
-            "voice_focus": {"bg_gain": -1.0, "ducking": -8.0},
-            "balanced": {"bg_gain": 1.0, "ducking": -5.0},
-            "music_forward": {"bg_gain": 3.0, "ducking": -3.0},
-        }
-        if preset_key in presets:
-            values = presets[preset_key]
-            if hasattr(self, "bg_gain_spin"):
-                self.bg_gain_spin.setValue(float(values["bg_gain"]))
-            if hasattr(self, "ducking_amount_spin"):
-                self.ducking_amount_spin.setValue(float(values["ducking"]))
-        self.refresh_ui_state()
-
     def _parse_voice_speed_value(self) -> float:
         raw = str(getattr(self, "voice_speed_spin", None).currentText() if getattr(self, "voice_speed_spin", None) else "1.0x").strip().lower()
         raw = raw.replace("x", "")
@@ -1336,6 +1319,13 @@ class VideoTranslatorGUI(QMainWindow):
             return float(raw or "1.0")
         except ValueError:
             return 1.0
+
+    def _percent_to_db(self, percent: int) -> float:
+        """Convert volume percentage (0-200) to dB gain."""
+        if percent <= 0:
+            return -60.0
+        import math
+        return 20.0 * math.log10(percent / 100.0)
 
     # -----------------------------
     # Logging + error helpers
@@ -1762,8 +1752,8 @@ class VideoTranslatorGUI(QMainWindow):
 
         segments = list(self.get_active_segments() or [])
         audio_mode_key = str(self.get_audio_handling_mode() or "fast").strip().lower()
-        background_gain_db = float(self.bg_gain_spin.value()) if hasattr(self, "bg_gain_spin") else 0.0
-        ducking_amount_db = float(self.ducking_amount_spin.value()) if hasattr(self, "ducking_amount_spin") else -6.0
+        original_volume = int(self.audio_a1_volume_slider.value()) if hasattr(self, "audio_a1_volume_slider") else 50
+        dub_volume = int(self.audio_a2_volume_slider.value()) if hasattr(self, "audio_a2_volume_slider") else 100
         signature_payload = {
             "voice": os.path.abspath(voice_only),
             "voice_size": int(voice_stat.st_size),
@@ -1772,8 +1762,8 @@ class VideoTranslatorGUI(QMainWindow):
             "background_size": int(background_stat.st_size),
             "background_mtime_ns": int(getattr(background_stat, "st_mtime_ns", int(background_stat.st_mtime * 1_000_000_000))),
             "audio_mode": audio_mode_key,
-            "background_gain_db": round(background_gain_db, 3),
-            "ducking_amount_db": round(ducking_amount_db, 3),
+            "original_volume": original_volume,
+            "dub_volume": dub_volume,
             "segments": [
                 {
                     "start": round(float(seg.get("start", 0.0)), 3),
@@ -1788,15 +1778,15 @@ class VideoTranslatorGUI(QMainWindow):
             return output_path
 
         try:
-            mix_voice_with_background(
-                background_wav_path=background_audio,
-                voice_wav_path=voice_only,
+            from audio_mixer import mix_original_with_dub
+            original_gain_db = self._percent_to_db(original_volume)
+            dub_gain_db = self._percent_to_db(dub_volume)
+            mix_original_with_dub(
+                original_wav_path=background_audio,
+                dub_wav_path=voice_only,
                 output_wav_path=output_path,
-                background_gain_db=background_gain_db,
-                voice_gain_db=0.0,
-                ducking_mode="timeline" if audio_mode_key == "fast" else "off",
-                ducking_segments=segments if audio_mode_key == "fast" else None,
-                ducking_amount_db=ducking_amount_db,
+                original_gain_db=original_gain_db,
+                dub_gain_db=dub_gain_db,
             )
         except Exception as exc:
             self.log(f"[Preview] timeline mix fallback to voice-only: {exc}")
@@ -1860,7 +1850,7 @@ class VideoTranslatorGUI(QMainWindow):
         for track in self.timeline._timeline.tracks:
             if track.name == "A1 Audio":
                 a1_muted = bool(track.muted)
-            elif track.name == "A2 Dub":
+            elif track.name in ("A2 Dub", "TS1"):
                 a2_muted = bool(track.muted)
         if a1_muted is None and a2_muted is None:
             return None
@@ -2223,10 +2213,6 @@ class VideoTranslatorGUI(QMainWindow):
             "bg_music_label",
             "bg_music_edit",
             "browse_bg_music_btn",
-            "voice_gain_label",
-            "voice_gain_spin",
-            "bg_gain_label",
-            "bg_gain_spin",
             "voiceover_btn",
         ]
         existing_widgets = [
@@ -2817,9 +2803,8 @@ class VideoTranslatorGUI(QMainWindow):
             voice_speed=self._parse_voice_speed_value(),
             timing_sync_mode=str(self.voice_timing_sync_combo.currentText()).strip(),
             background_path=background_path,
-            voice_gain_db=float(self.voice_gain_spin.value()),
-            bg_gain_db=float(self.bg_gain_spin.value()),
-            ducking_amount_db=float(self.ducking_amount_spin.value()) if hasattr(self, "ducking_amount_spin") else -6.0,
+            original_volume=int(self.audio_a1_volume_slider.value()) if hasattr(self, "audio_a1_volume_slider") else 50,
+            dub_volume=int(self.audio_a2_volume_slider.value()) if hasattr(self, "audio_a2_volume_slider") else 100,
         )
 
     def persist_current_timeline_project_data(self):
@@ -2931,6 +2916,9 @@ class VideoTranslatorGUI(QMainWindow):
         voice_path = context.get("artifacts", {}).get("voice_vi", "")
         if voice_path and os.path.exists(voice_path) and hasattr(self, "timeline"):
             self.timeline.sync_tts_track(voice_path, segments=self.current_translated_segments or self.current_segments)
+            # Enable Audio tab since voice generation was completed
+            if hasattr(self, "audio_tab_btn"):
+                self.audio_tab_btn.setEnabled(True)
         self._sync_timeline_mute_to_gui()
         self._update_ocr_overlay()
         # Clear any stale layer selection from the previous project so
@@ -3693,8 +3681,6 @@ class VideoTranslatorGUI(QMainWindow):
             self.browse_bg_music_btn.setVisible(show_voice)
         if hasattr(self, "browse_mixed_audio_btn"):
             self.browse_mixed_audio_btn.setVisible(show_voice)
-        if hasattr(self, "audio_handling_combo"):
-            self.audio_handling_combo.setVisible(show_voice)
         if hasattr(self, "output_subtitle_radio"):
             self.output_subtitle_radio.setChecked(mode == "subtitle")
             self.output_voice_radio.setChecked(mode == "voice")
@@ -4781,12 +4767,12 @@ class VideoTranslatorGUI(QMainWindow):
     def _show_audio_inspector_for_track(self, track, layer=None):
         """Show audio inspector populated with the selected track's settings."""
         self._switch_inspector("audio")
-        # The Dub Voice section is only for A2 Dub. Hide it for
+        # The Dub Voice section is only for A2 Dub/TS1. Hide it for
         # A1 Audio (or any other audio track).
         track_name = str(getattr(track, "name", "") or "")
         dub_section = getattr(self, "audio_inspector_dub_section", None)
         if dub_section is not None:
-            dub_section.setVisible(track_name == "A2 Dub")
+            dub_section.setVisible(track_name in ("A2 Dub", "TS1"))
         if track is None:
             return
         track_name = str(getattr(track, "name", "Audio"))
@@ -4830,12 +4816,6 @@ class VideoTranslatorGUI(QMainWindow):
             fade_out = float(meta.get("_fade_out", 0.0))
         except (TypeError, ValueError):
             fade_out = 0.0
-        if hasattr(self, "audio_inspector_volume_slider"):
-            self.audio_inspector_volume_slider.blockSignals(True)
-            self.audio_inspector_volume_slider.setValue(int(max(0, min(200, volume))))
-            self.audio_inspector_volume_slider.blockSignals(False)
-        if hasattr(self, "audio_inspector_volume_label"):
-            self.audio_inspector_volume_label.setText(f"{int(volume)}%")
         if hasattr(self, "audio_inspector_gain_spin"):
             self.audio_inspector_gain_spin.blockSignals(True)
             self.audio_inspector_gain_spin.setValue(gain)
@@ -5465,31 +5445,6 @@ class VideoTranslatorGUI(QMainWindow):
                 return t, target
         return None, None
 
-    def on_audio_inspector_volume_changed(self, value: int):
-        track, track_name = self._current_audio_track_for_inspector()
-        if track is None:
-            return
-        if not isinstance(track.metadata, dict):
-            track.metadata = {}
-        track.metadata["_volume"] = float(value)
-        if hasattr(self, "audio_inspector_volume_label"):
-            self.audio_inspector_volume_label.setText(f"{int(value)}%")
-        self._apply_audio_track_settings(track_name)
-
-    def on_audio_inspector_volume_up(self):
-        if not hasattr(self, "audio_inspector_volume_slider"):
-            return
-        slider = self.audio_inspector_volume_slider
-        new_val = min(slider.maximum(), int(slider.value()) + 5)
-        slider.setValue(new_val)
-
-    def on_audio_inspector_volume_down(self):
-        if not hasattr(self, "audio_inspector_volume_slider"):
-            return
-        slider = self.audio_inspector_volume_slider
-        new_val = max(slider.minimum(), int(slider.value()) - 5)
-        slider.setValue(new_val)
-
     def on_audio_inspector_gain_changed(self, value: float):
         track, track_name = self._current_audio_track_for_inspector()
         if track is None:
@@ -5577,12 +5532,74 @@ class VideoTranslatorGUI(QMainWindow):
             return
         self.preview_segment_audio(idx)
 
+    AUDIO_MIX_PRESETS = {
+        "original_only": (100, 0),
+        "prefer_original": (80, 20),
+        "balanced": (100, 100),
+        "prefer_dub": (20, 80),
+        "dub_only": (0, 100),
+    }
+
+    def on_audio_mix_preset_changed(self):
+        if not hasattr(self, "audio_mix_preset_combo"):
+            return
+        preset_key = str(self.audio_mix_preset_combo.currentData() or "").strip().lower()
+        if preset_key in self.AUDIO_MIX_PRESETS:
+            a1_val, a2_val = self.AUDIO_MIX_PRESETS[preset_key]
+            if hasattr(self, "audio_a1_volume_slider"):
+                self.audio_a1_volume_slider.blockSignals(True)
+                self.audio_a1_volume_slider.setValue(a1_val)
+                self.audio_a1_volume_slider.blockSignals(False)
+            if hasattr(self, "audio_a1_volume_label"):
+                self.audio_a1_volume_label.setText(f"{int(a1_val)}%")
+            if hasattr(self, "audio_a2_volume_slider"):
+                self.audio_a2_volume_slider.blockSignals(True)
+                self.audio_a2_volume_slider.setValue(a2_val)
+                self.audio_a2_volume_slider.blockSignals(False)
+            if hasattr(self, "audio_a2_volume_label"):
+                self.audio_a2_volume_label.setText(f"{int(a2_val)}%")
+            self._apply_audio_mix_to_tracks(a1_val, a2_val)
+
+    def on_audio_a1_volume_changed(self, value: int):
+        if hasattr(self, "audio_a1_volume_label"):
+            self.audio_a1_volume_label.setText(f"{int(value)}%")
+        self._sync_audio_track_volume("A1 Audio", int(value))
+        self._set_audio_mix_preset_custom()
+
+    def on_audio_a2_volume_changed(self, value: int):
+        if hasattr(self, "audio_a2_volume_label"):
+            self.audio_a2_volume_label.setText(f"{int(value)}%")
+        self._sync_audio_track_volume("TS1", int(value))
+        self._set_audio_mix_preset_custom()
+
+    def _apply_audio_mix_to_tracks(self, a1_val: int, a2_val: int):
+        self._sync_audio_track_volume("A1 Audio", a1_val)
+        self._sync_audio_track_volume("TS1", a2_val)
+
+    def _sync_audio_track_volume(self, track_name: str, volume: int):
+        if not hasattr(self, "timeline") or self.timeline is None:
+            return
+        for t in self.timeline._timeline.tracks:
+            if t.name == track_name:
+                if not isinstance(t.metadata, dict):
+                    t.metadata = {}
+                t.metadata["_volume"] = float(volume)
+                self._apply_audio_track_settings(track_name)
+                break
+
+    def _set_audio_mix_preset_custom(self):
+        if not hasattr(self, "audio_mix_preset_combo"):
+            return
+        idx = self.audio_mix_preset_combo.findData("custom")
+        if idx >= 0 and self.audio_mix_preset_combo.currentIndex() != idx:
+            self.audio_mix_preset_combo.setCurrentIndex(idx)
+
     def _apply_audio_track_settings(self, track_name: str):
         """Apply per-track volume/gain/mute to the underlying media player.
 
         Maps the timeline track name to the media player:
           "A1 Audio" -> QMediaPlayer #1 (original sidecar)
-          "A2 Dub"      -> QMediaPlayer #2 (dubbed sidecar)
+          "A2 Dub" / "TS1" -> QMediaPlayer #2 (dubbed sidecar)
         """
         if not hasattr(self, "media_player") or self.media_player is None:
             return
@@ -5597,7 +5614,7 @@ class VideoTranslatorGUI(QMainWindow):
                 muted = self._is_audio_track_muted(track_name)
                 if hasattr(self.media_player, "set_mute_original"):
                     self.media_player.set_mute_original(muted)
-            elif track_name == "A2 Dub":
+            elif track_name in ("A2 Dub", "TS1"):
                 vol = self._compute_audio_track_volume(track_name, base=100.0)
                 gain_db = self._get_audio_track_gain_db(track_name)
                 effective = vol * (10 ** (gain_db / 20.0))
@@ -5681,14 +5698,7 @@ class VideoTranslatorGUI(QMainWindow):
                     self.media_player.set_mute_original(muted)
                 except Exception:
                     pass
-        elif track_name == "A2 Dub":
-            self._mute_dubbed = muted
-            if hasattr(self, "media_player"):
-                try:
-                    self.media_player.set_mute_dubbed(muted)
-                except Exception:
-                    pass
-        elif track_name == "TS1":
+        elif track_name in ("A2 Dub", "TS1"):
             self._mute_dubbed = muted
             if hasattr(self, "media_player"):
                 try:
@@ -5779,7 +5789,7 @@ class VideoTranslatorGUI(QMainWindow):
         for t in self.timeline._timeline.tracks:
             if t.name == "A1 Audio":
                 a1_muted = bool(t.muted)
-            elif t.name == "A2 Dub":
+            elif t.name in ("A2 Dub", "TS1"):
                 a2_muted = bool(t.muted)
         self._mute_original = a1_muted
         self._mute_dubbed = a2_muted
@@ -5794,7 +5804,7 @@ class VideoTranslatorGUI(QMainWindow):
                 pass
         if hasattr(self, "track_label_bar"):
             self.track_label_bar.set_muted("A1 Audio", a1_muted)
-            self.track_label_bar.set_muted("A2 Dub", a2_muted)
+            self.track_label_bar.set_muted("TS1", a2_muted)
 
     def _is_active_timeline_audio_track_muted(self) -> bool:
         track_mutes = self._timeline_audio_track_mutes()
@@ -8499,8 +8509,6 @@ class VideoTranslatorGUI(QMainWindow):
             self.premium_voice_combo.setEnabled(False)
         if hasattr(self, "bg_music_edit"):
             self.bg_music_edit.setEnabled(generated_mode and mode in ("voice", "both"))
-        if hasattr(self, "audio_handling_combo"):
-            self.audio_handling_combo.setEnabled(generated_mode and mode in ("voice", "both"))
         if hasattr(self, "mixed_audio_edit"):
             self.mixed_audio_edit.setEnabled(mode in ("voice", "both") and bool(hasattr(self, "use_existing_audio_radio") and self.use_existing_audio_radio.isChecked()))
         if hasattr(self, "preview_voice_btn"):
@@ -9459,9 +9467,8 @@ class VideoTranslatorGUI(QMainWindow):
             return
         voice_speed = self._parse_voice_speed_value()
         timing_sync_mode = str(self.voice_timing_sync_combo.currentText()).strip()
-        voice_gain = float(self.voice_gain_spin.value())
-        bg_gain = float(self.bg_gain_spin.value())
-        ducking_amount = float(self.ducking_amount_spin.value()) if hasattr(self, "ducking_amount_spin") else -6.0
+        original_volume = int(self.audio_a1_volume_slider.value()) if hasattr(self, "audio_a1_volume_slider") else 50
+        dub_volume = int(self.audio_a2_volume_slider.value()) if hasattr(self, "audio_a2_volume_slider") else 100
         voice_signature = self.build_current_voice_signature(segments=segments, background_path=bg_path)
         if state and voice_signature:
             force_refresh = bool(getattr(self, "_voiceover_force_refresh", False))
@@ -9549,9 +9556,8 @@ class VideoTranslatorGUI(QMainWindow):
             voice_name,
             voice_speed,
             timing_sync_mode,
-            voice_gain,
-            bg_gain,
-            ducking_amount,
+            original_volume,
+            dub_volume,
             project_state_path,
             self.get_project_temp_dir("tts"),
             self.is_ai_dubbing_rewrite_enabled() and self.get_output_mode_key() in ("voice", "both"),
@@ -9689,6 +9695,9 @@ class VideoTranslatorGUI(QMainWindow):
             self._pipeline_fail("Voiceover failed.")
             self.refresh_ui_state()
             return
+
+        if hasattr(self, "audio_tab_btn"):
+            self.audio_tab_btn.setEnabled(True)
 
         if voice_track and os.path.exists(voice_track):
             self.last_voice_vi_path = voice_track

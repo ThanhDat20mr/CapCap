@@ -259,7 +259,7 @@ class EngineRuntime:
         voice_gain_db: float = 0.0,
         ducking_mode: str = "off",
         ducking_segments=None,
-        ducking_amount_db: float = -6.0,
+        ducking_amount_db: float = 0.0,
     ) -> str:
         return self.audio_mix.mix_voice_with_background(
             background_wav_path=background_wav_path,
@@ -270,6 +270,23 @@ class EngineRuntime:
             ducking_mode=ducking_mode,
             ducking_segments=ducking_segments,
             ducking_amount_db=ducking_amount_db,
+        )
+
+    def mix_original_with_dub(
+        self,
+        *,
+        original_wav_path: str,
+        dub_wav_path: str,
+        output_wav_path: str,
+        original_gain_db: float = 0.0,
+        dub_gain_db: float = 0.0,
+    ) -> str:
+        return self.audio_mix.mix_original_with_dub(
+            original_wav_path=original_wav_path,
+            dub_wav_path=dub_wav_path,
+            output_wav_path=output_wav_path,
+            original_gain_db=original_gain_db,
+            dub_gain_db=dub_gain_db,
         )
 
     def mux_audio_for_preview(self, video_path: str, audio_path: str, output_video_path: str, *, target_width=None, target_height=None, output_scale_mode="fit", focus_x=0.5, focus_y=0.5, output_fps=None, video_filter_state=None) -> str:

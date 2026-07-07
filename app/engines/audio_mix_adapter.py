@@ -1,4 +1,4 @@
-from audio_mixer import build_voice_track_from_srt_segments, change_wav_speed, fit_wav_to_duration, mix_voice_with_background, trim_trailing_silence
+from audio_mixer import build_voice_track_from_srt_segments, change_wav_speed, fit_wav_to_duration, mix_voice_with_background, mix_original_with_dub, trim_trailing_silence
 
 
 class AudioMixAdapter:
@@ -67,7 +67,7 @@ class AudioMixAdapter:
         voice_gain_db: float = 0.0,
         ducking_mode: str = "off",
         ducking_segments=None,
-        ducking_amount_db: float = -6.0,
+        ducking_amount_db: float = 0.0,
     ) -> str:
         return mix_voice_with_background(
             background_wav_path=background_wav_path,
@@ -78,4 +78,21 @@ class AudioMixAdapter:
             ducking_mode=ducking_mode,
             ducking_segments=ducking_segments,
             ducking_amount_db=ducking_amount_db,
+        )
+
+    def mix_original_with_dub(
+        self,
+        *,
+        original_wav_path: str,
+        dub_wav_path: str,
+        output_wav_path: str,
+        original_gain_db: float = 0.0,
+        dub_gain_db: float = 0.0,
+    ) -> str:
+        return mix_original_with_dub(
+            original_wav_path=original_wav_path,
+            dub_wav_path=dub_wav_path,
+            output_wav_path=output_wav_path,
+            original_gain_db=original_gain_db,
+            dub_gain_db=dub_gain_db,
         )
