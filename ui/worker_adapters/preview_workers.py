@@ -71,6 +71,7 @@ class PreviewMuxWorker(QThread):
                     output_fill_focus_x=self.output_fill_focus_x,
                     output_fill_focus_y=self.output_fill_focus_y,
                     video_filter_state=self.video_filter_state,
+                    fast=True,
                 )
                 if not ok:
                     raise RuntimeError("Failed to render subtitle preview video.")
@@ -160,6 +161,7 @@ class QuickPreviewWorker(QThread):
                     output_fill_focus_x=self.output_fill_focus_x,
                     output_fill_focus_y=self.output_fill_focus_y,
                     video_filter_state=self.video_filter_state,
+                    fast=True,
                 )
                 if not ok:
                     raise RuntimeError("Failed to render subtitle preview clip.")

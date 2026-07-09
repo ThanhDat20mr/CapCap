@@ -538,6 +538,12 @@ class PreviewController:
 
         project_state_path = self.gui.project_service.project_file(self.gui.current_project_state.project_root) if self.gui.current_project_state else ""
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
+        
+        # Check if an export is already running
+        if hasattr(self.gui, 'export_thread') and self.gui.export_thread.isRunning():
+            self.gui.log("[Export] Export already running, ignoring request")
+            return
+        
         self.gui.export_thread = FinalExportWorker(
             workspace_root=self.gui.workspace_root,
             video_path=video_path,
@@ -625,6 +631,11 @@ class PreviewController:
         except Exception:
             pass
 
+        # Check if a quick preview is already running
+        if hasattr(self.gui, 'quick_preview_thread') and self.gui.quick_preview_thread.isRunning():
+            self.gui.log("[Preview] 5s preview already running, ignoring request")
+            return
+
         self.gui.quick_preview_thread = QuickPreviewWorker(
             video_path=video_path,
             output_path=preview_output,
@@ -689,6 +700,11 @@ class PreviewController:
         use_output_canvas = bool(show_dialog)
         target_width, target_height = ((None, None) if not use_output_canvas else self._resolve_output_canvas_dimensions(video_path))
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
+
+        # Check if a frame preview is already running
+        if hasattr(self.gui, 'frame_preview_thread') and self.gui.frame_preview_thread.isRunning():
+            self.gui.log("[Preview] Frame preview already running, ignoring request")
+            return
 
         self.gui.frame_preview_thread = ExactFramePreviewWorker(
             video_path=video_path,
@@ -841,6 +857,13 @@ class PreviewController:
         self._start_video_preview()
 
     def _start_video_preview(self):
+        self.gui.log("[Preview] _start_video_preview called")
+        
+        # Check if a preview is already running
+        if hasattr(self.gui, 'preview_thread') and self.gui.preview_thread.isRunning():
+            self.gui.log("[Preview] Preview already running, ignoring request")
+            return
+        
         if hasattr(self.gui, "ensure_media_backend_ready"):
             self.gui.ensure_media_backend_ready()
         video_path = self.gui.video_path_edit.text().strip()
@@ -853,9 +876,11 @@ class PreviewController:
         else:
             audio_path = self.gui.resolve_selected_audio_path()
         if not video_path or not os.path.exists(video_path):
+            self.gui.log("[Preview] Video file not found, showing error")
             QMessageBox.warning(self.gui, "Error", "Video file not found. Please select a video first.")
             return
         if mode in ("voice", "both") and (not audio_path or not os.path.exists(audio_path)):
+            self.gui.log(f"[Preview] Audio file not found for mode={mode}, showing error")
             QMessageBox.warning(
                 self.gui,
                 "Error",
@@ -864,12 +889,14 @@ class PreviewController:
             return
 
         has_active_video_filters = bool(hasattr(self.gui, "has_active_video_filters") and self.gui.has_active_video_filters())
+        self.gui.log(f"[Preview] has_active_video_filters={has_active_video_filters}")
         mask_regions, logo_layers = self._extract_overlay_layers()
         has_overlays = bool(mask_regions or logo_layers)
         self.gui._preview_video_has_burned_subtitles = bool(mode == "subtitle" and (has_active_video_filters or has_overlays))
 
         # Subtitle-only preview can stay live when no canvas/filter/overlay processing is needed.
         if mode == "subtitle" and not has_active_video_filters and not has_overlays:
+            self.gui.log("[Preview] Subtitle-only mode, no filters/overlays, using live preview")
             try:
                 self.gui._preview_video_has_burned_subtitles = False
                 if hasattr(self.gui.video_view, "set_preview_aspect_ratio"):
@@ -884,6 +911,7 @@ class PreviewController:
             return
         ts = int(time.time())
         preview_out = self.gui.get_project_temp_path("preview", f"preview_vi_voice_{ts}.mp4", create_parent=True)
+        self.gui.log(f"[Preview] Starting full preview render: mode={mode}, preview_out={preview_out}")
         preview_srt_path = ""
         preview_segments = []
         subtitle_style = {}
@@ -928,6 +956,9 @@ class PreviewController:
         except Exception:
             pass
 
+        # Don't quit/wait on preview thread - let it finish naturally
+        # The Apply button is disabled to prevent double-clicks
+
         self.gui.log(f"[Preview] video={video_path}")
         self.gui.log(f"[Preview] audio={audio_path or '<none>'}")
         self.gui.log(f"[Preview] out={preview_out}")
@@ -965,9 +996,11 @@ class PreviewController:
         self.gui.preview_thread.finished.connect(
             lambda preview_path, error: self.gui.on_preview_ready(preview_path, error, styled_signature)
         )
+        self.gui.log(f"[Preview] Starting preview thread")
         self.gui.preview_thread.start()
 
     def on_preview_ready(self, preview_path, error, styled_signature=""):
+        self.gui.log(f"[Preview] on_preview_ready called: preview_path={preview_path}, error={error}")
         if hasattr(self.gui, "ensure_media_backend_ready"):
             self.gui.ensure_media_backend_ready()
         self.gui._styled_preview_running = False
@@ -975,9 +1008,25 @@ class PreviewController:
         if hasattr(self.gui, "preview_btn"):
             self.gui.preview_btn.setEnabled(True)
         self.gui.progress_bar.setValue(100)
-        self.gui.refresh_ui_state()
+        try:
+            self.gui.refresh_ui_state()
+        except Exception as e:
+            if hasattr(self.gui, "log"):
+                self.gui.log(f"[Preview] UI refresh error: {e}")
+        try:
+            if hasattr(self.gui, "_refresh_video_inspector_status"):
+                self.gui._refresh_video_inspector_status()
+        except Exception as e:
+            if hasattr(self.gui, "log"):
+                self.gui.log(f"[Preview] Inspector status error: {e}")
+        
+        # Re-enable Apply button after preview is ready
+        if hasattr(self.gui, "video_inspector_apply_btn"):
+            self.gui.video_inspector_apply_btn.setEnabled(True)
+            self.gui.log("[Preview] Re-enabled Apply button")
 
         if error:
+            self.gui.log(f"[Preview] Error occurred: {error}")
             self.gui._video_filter_preview_dirty = bool(hasattr(self.gui, "has_active_video_filters") and self.gui.has_active_video_filters())
             self.gui._video_filter_apply_requested = False
             self.gui._play_video_filter_preview_when_ready = False
@@ -988,6 +1037,7 @@ class PreviewController:
             return
 
         if preview_path and os.path.exists(preview_path):
+            self.gui.log(f"[Preview] Preview successful, loading into player: {preview_path}")
             self.gui._video_filter_preview_dirty = False
             self.gui._video_filter_apply_requested = False
             if hasattr(self.gui, "hide_filter_thumbnail_preview"):

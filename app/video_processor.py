@@ -52,10 +52,11 @@ def _ffmpeg_supports_encoder(ffmpeg_path: str, encoder_name: str) -> bool:
     return supported
 
 
-def _preferred_h264_encoder_args(ffmpeg_path: str) -> list[str]:
+def _preferred_h264_encoder_args(ffmpeg_path: str, fast: bool = False) -> list[str]:
     if _ffmpeg_supports_encoder(ffmpeg_path, 'h264_nvenc'):
         return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '23', '-pix_fmt', 'yuv420p']
-    return ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p']
+    preset = 'veryfast' if fast else 'medium'
+    return ['-c:v', 'libx264', '-preset', preset, '-crf', '18', '-pix_fmt', 'yuv420p']
 
 
 def _escape_path_for_filter(path):
@@ -998,7 +999,7 @@ def srt_to_ass(srt_path: str,
     return ass_path
 
 
-def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None):
+def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, fast=False):
     """Burn subtitles into video using an already-prepared ASS file."""
     print(f"[FFmpeg] embed_ass_subtitles called with mask_regions={mask_regions}, logo_layers={logo_layers}")
     ffmpeg = _ffmpeg_path(ffmpeg_path)
@@ -1071,7 +1072,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
         filter_parts.append(f"{current_label}ass='{escaped_ass}'[out]")
         filter_complex = ";".join(part for part in filter_parts if part)
         
-        video_encoder_args = _preferred_h264_encoder_args(ffmpeg)
+        video_encoder_args = _preferred_h264_encoder_args(ffmpeg, fast=fast)
 
         command = [
             ffmpeg,
@@ -1319,7 +1320,8 @@ def embed_subtitles(video_path, srt_path, output_path,
                      output_fill_focus_y=0.5,
                      output_fps=None,
                      ffmpeg_path=None,
-                     video_filter_state=None):
+                     video_filter_state=None,
+                     fast=False):
     """Burn subtitles into video using a properly-styled ASS file.
 
     Workflow:
@@ -1386,6 +1388,7 @@ def embed_subtitles(video_path, srt_path, output_path,
         output_fill_focus_y=output_fill_focus_y,
         output_fps=output_fps,
         video_filter_state=video_filter_state,
+        fast=fast,
     )
 
     # Step 4: clean up temp ASS

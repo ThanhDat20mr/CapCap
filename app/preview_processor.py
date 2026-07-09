@@ -319,6 +319,7 @@ def mux_audio_into_video_for_preview(
             ffmpeg,
             base_cmd,
             output_video_path,
+            fast=True,
             error_message="FFmpeg mux failed.",
         )
     else:
