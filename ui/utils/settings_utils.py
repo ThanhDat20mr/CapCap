@@ -105,23 +105,10 @@ def load_user_settings(gui):
         idx = gui.output_scale_mode_combo.findData(output_scale_mode)
         if idx >= 0:
             gui.output_scale_mode_combo.setCurrentIndex(idx)
-    filter_preset = str(s.value("video_filter_preset", "original") or "original").strip().lower()
-    try:
-        filter_intensity = int(float(s.value("video_filter_intensity", 75)))
-    except Exception:
-        filter_intensity = 75
-    try:
-        filter_overrides = json.loads(str(s.value("video_filter_overrides", "{}") or "{}"))
-    except Exception:
-        filter_overrides = {}
-    if not isinstance(filter_overrides, dict):
-        filter_overrides = {}
-    try:
-        filter_modified = json.loads(str(s.value("video_filter_modified", "{}") or "{}"))
-    except Exception:
-        filter_modified = {}
-    if not isinstance(filter_modified, dict):
-        filter_modified = {}
+    filter_preset = "original"
+    filter_intensity = 75
+    filter_overrides = {}
+    filter_modified = {}
     if hasattr(gui, "set_video_filter_state"):
         gui.set_video_filter_state(filter_preset, filter_intensity, filter_overrides, filter_modified)
     source_lang = s.value("source_lang", gui.lang_whisper_combo.currentText())

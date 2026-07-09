@@ -2293,7 +2293,9 @@ class VideoTranslatorGUI(QMainWindow):
         self.refresh_ui_state()
 
     def apply_current_video_filter(self):
+        self.log(f"[Filter] apply_current_video_filter called, has_active={self.has_active_video_filters()}")
         if not self.has_active_video_filters():
+            self.log("[Filter] No active filters, returning early")
             self._video_filter_preview_dirty = False
             self._video_filter_apply_requested = False
             self.hide_filter_thumbnail_preview()
@@ -2301,6 +2303,7 @@ class VideoTranslatorGUI(QMainWindow):
             return
         self._video_filter_apply_requested = True
         self.refresh_ui_state()
+        self.log("[Filter] Calling preview_controller.preview_video()")
         self.preview_controller.preview_video()
 
     def revert_video_filter_preview_to_source(self):
@@ -3562,6 +3565,7 @@ class VideoTranslatorGUI(QMainWindow):
         if lut_path:
             lut_strength = max(0.0, min(0.45, (float(self._video_filter_intensity) / 100.0) * 0.45))
         active = any(abs(int(value)) > 0 for value in effective_values.values())
+        self.log(f"[Filter] get_video_filter_state: preset={preset_key}, active={active}, effective={effective_values}")
         return {
             "preset": preset_key,
             "intensity": int(self._video_filter_intensity),
@@ -3576,7 +3580,10 @@ class VideoTranslatorGUI(QMainWindow):
         }
 
     def has_active_video_filters(self):
-        return bool(self.get_video_filter_state().get("active"))
+        state = self.get_video_filter_state()
+        active = bool(state.get("active"))
+        self.log(f"[Filter] has_active_video_filters check: preset={state.get('preset')}, active={active}")
+        return active
 
     def on_output_ratio_changed(self, *_args):
         if hasattr(self, "video_view") and hasattr(self.video_view, "set_preview_aspect_ratio"):
@@ -4434,7 +4441,8 @@ class VideoTranslatorGUI(QMainWindow):
         elif layer_type == "dub_subtitle":
             self._show_dub_subtitle_inspector_for_layer(layer_id, layer)
         elif layer_type == "audio":
-            self._show_audio_inspector_for_track(track, layer)
+            if str(getattr(track, "name", "")) != "A1 Audio":
+                self._show_audio_inspector_for_track(track, layer)
         elif layer_type == "blur":
             self._show_blur_inspector_for_track(track, layer)
         elif layer_type == "video":
@@ -5280,16 +5288,41 @@ class VideoTranslatorGUI(QMainWindow):
                 value_lbl.setText(str(val))
 
     def _refresh_video_inspector_status(self):
-        if not hasattr(self, "video_inspector_status_label"):
-            return
         try:
-            active = bool(self.has_active_video_filters())
-        except Exception:
-            active = False
-        self.video_inspector_status_label.setText(
-            "Filter is currently active." if active
-            else "No filter is currently applied."
-        )
+            if not hasattr(self, "video_inspector_status_label"):
+                return
+            try:
+                active = bool(self.has_active_video_filters())
+            except Exception:
+                active = False
+            
+            is_applying = getattr(self, "_video_filter_apply_requested", False) and getattr(self, "_styled_preview_running", False)
+            
+            if is_applying:
+                self.video_inspector_status_label.setText("⟳ Applying filter...")
+                self.video_inspector_status_label.setStyleSheet("color: #2196F3; font-weight: bold;")
+            elif active:
+                self.video_inspector_status_label.setText("✓ Filter applied")
+                self.video_inspector_status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            else:
+                self.video_inspector_status_label.setText("No filter applied")
+                self.video_inspector_status_label.setStyleSheet("color: #888; font-weight: normal;")
+            
+            if hasattr(self, "video_inspector_apply_btn"):
+                if is_applying:
+                    self.video_inspector_apply_btn.setText("Applying...")
+                    self.video_inspector_apply_btn.setEnabled(False)
+                elif active:
+                    # Filter is active - enable button so user can re-apply if needed
+                    self.video_inspector_apply_btn.setText("Apply")
+                    self.video_inspector_apply_btn.setEnabled(True)
+                else:
+                    # No filter - enable button so user can apply
+                    self.video_inspector_apply_btn.setText("Apply")
+                    self.video_inspector_apply_btn.setEnabled(True)
+        except Exception as e:
+            if hasattr(self, "log"):
+                self.log(f"[Filter] Status refresh error: {e}")
 
     def _on_video_inspector_preset_changed(self, index: int):
         if not hasattr(self, "video_inspector_preset_combo"):
@@ -5306,6 +5339,8 @@ class VideoTranslatorGUI(QMainWindow):
         # what the new preset looks like at the current intensity.
         self._sync_video_inspector_ui()
         self._refresh_video_inspector_status()
+        if hasattr(self, "refresh_ui_state"):
+            self.refresh_ui_state()
 
     def _on_video_inspector_intensity_changed(self, value: int):
         if hasattr(self, "video_inspector_intensity_value_label"):
@@ -5314,6 +5349,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.on_video_filter_intensity_changed(int(value))
         except Exception:
             pass
+        self._refresh_video_inspector_status()
 
     def _on_video_inspector_intensity_released(self):
         if hasattr(self, "on_video_filter_slider_released"):
@@ -5331,6 +5367,7 @@ class VideoTranslatorGUI(QMainWindow):
         if not isinstance(getattr(self, "_video_filter_user_modified", None), dict):
             self._video_filter_user_modified = {}
         self._video_filter_user_modified[field_key] = True
+        self._refresh_video_inspector_status()
 
     def _on_video_inspector_adjust_released(self, field_key: str):
         if hasattr(self, "on_video_filter_slider_released"):
@@ -5341,17 +5378,32 @@ class VideoTranslatorGUI(QMainWindow):
         self._refresh_video_inspector_status()
 
     def _on_video_inspector_apply(self):
+        self.log("[Filter] Apply button clicked")
+        
+        # Disable button immediately to prevent double-clicks
+        if hasattr(self, "video_inspector_apply_btn"):
+            self.video_inspector_apply_btn.setEnabled(False)
+            self.video_inspector_apply_btn.setText("Applying...")
+        
+        try:
+            self._video_filter_apply_requested = True
+            if hasattr(self, "refresh_ui_state"):
+                self.refresh_ui_state()
+        except Exception as e:
+            self.log(f"[Filter] UI update error: {e}")
+        
         if hasattr(self, "apply_current_video_filter"):
             try:
+                self.log(f"[Filter] Calling apply_current_video_filter, has_active={self.has_active_video_filters()}")
                 self.apply_current_video_filter()
-            except Exception:
-                pass
-        if hasattr(self, "schedule_live_video_filter_preview"):
-            try:
-                self.schedule_live_video_filter_preview()
-            except Exception:
-                pass
-        self._refresh_video_inspector_status()
+            except Exception as e:
+                self.log(f"[Filter] Apply error: {e}")
+                if hasattr(self, "show_error"):
+                    self.show_error("Filter Error", "Failed to apply filter.", str(e))
+                # Re-enable button on error
+                if hasattr(self, "video_inspector_apply_btn"):
+                    self.video_inspector_apply_btn.setEnabled(True)
+                    self.video_inspector_apply_btn.setText("Apply")
 
     def _on_video_inspector_revert(self):
         if hasattr(self, "revert_video_filter_preview_to_source"):
@@ -5360,6 +5412,8 @@ class VideoTranslatorGUI(QMainWindow):
             except Exception:
                 pass
         self._refresh_video_inspector_status()
+        if hasattr(self, "refresh_ui_state"):
+            self.refresh_ui_state()
 
     def _current_blur_track_for_inspector(self):
         """Return the Blur Track currently displayed in the Blur inspector."""
