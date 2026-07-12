@@ -1,6 +1,6 @@
 # CapCap 🦆
 
-![CapCap Editor Preview](assets/preview.jpg](https://github.com/notepower2k1/CapCap/blob/main/assets/preview.JPG)
+![CapCap Editor Preview](https://github.com/notepower2k1/CapCap/blob/main/assets/preview.JPG)
 
 **One-click video localization.** Vietnamese subtitle & dubbing tool for short-form content. Works on CPU — faster with GPU.
 
