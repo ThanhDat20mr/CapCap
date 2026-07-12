@@ -8926,8 +8926,8 @@ class VideoTranslatorGUI(QMainWindow):
 
         engine_combo = QComboBox(dialog)
         if not cpu_mode:
-            engine_combo.addItem("Audio (Whisper)", "whisper")
-        engine_combo.addItem("Audio (SenseVoice)", "sensevoice")
+            engine_combo.addItem("Audio (Whisper) - Quality", "whisper")
+        engine_combo.addItem("Audio (SenseVoice) - Speed", "sensevoice")
         engine_combo.addItem("Video (OCR)", "ocr")
         current_engine = (os.getenv("TRANSCRIPTION_ENGINE") or _default_asr_engine()).strip().lower()
         idx = engine_combo.findData(current_engine)

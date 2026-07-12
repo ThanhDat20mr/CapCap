@@ -229,9 +229,18 @@ class ResourceDownloadService:
     def _ocr_model_dir(self) -> str:
         try:
             import rapidocr
-            return os.path.dirname(rapidocr.__file__)
+            models_dir = os.path.dirname(rapidocr.__file__)
+            if models_dir and os.path.isdir(os.path.join(models_dir, "models")):
+                return models_dir
         except Exception:
-            return ""
+            pass
+        import sys
+        meipass = getattr(sys, "_MEIPASS", "") or ""
+        if meipass:
+            bundled = os.path.join(meipass, "rapidocr")
+            if os.path.isdir(os.path.join(bundled, "models")):
+                return bundled
+        return ""
 
     def _ocr_model_status(self) -> str:
         models_dir = self._ocr_model_dir()
@@ -275,7 +284,7 @@ class ResourceDownloadService:
                 ("ocr", "Rapid OCR engine"),
             ]
         return [
-            ("whisper:medium", "Whisper model"),
+            ("sensevoice:model", "SenseVoice ASR model"),
             ("cuda:whisper", "CUDA runtime pack"),
             ("nvidia_driver", "NVIDIA driver"),
         ]

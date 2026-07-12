@@ -1,6 +1,6 @@
 # CapCap 🦆
 
-![CapCap Editor Preview](assets/preview.PNG)
+![CapCap Editor Preview](assets/preview.jpg)
 
 **One-click video localization.** Vietnamese subtitle & dubbing tool for short-form content. Works on CPU — faster with GPU.
 
