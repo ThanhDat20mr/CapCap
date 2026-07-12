@@ -43,8 +43,8 @@ def save_user_settings(gui):
     s.setValue("use_existing_audio", gui.use_existing_audio_radio.isChecked())
     s.setValue("keep_audio", gui.keep_audio_cb.isChecked())
     s.setValue("keep_timeline", gui.keep_timeline_cb.isChecked())
-    if hasattr(gui, "anchor_subtitle_inspector_cb"):
-        s.setValue("anchor_subtitle_inspector", gui.anchor_subtitle_inspector_cb.isChecked())
+    if hasattr(gui, "anchor_inspector_cb"):
+        s.setValue("anchor_inspector", gui.anchor_inspector_cb.isChecked())
     s.setValue("auto_preview_frame", gui.auto_preview_frame_cb.isChecked())
     s.setValue("subtitle_font", gui.subtitle_font_combo.currentText())
     s.setValue("subtitle_size", gui.subtitle_font_size_spin.value())
@@ -76,13 +76,8 @@ def save_user_settings(gui):
     s.setValue("audio_handling_mode", gui.get_audio_handling_mode())
     s.setValue("voice_gender", gui.voice_gender_combo.currentText())
     s.setValue("voice_timing_sync_mode", gui.voice_timing_sync_combo.currentText())
-    s.setValue("voice_gain", gui.voice_gain_spin.value())
-    s.setValue("bg_gain", gui.bg_gain_spin.value())
-    s.setValue("ducking_amount", gui.ducking_amount_spin.value())
     if hasattr(gui, "ai_dubbing_rewrite_cb"):
         s.setValue("ai_dubbing_rewrite", gui.ai_dubbing_rewrite_cb.isChecked())
-    if hasattr(gui, "audio_mix_preset_combo"):
-        s.setValue("audio_mix_preset", gui.audio_mix_preset_combo.currentData())
     if hasattr(gui, "toggle_advanced_btn"):
         s.setValue("advanced_section_open", gui.toggle_advanced_btn.isChecked())
 
@@ -110,23 +105,10 @@ def load_user_settings(gui):
         idx = gui.output_scale_mode_combo.findData(output_scale_mode)
         if idx >= 0:
             gui.output_scale_mode_combo.setCurrentIndex(idx)
-    filter_preset = str(s.value("video_filter_preset", "original") or "original").strip().lower()
-    try:
-        filter_intensity = int(float(s.value("video_filter_intensity", 75)))
-    except Exception:
-        filter_intensity = 75
-    try:
-        filter_overrides = json.loads(str(s.value("video_filter_overrides", "{}") or "{}"))
-    except Exception:
-        filter_overrides = {}
-    if not isinstance(filter_overrides, dict):
-        filter_overrides = {}
-    try:
-        filter_modified = json.loads(str(s.value("video_filter_modified", "{}") or "{}"))
-    except Exception:
-        filter_modified = {}
-    if not isinstance(filter_modified, dict):
-        filter_modified = {}
+    filter_preset = "original"
+    filter_intensity = 75
+    filter_overrides = {}
+    filter_modified = {}
     if hasattr(gui, "set_video_filter_state"):
         gui.set_video_filter_state(filter_preset, filter_intensity, filter_overrides, filter_modified)
     source_lang = s.value("source_lang", gui.lang_whisper_combo.currentText())
@@ -157,9 +139,9 @@ def load_user_settings(gui):
         gui.use_free_voice_radio.setChecked(True)
     gui.keep_audio_cb.setChecked(str(s.value("keep_audio", gui.keep_audio_cb.isChecked())).lower() == "true")
     gui.keep_timeline_cb.setChecked(str(s.value("keep_timeline", gui.keep_timeline_cb.isChecked())).lower() == "true")
-    if hasattr(gui, "anchor_subtitle_inspector_cb"):
-        gui.anchor_subtitle_inspector_cb.setChecked(
-            str(s.value("anchor_subtitle_inspector", gui.anchor_subtitle_inspector_cb.isChecked())).lower() == "true"
+    if hasattr(gui, "anchor_inspector_cb"):
+        gui.anchor_inspector_cb.setChecked(
+            str(s.value("anchor_inspector", gui.anchor_inspector_cb.isChecked())).lower() == "true"
         )
     auto_preview_enabled = str(s.value("auto_preview_frame", "false")).lower() == "true"
     if gui.auto_preview_frame_cb.isHidden():
@@ -215,16 +197,11 @@ def load_user_settings(gui):
         gui.audio_handling_combo.setCurrentIndex(audio_handling_index)
     gui.voice_gender_combo.setCurrentText(s.value("voice_gender", gui.voice_gender_combo.currentText()))
     gui.voice_timing_sync_combo.setCurrentText(s.value("voice_timing_sync_mode", gui.voice_timing_sync_combo.currentText()))
-    gui.voice_gain_spin.setValue(float(s.value("voice_gain", gui.voice_gain_spin.value())))
-    gui.bg_gain_spin.setValue(float(s.value("bg_gain", gui.bg_gain_spin.value())))
-    gui.ducking_amount_spin.setValue(float(s.value("ducking_amount", gui.ducking_amount_spin.value())))
+    if hasattr(gui, "timeline"):
+        gui.timeline.set_voice_sync_mode(gui.voice_timing_sync_combo.currentText())
+    
     if hasattr(gui, "ai_dubbing_rewrite_cb"):
         gui.ai_dubbing_rewrite_cb.setChecked(str(s.value("ai_dubbing_rewrite", "true")).lower() == "true")
-    if hasattr(gui, "audio_mix_preset_combo"):
-        preset_value = str(s.value("audio_mix_preset", gui.audio_mix_preset_combo.currentData() or "custom")).strip().lower()
-        preset_index = gui.audio_mix_preset_combo.findData(preset_value)
-        if preset_index >= 0:
-            gui.audio_mix_preset_combo.setCurrentIndex(preset_index)
     use_existing = str(s.value("use_existing_audio", "false")).lower() == "true"
     gui.use_existing_audio_radio.setChecked(use_existing)
     gui.use_generated_audio_radio.setChecked(not use_existing)

@@ -1,6 +1,7 @@
 import os
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QProgressBar,
     QRadioButton,
@@ -174,6 +176,21 @@ def _build_filter_slider_row(title: str, slider: QSlider, value_label: QLabel):
     return wrapper
 
 
+def _update_device_label(gui):
+    import os
+    cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
+    if cpu_mode:
+        gui.device_mode_label.setText("CPU mode")
+        gui.device_mode_label.setStyleSheet("font-size: 11px; color: #ffa500;")
+    else:
+        gpu_name = os.getenv("CAPCAP_GPU_NAME", "").strip()
+        if gpu_name:
+            gui.device_mode_label.setText(gpu_name)
+        else:
+            gui.device_mode_label.setText("GPU mode")
+        gui.device_mode_label.setStyleSheet("font-size: 11px; color: #4ecdc4;")
+
+
 def build_start_group(gui, left_layout):
     _build_hidden_status_widgets(gui)
 
@@ -185,9 +202,13 @@ def build_start_group(gui, left_layout):
     gui.final_output_folder_edit.setPlaceholderText("Folder to save final results...")
     gui.final_output_folder_edit.hide()
 
-    gui.run_all_btn = QPushButton("Generate")
+    gui.run_all_btn = QToolButton()
     gui.run_all_btn.setObjectName("mainActionBtn")
-    gui.run_all_btn.clicked.connect(gui.smart_generate)
+    gui.run_all_btn.setPopupMode(QToolButton.MenuButtonPopup)
+    gui._generate_full_action = QAction("Generate Full Pipeline", gui.run_all_btn)
+    gui._generate_full_action.triggered.connect(gui.run_all_pipeline)
+    gui.run_all_btn.setDefaultAction(gui._generate_full_action)
+    gui._generate_menu = None
 
     gui.export_btn = QPushButton("Export")
     gui.export_btn.setObjectName("mainActionBtn")
@@ -209,6 +230,11 @@ def build_start_group(gui, left_layout):
     workflow_title = QLabel("Workflow")
     workflow_title.setObjectName("statusHeadline")
     workflow_shell_layout.addWidget(workflow_title)
+
+    gui.device_mode_label = QLabel()
+    gui.device_mode_label.setObjectName("helperLabel")
+    _update_device_label(gui)
+    workflow_shell_layout.addWidget(gui.device_mode_label)
 
     tab_bar = QWidget()
     tab_bar_layout = QGridLayout(tab_bar)
@@ -250,13 +276,13 @@ def build_start_group(gui, left_layout):
 
     pages = []
     media_page, media_layout = _make_page("media")
+    audio_page, audio_layout = _make_page("audio")
     language_page, language_layout = _make_page("language")
     voice_page, voice_layout = _make_page("voice")
     style_page, style_layout = _make_page("style")
-    filter_page, filter_layout = _make_page("filter")
     advanced_page, advanced_layout = _make_page("advanced")
     gui.workflow_advanced_layout = advanced_layout
-    pages.extend([media_page, language_page, voice_page, style_page, filter_page, advanced_page])
+    pages.extend([media_page, audio_page, language_page, voice_page, style_page, advanced_page])
 
     def _add_tab(label: str, page_index: int, page_key: str, checked: bool = False):
         btn = QPushButton(label)
@@ -275,10 +301,11 @@ def build_start_group(gui, left_layout):
         return btn
 
     _add_tab("Media", 0, "media", checked=True)
-    _add_tab("Language", 1, "language")
-    _add_tab("Voice", 2, "voice")
-    _add_tab("Style", 3, "style")
-    _add_tab("Filter", 4, "filter")
+    gui.audio_tab_btn = _add_tab("Audio", 1, "audio")
+    gui.audio_tab_btn.setEnabled(False)
+    _add_tab("Language", 2, "language")
+    _add_tab("Voice", 3, "voice")
+    _add_tab("Style", 4, "style")
     _add_tab("Advanced", 5, "advanced")
     gui.show_progress_btn = QPushButton("Show Progress")
     gui.show_progress_btn.clicked.connect(gui.show_active_progress_dialog)
@@ -375,6 +402,22 @@ def build_start_group(gui, left_layout):
     output_scale_row.addWidget(gui.reset_framing_btn)
     output_quality_layout.addLayout(output_scale_row)
     output_layout.addWidget(output_quality_card)
+
+    audio_cleanup_card, audio_cleanup_layout = _section_card()
+    audio_cleanup_title = QLabel("Audio Processing")
+    audio_cleanup_title.setObjectName("sectionTitle")
+    audio_cleanup_layout.addWidget(audio_cleanup_title)
+    gui.audio_handling_combo = QComboBox()
+    gui.audio_handling_combo.addItem("Fast (recommended)", "fast")
+    gui.audio_handling_combo.addItem("Cleaner voice (remove original voice)", "clean")
+    gui.audio_handling_combo.setCurrentIndex(0)
+    audio_cleanup_layout.addWidget(gui.audio_handling_combo)
+    gui.audio_handling_hint_label = QLabel("Fast keeps original audio with voice. Cleaner removes original voice, keeping only background music.", gui)
+    gui.audio_handling_hint_label.setObjectName("helperLabel")
+    gui.audio_handling_hint_label.setWordWrap(True)
+    audio_cleanup_layout.addWidget(gui.audio_handling_hint_label)
+    output_layout.addWidget(audio_cleanup_card)
+
     media_layout.addWidget(output_card)
 
     language_card, language_layout = _build_collapsible_section("Language")
@@ -425,16 +468,19 @@ def build_start_group(gui, left_layout):
     gui.voice_speed_spin.addItems(["0.8x", "0.9x", "1.0x", "1.1x", "1.2x", "1.3x", "1.4x", "1.5x", "1.6x", "1.8x", "2.0x"])
     gui.voice_speed_spin.setCurrentText("1.0x")
     gui.voice_timing_sync_combo = QComboBox()
-    gui.voice_timing_sync_combo.addItems(["Off", "Smart", "Force"])
+    gui.voice_timing_sync_combo.addItems(["Off", "Smart", "Timeline Priority", "Force Fit"])
     gui.voice_timing_sync_combo.setCurrentText("Smart")
-    gui.audio_handling_combo = QComboBox()
-    gui.audio_handling_combo.addItem("Fast (recommended)", "fast")
-    gui.audio_handling_combo.addItem("Cleaner voice", "clean")
-    gui.audio_handling_combo.setCurrentIndex(0)
-    gui.audio_handling_hint_label = QLabel("Fast keeps things quick. Cleaner voice removes more background noise before voice generation.", gui)
-    gui.audio_handling_hint_label.setObjectName("helperLabel")
-    gui.audio_handling_hint_label.setWordWrap(True)
-    gui.audio_handling_hint_label.hide()
+
+    def _sync_voice_speed_enabled(_value: str = ""):
+        mode = gui.voice_timing_sync_combo.currentText().strip().lower()
+        gui.voice_speed_spin.setEnabled(mode != "off")
+    gui.voice_timing_sync_combo.currentTextChanged.connect(_sync_voice_speed_enabled)
+    _sync_voice_speed_enabled()
+
+    def _on_voice_timing_sync_changed(_value: str = ""):
+        if hasattr(gui, "timeline") and gui.timeline is not None:
+            gui.timeline.set_voice_sync_mode(gui.voice_timing_sync_combo.currentText())
+    _on_voice_timing_sync_changed()
     gui.free_voice_combo.currentIndexChanged.connect(gui.on_selected_voice_changed)
     gui.voice_engine_combo.currentIndexChanged.connect(gui.on_voice_engine_changed)
     gui.preview_voice_btn = QPushButton("Preview Selected Voice")
@@ -718,109 +764,69 @@ def build_start_group(gui, left_layout):
     gui.custom_settings_toggle_btn.toggled.connect(_toggle_custom_section)
     style_page.layout().addWidget(subtitle_card)
 
-    filter_shell, filter_shell_layout = _build_collapsible_section("Video Filter")
-    filter_presets_card, filter_presets_layout = _section_card()
-    filter_presets_title = QLabel("Preset")
-    filter_presets_title.setObjectName("sectionTitle")
-    filter_presets_layout.addWidget(filter_presets_title)
-    filter_preset_grid = QGridLayout()
-    filter_preset_grid.setContentsMargins(0, 0, 0, 0)
-    filter_preset_grid.setHorizontalSpacing(8)
-    filter_preset_grid.setVerticalSpacing(8)
-    gui.video_filter_preset_group = QButtonGroup(gui)
-    gui.video_filter_preset_group.setExclusive(True)
-    gui.video_filter_preset_buttons = {}
-    for idx, (preset_key, preset_label) in enumerate([
-        ("original", "Original"),
-        ("bright", "Bright"),
-        ("warm", "Warm"),
-        ("vivid", "Vivid"),
-        ("cool", "Cool"),
-        ("soft", "Soft"),
-    ]):
-        btn = _build_filter_preset_button(preset_label)
-        btn.setChecked(preset_key == "original")
-        btn.clicked.connect(lambda _checked=False, key=preset_key: gui.on_video_filter_preset_selected(key))
-        gui.video_filter_preset_group.addButton(btn)
-        gui.video_filter_preset_buttons[preset_key] = btn
-        filter_preset_grid.addWidget(btn, idx // 3, idx % 3)
-    filter_presets_layout.addLayout(filter_preset_grid)
-    filter_shell_layout.addWidget(filter_presets_card)
+    audio_mix_card, audio_mix_layout = _build_collapsible_section("Audio Mix", start_expanded=True)
+    audio_mix_inner_card, audio_mix_inner_layout = _section_card()
+    audio_mix_title = QLabel("Mix Style")
+    audio_mix_title.setObjectName("sectionTitle")
+    audio_mix_inner_layout.addWidget(audio_mix_title)
+    gui.audio_mix_preset_combo = QComboBox()
+    gui.audio_mix_preset_combo.addItem("Original Only", "original_only")
+    gui.audio_mix_preset_combo.addItem("Prefer Original", "prefer_original")
+    gui.audio_mix_preset_combo.addItem("Balanced", "balanced")
+    gui.audio_mix_preset_combo.addItem("Prefer Dub", "prefer_dub")
+    gui.audio_mix_preset_combo.addItem("Dub Only", "dub_only")
+    gui.audio_mix_preset_combo.addItem("Custom", "custom")
+    gui.audio_mix_preset_combo.setCurrentIndex(2)
+    audio_mix_inner_layout.addWidget(gui.audio_mix_preset_combo)
+    gui.audio_mix_preset_hint_label = QLabel("Presets set both track volumes. Manual adjustment switches to Custom.", gui)
+    gui.audio_mix_preset_hint_label.setObjectName("helperLabel")
+    gui.audio_mix_preset_hint_label.setWordWrap(True)
+    audio_mix_inner_layout.addWidget(gui.audio_mix_preset_hint_label)
+    audio_mix_layout.addWidget(audio_mix_inner_card)
 
-    intensity_card, intensity_layout = _section_card()
-    intensity_title = QLabel("Intensity")
-    intensity_title.setObjectName("sectionTitle")
-    intensity_layout.addWidget(intensity_title)
-    intensity_header = QHBoxLayout()
-    intensity_header.setContentsMargins(0, 0, 0, 0)
-    intensity_header.setSpacing(8)
-    intensity_hint = QLabel("Preset strength")
-    intensity_hint.setObjectName("helperLabel")
-    gui.video_filter_intensity_value_label = QLabel("75")
-    gui.video_filter_intensity_value_label.setObjectName("helperLabel")
-    gui.video_filter_intensity_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-    intensity_header.addWidget(intensity_hint)
-    intensity_header.addStretch(1)
-    intensity_header.addWidget(gui.video_filter_intensity_value_label)
-    intensity_layout.addLayout(intensity_header)
-    gui.video_filter_intensity_slider = QSlider(Qt.Horizontal)
-    gui.video_filter_intensity_slider.setRange(0, 100)
-    gui.video_filter_intensity_slider.setValue(75)
-    gui.video_filter_intensity_slider.valueChanged.connect(gui.on_video_filter_intensity_changed)
-    gui.video_filter_intensity_slider.sliderReleased.connect(gui.on_video_filter_slider_released)
-    intensity_layout.addWidget(gui.video_filter_intensity_slider)
-    filter_shell_layout.addWidget(intensity_card)
+    audio_tracks_card, audio_tracks_layout = _section_card()
+    tracks_title = QLabel("Track Volumes")
+    tracks_title.setObjectName("sectionTitle")
+    audio_tracks_layout.addWidget(tracks_title)
 
-    adjust_card, adjust_layout = _section_card()
-    adjust_title = QLabel("Adjust")
-    adjust_title.setObjectName("sectionTitle")
-    adjust_layout.addWidget(adjust_title)
-    gui.video_filter_adjust_sliders = {}
-    gui.video_filter_adjust_value_labels = {}
-    for field_key, field_label in (
-        ("brightness", "Brightness"),
-        ("contrast", "Contrast"),
-        ("saturation", "Saturation"),
-        ("temperature", "Temperature"),
-        ("highlights", "Highlights"),
-        ("shadows", "Shadows"),
-    ):
-        value_label = QLabel("0")
-        slider = QSlider(Qt.Horizontal)
-        slider.setRange(-100, 100)
-        slider.setValue(0)
-        slider.valueChanged.connect(lambda value, key=field_key: gui.on_video_filter_adjust_changed(key, value))
-        slider.sliderReleased.connect(gui.on_video_filter_slider_released)
-        gui.video_filter_adjust_sliders[field_key] = slider
-        gui.video_filter_adjust_value_labels[field_key] = value_label
-        adjust_layout.addWidget(_build_filter_slider_row(field_label, slider, value_label))
-    gui.video_filter_reset_adjust_btn = QPushButton("Reset Adjust")
-    gui.video_filter_reset_adjust_btn.clicked.connect(gui.reset_video_filter_adjustments)
-    gui.video_filter_reset_btn = QPushButton("Reset All")
-    gui.video_filter_reset_btn.clicked.connect(gui.reset_video_filters)
-    filter_action_row = QHBoxLayout()
-    filter_action_row.setContentsMargins(0, 0, 0, 0)
-    filter_action_row.setSpacing(8)
-    filter_action_row.addStretch(1)
-    gui.video_filter_apply_btn = QPushButton("Apply Filter")
-    gui.video_filter_apply_btn.clicked.connect(gui.apply_current_video_filter)
-    filter_action_row.addWidget(gui.video_filter_apply_btn)
-    filter_action_row.addWidget(gui.video_filter_reset_adjust_btn)
-    filter_action_row.addWidget(gui.video_filter_reset_btn)
-    adjust_layout.addLayout(filter_action_row)
-    gui.video_filter_render_status_label = QLabel("")
-    gui.video_filter_render_status_label.setObjectName("helperLabel")
-    gui.video_filter_render_status_label.setWordWrap(True)
-    gui.video_filter_render_status_label.hide()
-    adjust_layout.addWidget(gui.video_filter_render_status_label)
-    gui.video_filter_render_progress = QProgressBar()
-    gui.video_filter_render_progress.setRange(0, 0)
-    gui.video_filter_render_progress.setTextVisible(False)
-    gui.video_filter_render_progress.setFixedHeight(6)
-    gui.video_filter_render_progress.hide()
-    adjust_layout.addWidget(gui.video_filter_render_progress)
-    filter_shell_layout.addWidget(adjust_card)
-    filter_page.layout().addWidget(filter_shell)
+    a1_row = QHBoxLayout()
+    a1_label = QLabel("A1 Original")
+    a1_label.setMinimumWidth(100)
+    a1_row.addWidget(a1_label)
+    gui.audio_a1_volume_slider = QSlider(Qt.Horizontal)
+    gui.audio_a1_volume_slider.setMinimum(0)
+    gui.audio_a1_volume_slider.setMaximum(200)
+    gui.audio_a1_volume_slider.setValue(50)
+    gui.audio_a1_volume_slider.setTickInterval(50)
+    gui.audio_a1_volume_slider.setTickPosition(QSlider.TicksBelow)
+    a1_row.addWidget(gui.audio_a1_volume_slider, 1)
+    gui.audio_a1_volume_label = QLabel("50%")
+    gui.audio_a1_volume_label.setObjectName("helperLabel")
+    gui.audio_a1_volume_label.setMinimumWidth(40)
+    gui.audio_a1_volume_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    a1_row.addWidget(gui.audio_a1_volume_label)
+    audio_tracks_layout.addLayout(a1_row)
+
+    a2_row = QHBoxLayout()
+    a2_label = QLabel("TS1 Dub")
+    a2_label.setMinimumWidth(100)
+    a2_row.addWidget(a2_label)
+    gui.audio_a2_volume_slider = QSlider(Qt.Horizontal)
+    gui.audio_a2_volume_slider.setMinimum(0)
+    gui.audio_a2_volume_slider.setMaximum(200)
+    gui.audio_a2_volume_slider.setValue(100)
+    gui.audio_a2_volume_slider.setTickInterval(50)
+    gui.audio_a2_volume_slider.setTickPosition(QSlider.TicksBelow)
+    a2_row.addWidget(gui.audio_a2_volume_slider, 1)
+    gui.audio_a2_volume_label = QLabel("100%")
+    gui.audio_a2_volume_label.setObjectName("helperLabel")
+    gui.audio_a2_volume_label.setMinimumWidth(40)
+    gui.audio_a2_volume_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    a2_row.addWidget(gui.audio_a2_volume_label)
+    audio_tracks_layout.addLayout(a2_row)
+
+    audio_mix_layout.addWidget(audio_tracks_card)
+    audio_page.layout().addWidget(audio_mix_card)
 
     for page in pages:
         page.layout().addStretch()

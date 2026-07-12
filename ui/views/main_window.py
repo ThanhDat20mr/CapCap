@@ -87,6 +87,8 @@ def _build_header_bar(gui):
     gui.toggle_panel_btn.setToolTip("Toggle side panel")
     gui.toggle_panel_btn.setText("Controls")
     gui.toggle_panel_btn.clicked.connect(gui.toggle_controls_panel)
+    # Hide the toggle button - the workflow panel is always visible.
+    gui.toggle_panel_btn.setVisible(False)
     layout.addWidget(gui.toggle_panel_btn)
     layout.addSpacing(6)
 
@@ -196,14 +198,50 @@ def _connect_ui_signals(gui):
     if hasattr(gui, "output_quality_combo"):
         gui.output_quality_combo.currentIndexChanged.connect(gui.refresh_ui_state)
     gui.audio_handling_combo.currentTextChanged.connect(gui.refresh_ui_state)
-    if hasattr(gui, "preview_volume_down_btn"):
-        gui.preview_volume_down_btn.clicked.connect(gui.preview_volume_down)
-    if hasattr(gui, "preview_volume_up_btn"):
-        gui.preview_volume_up_btn.clicked.connect(gui.preview_volume_up)
-    if hasattr(gui, "preview_mute_btn"):
-        gui.preview_mute_btn.clicked.connect(gui.toggle_preview_mute)
-    if hasattr(gui, "preview_audio_track_combo"):
-        gui.preview_audio_track_combo.currentIndexChanged.connect(gui.on_preview_audio_track_changed)
+    if hasattr(gui, "audio_mix_preset_combo"):
+        gui.audio_mix_preset_combo.currentIndexChanged.connect(
+            gui.on_audio_mix_preset_changed
+        )
+    if hasattr(gui, "audio_a1_volume_slider"):
+        gui.audio_a1_volume_slider.valueChanged.connect(
+            gui.on_audio_a1_volume_changed
+        )
+    if hasattr(gui, "audio_a2_volume_slider"):
+        gui.audio_a2_volume_slider.valueChanged.connect(
+            gui.on_audio_a2_volume_changed
+        )
+    if hasattr(gui, "audio_inspector_gain_spin"):
+        gui.audio_inspector_gain_spin.valueChanged.connect(
+            gui.on_audio_inspector_gain_changed
+        )
+    if hasattr(gui, "audio_inspector_speed_spin"):
+        gui.audio_inspector_speed_spin.valueChanged.connect(
+            gui.on_audio_inspector_speed_changed
+        )
+    if hasattr(gui, "audio_inspector_fade_in_spin"):
+        gui.audio_inspector_fade_in_spin.valueChanged.connect(
+            gui.on_audio_inspector_fade_in_changed
+        )
+    if hasattr(gui, "audio_inspector_fade_out_spin"):
+        gui.audio_inspector_fade_out_spin.valueChanged.connect(
+            gui.on_audio_inspector_fade_out_changed
+        )
+    if hasattr(gui, "audio_inspector_mute_btn"):
+        gui.audio_inspector_mute_btn.toggled.connect(
+            gui.on_audio_inspector_mute_toggled
+        )
+    if hasattr(gui, "audio_inspector_solo_btn"):
+        gui.audio_inspector_solo_btn.toggled.connect(
+            gui.on_audio_inspector_solo_toggled
+        )
+    if hasattr(gui, "audio_inspector_regenerate_voice_btn"):
+        gui.audio_inspector_regenerate_voice_btn.clicked.connect(
+            gui.on_audio_inspector_regenerate_voice_clicked
+        )
+    if hasattr(gui, "blur_inspector_show_cb"):
+        gui.blur_inspector_show_cb.toggled.connect(
+            gui.on_blur_inspector_show_toggled
+        )
     if hasattr(gui, "preview_speed_combo"):
         gui.preview_speed_combo.currentIndexChanged.connect(gui.on_preview_speed_changed)
     gui.final_output_folder_edit.textChanged.connect(gui.voice_output_folder_edit.setText)
@@ -228,9 +266,8 @@ def _connect_ui_signals(gui):
     gui.translated_text.textChanged.connect(gui.refresh_ui_state)
     gui.translated_text.textChanged.connect(gui.schedule_live_subtitle_preview_refresh)
     gui.translated_text.textChanged.connect(gui.sync_segment_editor_from_hidden_text)
-    gui.show_original_subtitle_cb.toggled.connect(gui.toggle_original_subtitle_visibility)
-    if hasattr(gui, "anchor_subtitle_inspector_cb"):
-        gui.anchor_subtitle_inspector_cb.toggled.connect(gui.on_anchor_subtitle_inspector_toggled)
+    if hasattr(gui, "anchor_inspector_cb"):
+        gui.anchor_inspector_cb.toggled.connect(gui.on_anchor_inspector_toggled)
     gui.subtitle_font_combo.currentTextChanged.connect(gui.update_subtitle_preview_style)
     gui.subtitle_font_size_spin.valueChanged.connect(gui.update_subtitle_preview_style)
     gui.subtitle_animation_combo.currentTextChanged.connect(gui.on_subtitle_animation_changed)
@@ -272,6 +309,8 @@ def _connect_ui_signals(gui):
     if hasattr(gui, "subtitle_single_line_cb"):
         gui.subtitle_single_line_cb.toggled.connect(gui.on_subtitle_style_control_edited)
 
+    # add_layer_btn uses QMenu (connected via actions in preview_panel.py)
+
     gui.on_advanced_toggled(bool(getattr(gui, "toggle_advanced_btn", None) and gui.toggle_advanced_btn.isChecked()))
 
 
@@ -299,6 +338,9 @@ def _initialize_ui_state(gui):
     gui.video_filter_preview_timer.setSingleShot(True)
     gui.video_filter_preview_timer.setInterval(350)
     gui.video_filter_preview_timer.timeout.connect(gui.run_live_video_filter_preview)
+    # Inspector shell starts collapsed (handle only). The shell expands
+    # when the user clicks a track layer or toggles the inspector open.
+    gui._inspector_collapsed = True
     gui.last_extracted_audio = ""
     gui.last_vocals_path = ""
     gui.last_music_path = ""
@@ -313,7 +355,9 @@ def _initialize_ui_state(gui):
     gui.last_exact_preview_5s_path = ""
     gui.last_exact_preview_frame_path = ""
     gui._preview_video_has_burned_subtitles = False
-    gui._preview_audio_track_mode = "original"
+    gui._preview_audio_track_mode = "both"
+    gui._mute_original = False
+    gui._mute_dubbed = False
     gui._preview_audio_track_switching = False
     gui.live_preview_subtitle_path = ""
     gui.live_preview_ass_path = ""
@@ -335,7 +379,23 @@ def _initialize_ui_state(gui):
     gui.on_output_mode_changed(gui.output_mode_combo.currentText())
     gui.update_project_header()
     gui.refresh_ui_state()
-    gui.set_subtitle_inspector_details_visible(gui.is_subtitle_inspector_anchored(), sync=False)
+    # Restore anchor preference from settings. If user previously had
+    # the inspector anchored, keep it open; otherwise start collapsed.
+    if gui.is_subtitle_inspector_anchored():
+        gui._inspector_collapsed = False
+    else:
+        gui._inspector_collapsed = True
+    gui.set_inspector_collapsed(gui._inspector_collapsed)
+    # If collapsed on startup, switch the stack to default (no card) so
+    # only the handle is visible.
+    if gui._inspector_collapsed and hasattr(gui, "inspector_stack"):
+        gui.inspector_stack.setCurrentIndex(2)
+    # Sync shell width to current collapsed state
+    if hasattr(gui, "_sync_subtitle_inspector_shell_width"):
+        try:
+            gui._sync_subtitle_inspector_shell_width(visible=not gui._inspector_collapsed)
+        except Exception:
+            pass
     gui.sync_segment_editor_rows()
     gui.set_controls_panel_visible(False)
 

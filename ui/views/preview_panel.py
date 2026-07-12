@@ -6,22 +6,40 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
+    QStackedWidget,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from runtime_paths import asset_path
-from widgets import MpvVideoView, TimelineWidget, VideoView
+from widgets import MpvVideoView, VideoView
 from utils.icon_utils import load_icon
 from utils.media_backend import is_mpv_backend_available
+
+
+def _import_editor_timeline():
+    import importlib.util, os, sys
+    editor_dir = os.path.join(os.path.dirname(__file__), "editor")
+    path = os.path.join(editor_dir, "timeline.py")
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    spec = importlib.util.spec_from_file_location("editor_timeline", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.EditorTimeline
 
 
 def _set_preview_icon_button(button: QPushButton, icon_path: str, tooltip: str):
@@ -152,7 +170,8 @@ class OcrRegionOverlay(QWidget):
         if not self._is_requested_visible():
             self.hide()
             return
-        engine = os.getenv("TRANSCRIPTION_ENGINE", "whisper").strip().lower()
+        cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
+        engine = os.getenv("TRANSCRIPTION_ENGINE", "sensevoice" if cpu_mode else "whisper").strip().lower()
         if engine != "ocr":
             self.hide()
             return
@@ -523,12 +542,17 @@ def build_preview_panel(gui):
     gui.video_view = MpvVideoView() if is_mpv_backend_available() else VideoView()
     gui.video_view.setMinimumHeight(320)
     gui.video_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-    gui.timeline = TimelineWidget()
-    gui.timeline.seekRequested.connect(gui.set_position)
+    gui.timeline = _import_editor_timeline()()
+    gui.timeline.setMinimumHeight(360)
+    if hasattr(gui, "voice_timing_sync_combo"):
+        gui.timeline.set_voice_sync_mode(gui.voice_timing_sync_combo.currentText())
+    gui.timeline.seekRequestedMs.connect(gui.set_position)
     gui.timeline.segmentSelected.connect(gui.on_timeline_segment_selected)
     gui.timeline.segmentTimingEditStarted.connect(gui.on_timeline_segment_timing_edit_started)
     gui.timeline.segmentTimingChanged.connect(gui.on_timeline_segment_timing_changed)
     gui.timeline.zoomChanged.connect(lambda value: gui.timeline_zoom_label.setText(f"{value}%"))
+    gui.timeline.layerSelected.connect(gui.on_timeline_layer_selected)
+    gui.timeline.layoutChanged.connect(lambda: getattr(gui, '_sync_track_labels', lambda: None)())
     gui.time_label = QLabel("00:00 / 00:00")
     gui.time_label.setStyleSheet("font-weight: bold; min-width: 100px; color: #6ee7d6;")
 
@@ -560,6 +584,7 @@ def build_preview_panel(gui):
     gui.preview_btn = QPushButton()
     gui.blur_area_btn = QPushButton()
     gui.blur_area_btn.setCheckable(True)
+    gui.blur_area_btn.setChecked(True)
     gui.blur_add_btn = QPushButton()
     gui.ocr_region_btn = QPushButton()
     gui.ocr_region_btn.setCheckable(True)
@@ -567,24 +592,18 @@ def build_preview_panel(gui):
     _set_preview_icon_button(gui.stop_btn, os.path.join(icons_dir, "reset.svg"), "Reset preview to the beginning")
     _set_preview_icon_button(gui.preview_btn, os.path.join(icons_dir, "preview.svg"), "Render a fresh preview using current subtitle and audio")
     _set_preview_icon_button(gui.blur_area_btn, os.path.join(icons_dir, "blur.svg"), "Turn blur effect on or off")
-    gui.blur_add_btn.setText("+")
-    gui.blur_add_btn.setToolTip("Add another blur region")
-    gui.blur_add_btn.setFixedSize(38, 38)
-    gui.blur_add_btn.setStyleSheet("QPushButton { color: #ffc15e; font-weight: bold; font-size: 18px; padding: 0; }")
+    gui.blur_add_btn.setText("Blur")
+    gui.blur_add_btn.setToolTip("Add a blur region")
+    gui.blur_add_btn.setFixedSize(50, 38)
+    gui.blur_add_btn.setStyleSheet(
+        "QPushButton { color: #ffc15e; font-weight: bold; font-size: 13px; padding: 0; }"
+    )
     gui.ocr_region_btn.setText("OCR")
     gui.ocr_region_btn.setToolTip("Edit OCR subtitle region")
     gui.ocr_region_btn.setFixedSize(38, 38)
     gui.ocr_region_btn.setStyleSheet("QPushButton { color: #6ee7d6; font-weight: bold; font-size: 10px; padding: 0; }")
     gui.ocr_region_btn.hide()
 
-    gui.preview_volume_down_btn = QPushButton()
-    gui.preview_mute_btn = QPushButton()
-    gui.preview_volume_up_btn = QPushButton()
-    _set_preview_icon_button(gui.preview_volume_down_btn, os.path.join(icons_dir, "volume_down.svg"), "Lower preview volume")
-    _set_preview_icon_button(gui.preview_mute_btn, os.path.join(icons_dir, "volume_mute.svg"), "Mute preview")
-    _set_preview_icon_button(gui.preview_volume_up_btn, os.path.join(icons_dir, "volume_up.svg"), "Raise preview volume")
-    gui.preview_volume_label = QLabel("100%")
-    gui.preview_volume_label.setObjectName("helperLabel")
     gui.preview_speed_combo = QComboBox()
     gui.preview_speed_combo.addItem("0.75x", 0.75)
     gui.preview_speed_combo.addItem("1.0x", 1.0)
@@ -592,9 +611,6 @@ def build_preview_panel(gui):
     gui.preview_speed_combo.addItem("1.5x", 1.5)
     gui.preview_speed_combo.addItem("2.0x", 2.0)
     gui.preview_speed_combo.setCurrentIndex(1)
-    gui.preview_audio_track_combo = QComboBox()
-    gui.preview_audio_track_combo.setMinimumWidth(108)
-    gui.preview_audio_track_combo.addItem("Original", "original")
 
     play_group = QHBoxLayout()
     play_group.setSpacing(6)
@@ -604,21 +620,40 @@ def build_preview_panel(gui):
 
     blur_group = QHBoxLayout()
     blur_group.setSpacing(6)
-    blur_group.addWidget(gui.blur_area_btn)
+    # The blur ON/OFF toggle is controlled by clicking the B1
+    # track label in the timeline's left strip (like audio mute).
+    gui.blur_area_btn.setVisible(False)
+    # Dedicated Logo / Watermark button (beside the Blur button)
+    gui.add_logo_btn = QPushButton("Logo")
+    gui.add_logo_btn.setFixedSize(50, 38)
+    gui.add_logo_btn.setStyleSheet(
+        "QPushButton { color: #6ee7d6; font-weight: bold; font-size: 13px; padding: 0; }"
+    )
+    gui.add_logo_btn.setToolTip("Add a logo or watermark image to the video")
+    gui.add_logo_btn.clicked.connect(
+        lambda: gui.on_add_timeline_layer("logo") if hasattr(gui, "on_add_timeline_layer") else None
+    )
+    # Dedicated Mask button (beside the Logo button). Adds a new
+    # rectangular mask to the M1 track.
+    gui.add_mask_btn = QPushButton("Mask")
+    gui.add_mask_btn.setFixedSize(50, 38)
+    gui.add_mask_btn.setStyleSheet(
+        "QPushButton { color: #c98c5a; font-weight: bold; font-size: 13px; padding: 0; }"
+    )
+    gui.add_mask_btn.setToolTip("Add a rectangular mask to the video")
+    gui.add_mask_btn.clicked.connect(
+        lambda: gui.on_add_timeline_layer("mask") if hasattr(gui, "on_add_timeline_layer") else None
+    )
     blur_group.addWidget(gui.blur_add_btn)
+    blur_group.addWidget(gui.add_logo_btn)
+    blur_group.addWidget(gui.add_mask_btn)
     blur_group.addWidget(gui.ocr_region_btn)
 
-    volume_group = QHBoxLayout()
-    volume_group.setSpacing(6)
-    volume_group.addWidget(gui.preview_volume_down_btn)
-    volume_group.addWidget(gui.preview_mute_btn)
-    volume_group.addWidget(gui.preview_volume_up_btn)
-    volume_group.addWidget(gui.preview_volume_label)
-    volume_group.addStretch(0)
-    volume_group.addWidget(QLabel("Audio"))
-    volume_group.addWidget(gui.preview_audio_track_combo)
-    volume_group.addWidget(QLabel("Speed"))
-    volume_group.addWidget(gui.preview_speed_combo)
+    speed_group = QHBoxLayout()
+    speed_group.setSpacing(6)
+    speed_group.addStretch(0)
+    speed_group.addWidget(QLabel("Speed"))
+    speed_group.addWidget(gui.preview_speed_combo)
 
     transport_row = QHBoxLayout()
     transport_row.setContentsMargins(0, 0, 0, 0)
@@ -627,7 +662,8 @@ def build_preview_panel(gui):
     transport_row.addWidget(_make_sep())
     transport_row.addLayout(blur_group)
     transport_row.addWidget(_make_sep())
-    transport_row.addLayout(volume_group, 1)
+    transport_row.addLayout(speed_group, 1)
+    transport_row.addWidget(gui.time_label)
     preview_card_layout.addLayout(transport_row)
     gui.frame_preview_badge_label.setParent(preview_card)
     gui.frame_preview_badge_label.raise_()
@@ -677,7 +713,7 @@ def build_preview_panel(gui):
     timeline_meta.setObjectName("helperLabel")
     timeline_copy_layout.addWidget(timeline_title)
     timeline_copy_layout.addWidget(timeline_meta)
-    timeline_header_layout.addLayout(timeline_copy_layout, 1)
+    timeline_header_layout.addLayout(timeline_copy_layout, 0)
     gui.timeline_undo_btn = QPushButton("Undo")
     gui.timeline_undo_btn.setFixedWidth(58)
     gui.timeline_undo_btn.setEnabled(False)
@@ -690,32 +726,17 @@ def build_preview_panel(gui):
     gui.timeline_delete_btn = QPushButton("Delete")
     gui.timeline_delete_btn.setFixedWidth(62)
     gui.timeline_delete_btn.setEnabled(False)
-    gui.timeline_nudge_left_btn = QPushButton("<")
-    gui.timeline_nudge_left_btn.setFixedWidth(34)
-    gui.timeline_nudge_left_btn.setEnabled(False)
-    gui.timeline_nudge_right_btn = QPushButton(">")
-    gui.timeline_nudge_right_btn.setFixedWidth(34)
-    gui.timeline_nudge_right_btn.setEnabled(False)
-    gui.timeline_ripple_left_btn = QPushButton("<<")
-    gui.timeline_ripple_left_btn.setFixedWidth(40)
-    gui.timeline_ripple_left_btn.setEnabled(False)
-    gui.timeline_ripple_right_btn = QPushButton(">>")
-    gui.timeline_ripple_right_btn.setFixedWidth(40)
-    gui.timeline_ripple_right_btn.setEnabled(False)
     gui.timeline_undo_btn.clicked.connect(gui.undo_last_timeline_timing_edit)
     gui.timeline_redo_btn.clicked.connect(gui.redo_last_timeline_timing_edit)
     gui.timeline_split_btn.clicked.connect(gui.split_selected_timeline_segment)
     gui.timeline_delete_btn.clicked.connect(gui.delete_selected_timeline_segment)
-    gui.timeline_nudge_left_btn.clicked.connect(lambda: gui.nudge_selected_timeline_segment(-0.05))
-    gui.timeline_nudge_right_btn.clicked.connect(lambda: gui.nudge_selected_timeline_segment(0.05))
-    gui.timeline_ripple_left_btn.clicked.connect(lambda: gui.ripple_nudge_selected_timeline_segment(-0.05))
-    gui.timeline_ripple_right_btn.clicked.connect(lambda: gui.ripple_nudge_selected_timeline_segment(0.05))
     gui.timeline_zoom_out_btn = QPushButton("-")
     gui.timeline_zoom_out_btn.setFixedWidth(34)
     gui.timeline_zoom_label = QLabel(f"{gui.timeline.zoom_percent()}%")
     gui.timeline_zoom_label.setObjectName("helperLabel")
     gui.timeline_zoom_label.setAlignment(Qt.AlignCenter)
-    gui.timeline_zoom_label.setMinimumWidth(48)
+    gui.timeline_zoom_label.setFixedWidth(48)
+    gui.timeline_zoom_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
     gui.timeline_zoom_in_btn = QPushButton("+")
     gui.timeline_zoom_in_btn.setFixedWidth(34)
     gui.timeline_zoom_reset_btn = QPushButton("Fit")
@@ -725,6 +746,9 @@ def build_preview_panel(gui):
     gui.timeline_zoom_reset_btn.clicked.connect(gui.timeline.reset_zoom)
     gui.voice_timing_sync_label = QLabel("Sync")
     gui.voice_timing_sync_label.setObjectName("helperLabel")
+    gui.voice_timing_sync_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+    gui.voice_timing_sync_combo.setFixedWidth(140)
+    gui.voice_timing_sync_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
     edit_group = QHBoxLayout()
     edit_group.setSpacing(4)
@@ -733,12 +757,18 @@ def build_preview_panel(gui):
     edit_group.addWidget(gui.timeline_split_btn)
     edit_group.addWidget(gui.timeline_delete_btn)
 
-    nudge_group = QHBoxLayout()
-    nudge_group.setSpacing(4)
-    nudge_group.addWidget(gui.timeline_nudge_left_btn)
-    nudge_group.addWidget(gui.timeline_nudge_right_btn)
-    nudge_group.addWidget(gui.timeline_ripple_left_btn)
-    nudge_group.addWidget(gui.timeline_ripple_right_btn)
+    gui.add_layer_btn = QPushButton("+ Layer")
+    gui.add_layer_btn.setFixedWidth(62)
+    gui.add_layer_btn.setToolTip("Add a new layer")
+    gui.add_layer_btn.setEnabled(True)
+    gui._layer_menu = QMenu(gui.add_layer_btn)
+    gui._layer_menu.addAction("Subtitle", lambda: gui.on_add_timeline_layer("subtitle"))
+    gui._layer_menu.addAction("Text", lambda: gui.on_add_timeline_layer("text"))
+    gui._layer_menu.addAction("Image", lambda: gui.on_add_timeline_layer("image"))
+    gui._layer_menu.addAction("Logo / Watermark", lambda: gui.on_add_timeline_layer("logo"))
+    gui._layer_menu.addAction("Blur", lambda: gui.on_add_timeline_layer("blur"))
+    gui._layer_menu.addAction("Mask", lambda: gui.on_add_timeline_layer("mask"))
+    gui.add_layer_btn.setMenu(gui._layer_menu)
 
     view_group = QHBoxLayout()
     view_group.setSpacing(4)
@@ -746,22 +776,38 @@ def build_preview_panel(gui):
     view_group.addWidget(gui.timeline_zoom_label)
     view_group.addWidget(gui.timeline_zoom_in_btn)
     view_group.addWidget(gui.timeline_zoom_reset_btn)
+    view_group.addWidget(_make_sep())
     view_group.addWidget(gui.voice_timing_sync_label)
     view_group.addWidget(gui.voice_timing_sync_combo)
-    view_group.addWidget(gui.time_label)
 
     timeline_header_layout.addLayout(edit_group)
-    timeline_header_layout.addWidget(_make_sep())
-    timeline_header_layout.addLayout(nudge_group)
     timeline_header_layout.addWidget(_make_sep())
     timeline_header_layout.addLayout(view_group)
     timeline_layout.addLayout(timeline_header_layout)
 
     timeline_body_layout = QHBoxLayout()
     timeline_body_layout.setSpacing(0)
-    gui.timeline_track_labels = _build_timeline_track_labels(gui.timeline)
-    gui.timeline.layoutChanged.connect(gui.timeline_track_labels.sync_to_timeline)
-    timeline_body_layout.addWidget(gui.timeline_track_labels)
+
+    from views.editor.track_labels import TrackLabelBar
+    gui.track_label_bar = TrackLabelBar()
+    if hasattr(gui, "timeline"):
+        gui.track_label_bar.set_timeline(gui.timeline)
+    gui.track_label_bar.muteToggled.connect(gui.on_track_mute_toggled)
+    gui.track_label_bar.blurToggled.connect(gui.on_track_blur_toggled)
+    gui.track_label_bar.logoToggled.connect(gui.on_track_logo_toggled)
+    gui.track_label_bar.maskToggled.connect(gui.on_track_mask_toggled)
+
+    def _sync_labels():
+        if hasattr(gui, "timeline") and gui.timeline._timeline:
+            names = [t.name for t in gui.timeline._timeline.tracks]
+            heights = [gui.timeline._track_heights.get(t.id, 80) for t in gui.timeline._timeline.tracks]
+            locked = [t.locked for t in gui.timeline._timeline.tracks]
+            muted = [t.muted for t in gui.timeline._timeline.tracks]
+            gui.track_label_bar.set_tracks(names, heights, locked, muted)
+    gui._sync_track_labels = _sync_labels
+    _sync_labels()
+
+    timeline_body_layout.addWidget(gui.track_label_bar)
     timeline_body_layout.addWidget(gui.timeline, 1)
     timeline_layout.addLayout(timeline_body_layout)
 
@@ -784,14 +830,21 @@ def build_preview_panel(gui):
     inspector_shell_layout.setContentsMargins(0, 0, 0, 0)
     inspector_shell_layout.setSpacing(0)
 
+    # Stacked container: index 0 = subtitle inspector, 1 = audio track
+    # inspector, 2 = default/empty inspector. The active card is shown
+    # when the user clicks a layer on the matching track type.
+    inspector_stack = QStackedWidget()
+    inspector_stack.setMinimumWidth(400)
+    inspector_stack.setMaximumWidth(560)
+    gui.inspector_stack = inspector_stack
+
     inspector_card = QFrame()
     inspector_card.setObjectName("statusCard")
-    inspector_card.setMinimumWidth(360)
+    inspector_card.setMinimumWidth(400)
     inspector_card.setMaximumWidth(560)
-    gui.subtitle_inspector_card = inspector_card
     inspector_layout = QVBoxLayout(inspector_card)
-    inspector_layout.setContentsMargins(14, 14, 14, 14)
-    inspector_layout.setSpacing(10)
+    inspector_layout.setContentsMargins(10, 6, 10, 6)
+    inspector_layout.setSpacing(6)
 
     inspector_header = QHBoxLayout()
     inspector_header.setSpacing(8)
@@ -800,98 +853,573 @@ def build_preview_panel(gui):
     inspector_title = QLabel("Subtitle Inspector")
     inspector_title.setObjectName("statusHeadline")
     inspector_copy.addWidget(inspector_title)
-    gui.subtitle_inspector_summary_label = QLabel("Selected subtitle: none")
+    gui.subtitle_inspector_summary_label = QLabel("")
     gui.subtitle_inspector_summary_label.setObjectName("helperLabel")
     gui.subtitle_inspector_summary_label.setWordWrap(True)
+    gui.subtitle_inspector_summary_label.setVisible(False)
     inspector_copy.addWidget(gui.subtitle_inspector_summary_label)
     inspector_header.addLayout(inspector_copy, 1)
     inspector_header.addStretch(0)
     inspector_layout.addLayout(inspector_header)
 
-    gui.subtitle_inspector_details_widget = QWidget()
-    gui.subtitle_inspector_details_widget.setObjectName("segmentInspectorDetails")
-    inspector_details_layout = QVBoxLayout(gui.subtitle_inspector_details_widget)
-    inspector_details_layout.setContentsMargins(0, 0, 0, 0)
-    inspector_details_layout.setSpacing(10)
-
+    # --- Action buttons at top ---
     inspector_actions_row = QHBoxLayout()
     inspector_actions_row.setSpacing(8)
     gui.rewrite_translation_btn = QPushButton("Rewrite")
-    gui.rewrite_selected_segment_btn = QPushButton("Rewrite Selected Subtitle")
+    gui.rewrite_selected_segment_btn = QPushButton("Rewrite Selected")
     gui.import_translation_btn = QPushButton("Import SRT")
+    gui.audio_inspector_regenerate_voice_btn = QPushButton("Regenerate voice")
+    gui.audio_inspector_regenerate_voice_btn.setToolTip(
+        "Re-generate the dubbed voice for the currently selected segment."
+    )
+    gui.audio_inspector_regenerate_voice_btn.setEnabled(False)
     gui.rewrite_selected_segment_btn.clicked.connect(gui.run_rewrite_selected_segment)
     inspector_actions_row.addWidget(gui.rewrite_translation_btn)
     inspector_actions_row.addWidget(gui.rewrite_selected_segment_btn)
     inspector_actions_row.addWidget(gui.import_translation_btn)
+    inspector_actions_row.addWidget(gui.audio_inspector_regenerate_voice_btn)
+    inspector_actions_row.addStretch(1)
     inspector_layout.addLayout(inspector_actions_row)
 
-    gui.show_original_subtitle_cb = QCheckBox("Show original")
-    gui.show_original_subtitle_cb.setChecked(True)
-    gui.anchor_subtitle_inspector_cb = QCheckBox("Anchor Subtitle Inspector")
-    gui.anchor_subtitle_inspector_cb.setChecked(False)
-    gui.anchor_subtitle_inspector_cb.setToolTip("Keep Subtitle Inspector open while previewing and editing.")
-    inspector_toggle_row = QHBoxLayout()
-    inspector_toggle_row.setSpacing(10)
-    inspector_toggle_row.addWidget(gui.show_original_subtitle_cb)
-    inspector_toggle_row.addWidget(gui.anchor_subtitle_inspector_cb)
-    inspector_toggle_row.addStretch(1)
-    inspector_layout.addLayout(inspector_toggle_row)
+    # --- Shared section: Original text ---
+    gui.inspector_shared_original_label = QWidget()
+    _orig_layout = QHBoxLayout(gui.inspector_shared_original_label)
+    _orig_layout.setContentsMargins(0, 0, 0, 0)
+    _orig_layout.setSpacing(6)
+    _orig_icon = QLabel("\u25B6")
+    _orig_icon.setStyleSheet("color: #6ee7d6; font-size: 10px;")
+    _orig_icon.setFixedWidth(14)
+    _orig_layout.addWidget(_orig_icon)
+    gui.inspector_original_text_label = QLabel("")
+    gui.inspector_original_text_label.setObjectName("helperLabel")
+    gui.inspector_original_text_label.setWordWrap(True)
+    gui.inspector_original_text_label.setStyleSheet("color: #cfe6ff;")
+    _orig_layout.addWidget(gui.inspector_original_text_label, 1)
+    gui.inspector_shared_original_label.hide()
+    inspector_layout.addWidget(gui.inspector_shared_original_label)
 
-    inspector_nav_row = QHBoxLayout()
-    inspector_nav_row.setSpacing(8)
-    gui.segment_prev_btn = QPushButton("Prev")
-    gui.segment_prev_btn.clicked.connect(lambda: gui.step_selected_segment(-1))
-    gui.segment_next_btn = QPushButton("Next")
-    gui.segment_next_btn.clicked.connect(lambda: gui.step_selected_segment(1))
-    gui.segment_selection_label = QLabel("No subtitle selected")
-    gui.segment_selection_label.setObjectName("helperLabel")
-    inspector_nav_row.addWidget(gui.segment_prev_btn)
-    inspector_nav_row.addWidget(gui.segment_next_btn)
-    inspector_nav_row.addWidget(gui.segment_selection_label, 1)
-    inspector_layout.addLayout(inspector_nav_row)
-
-    gui.segment_editor_scroll = QScrollArea()
-    gui.segment_editor_scroll.setObjectName("segmentEditorScroll")
-    gui.segment_editor_scroll.setWidgetResizable(True)
-    gui.segment_editor_scroll.setFrameShape(QFrame.NoFrame)
     gui.segment_editor_container = QWidget()
     gui.segment_editor_container.setObjectName("segmentEditorContainer")
     gui.segment_editor_layout = QVBoxLayout(gui.segment_editor_container)
     gui.segment_editor_layout.setContentsMargins(0, 0, 0, 0)
     gui.segment_editor_layout.setSpacing(10)
-    gui.segment_editor_scroll.setWidget(gui.segment_editor_container)
-    inspector_details_layout.addWidget(gui.segment_editor_scroll, 1)
-    inspector_layout.addWidget(gui.subtitle_inspector_details_widget, 1)
-    gui.subtitle_inspector_details_widget.setVisible(False)
+    inspector_layout.addWidget(gui.segment_editor_container, 1)
 
-    inspector_handle = QFrame()
-    inspector_handle.setObjectName("subtitleInspectorHandle")
-    inspector_handle.setFixedWidth(34)
-    inspector_handle_layout = QVBoxLayout(inspector_handle)
-    inspector_handle_layout.setContentsMargins(0, 0, 0, 0)
-    inspector_handle_layout.setSpacing(0)
-    inspector_handle_layout.addStretch(1)
-    gui.subtitle_inspector_toggle_btn = QPushButton("◀")
-    gui.subtitle_inspector_toggle_btn.setCheckable(True)
-    gui.subtitle_inspector_toggle_btn.setChecked(False)
-    gui.subtitle_inspector_toggle_btn.setObjectName("subtitleInspectorHandleBtn")
-    gui.subtitle_inspector_toggle_btn.setFixedSize(28, 110)
-    gui.subtitle_inspector_toggle_btn.clicked.connect(lambda checked: gui.toggle_subtitle_inspector_details(bool(checked)))
-    inspector_handle_layout.addWidget(gui.subtitle_inspector_toggle_btn, 0, Qt.AlignHCenter)
-    inspector_handle_layout.addStretch(1)
+    # --- Audio Track Inspector ---
+    # Compact card: header + volume slider + mute/solo + gain/speed. The
+    # surrounding tool UI should not reflow when the user switches
+    # between subtitle and audio inspectors.
+    audio_inspector_card = QFrame()
+    audio_inspector_card.setObjectName("statusCard")
+    audio_inspector_card.setMinimumWidth(400)
+    audio_inspector_card.setMaximumWidth(560)
+    gui.audio_inspector_card = audio_inspector_card
+    audio_layout = QVBoxLayout(audio_inspector_card)
+    audio_layout.setContentsMargins(12, 10, 12, 10)
+    audio_layout.setSpacing(6)
 
-    inspector_shell_layout.addWidget(inspector_card, 1)
-    inspector_shell_layout.addWidget(inspector_handle, 0)
-    gui.subtitle_inspector_details_widget.setVisible(False)
+    audio_header = QHBoxLayout()
+    audio_header.setSpacing(6)
+    audio_header.setContentsMargins(0, 0, 0, 0)
+    audio_copy = QVBoxLayout()
+    audio_copy.setSpacing(0)
+    audio_copy.setContentsMargins(0, 0, 0, 0)
+    audio_title = QLabel("Audio")
+    audio_title.setObjectName("statusHeadline")
+    audio_copy.addWidget(audio_title)
+    # Information labels (track name, layer count) are kept for
+    # internal use (e.g. _current_audio_track_for_inspector reads
+    # the track name) but hidden from the user.
+    gui.audio_inspector_track_name_label = QLabel("-")
+    gui.audio_inspector_track_name_label.setObjectName("helperLabel")
+    gui.audio_inspector_track_name_label.setWordWrap(False)
+    gui.audio_inspector_track_name_label.setVisible(False)
+    audio_copy.addWidget(gui.audio_inspector_track_name_label)
+    gui.audio_inspector_layer_count_label = QLabel("-")
+    gui.audio_inspector_layer_count_label.setObjectName("helperLabel")
+    gui.audio_inspector_layer_count_label.setWordWrap(False)
+    gui.audio_inspector_layer_count_label.setVisible(False)
+    audio_copy.addWidget(gui.audio_inspector_layer_count_label)
+    audio_header.addLayout(audio_copy, 1)
+    audio_layout.addLayout(audio_header)
+
+    gui.audio_inspector_summary_label = QLabel("Select an audio track to view its settings.")
+    gui.audio_inspector_summary_label.setObjectName("helperLabel")
+    gui.audio_inspector_summary_label.setWordWrap(True)
+    audio_layout.addWidget(gui.audio_inspector_summary_label)
+
+    # Fade-in / Fade-out row
+    fade_row = QHBoxLayout()
+    fade_row.setSpacing(6)
+    fade_row.setContentsMargins(0, 0, 0, 0)
+    fade_in_label = QLabel("Fade In")
+    fade_in_label.setMinimumWidth(50)
+    fade_row.addWidget(fade_in_label)
+    gui.audio_inspector_fade_in_spin = QDoubleSpinBox()
+    gui.audio_inspector_fade_in_spin.setRange(0.0, 30.0)
+    gui.audio_inspector_fade_in_spin.setSingleStep(0.1)
+    gui.audio_inspector_fade_in_spin.setValue(0.0)
+    gui.audio_inspector_fade_in_spin.setSuffix(" s")
+    gui.audio_inspector_fade_in_spin.setMaximumWidth(80)
+    fade_row.addWidget(gui.audio_inspector_fade_in_spin)
+    fade_out_label = QLabel("Fade Out")
+    fade_out_label.setMinimumWidth(60)
+    fade_row.addWidget(fade_out_label)
+    gui.audio_inspector_fade_out_spin = QDoubleSpinBox()
+    gui.audio_inspector_fade_out_spin.setRange(0.0, 30.0)
+    gui.audio_inspector_fade_out_spin.setSingleStep(0.1)
+    gui.audio_inspector_fade_out_spin.setValue(0.0)
+    gui.audio_inspector_fade_out_spin.setSuffix(" s")
+    gui.audio_inspector_fade_out_spin.setMaximumWidth(80)
+    fade_row.addWidget(gui.audio_inspector_fade_out_spin)
+    fade_row.addStretch(1)
+    audio_layout.addLayout(fade_row)
+
+    # (dB gain and Speed sections were removed - too much clutter)
+    # (Mute/Solo buttons removed - mute now toggled by clicking the
+    # track label in the timeline's left strip)
+
+    # Helpful tip
+    gui.audio_inspector_tip_label = QLabel(
+        "Volume and gain affect this audio track during preview. "
+        "Mute toggles the track's audio output. Speed changes playback rate."
+    )
+    gui.audio_inspector_tip_label.setObjectName("helperLabel")
+    gui.audio_inspector_tip_label.setWordWrap(True)
+    audio_layout.addWidget(gui.audio_inspector_tip_label)
+
+    # Dub voice widgets are now in the inspector's Dub tab.
+    # audio_inspector_card only has volume/fade controls for A1 Audio.
+    gui.audio_inspector_dub_section = QWidget()
+    gui.audio_inspector_dub_section.setVisible(False)
+    audio_layout.addWidget(gui.audio_inspector_dub_section)
+    audio_layout.addStretch(1)
+
+    # --- Blur Track Inspector ---
+    blur_inspector_card = QFrame()
+    blur_inspector_card.setObjectName("statusCard")
+    blur_inspector_card.setMinimumWidth(400)
+    blur_inspector_card.setMaximumWidth(560)
+    gui.blur_inspector_card = blur_inspector_card
+    blur_layout = QVBoxLayout(blur_inspector_card)
+    blur_layout.setContentsMargins(12, 10, 12, 10)
+    blur_layout.setSpacing(6)
+
+    blur_title = QLabel("Blur")
+    blur_title.setObjectName("statusHeadline")
+    blur_layout.addWidget(blur_title)
+    gui.blur_inspector_track_name_label = QLabel("-")
+    gui.blur_inspector_track_name_label.setObjectName("helperLabel")
+    gui.blur_inspector_track_name_label.setVisible(False)
+    blur_layout.addWidget(gui.blur_inspector_track_name_label)
+    gui.blur_inspector_layer_count_label = QLabel("-")
+    gui.blur_inspector_layer_count_label.setObjectName("helperLabel")
+    gui.blur_inspector_layer_count_label.setVisible(False)
+    blur_layout.addWidget(gui.blur_inspector_layer_count_label)
+    gui.blur_inspector_summary_label = QLabel(
+        "Blur regions in this track. Toggle 'Show on preview' to hide "
+        "the visual blur effect without removing the layer."
+    )
+    gui.blur_inspector_summary_label.setObjectName("helperLabel")
+    gui.blur_inspector_summary_label.setWordWrap(True)
+    blur_layout.addWidget(gui.blur_inspector_summary_label)
+
+    # Show on preview toggle
+    show_row = QHBoxLayout()
+    show_row.setSpacing(4)
+    show_row.setContentsMargins(0, 0, 0, 0)
+    gui.blur_inspector_show_cb = QCheckBox("Show on preview")
+    gui.blur_inspector_show_cb.setChecked(True)
+    gui.blur_inspector_show_cb.setToolTip(
+        "When unchecked, the blur effect is hidden on the video preview. "
+        "The blur layers are still present in the timeline; only the "
+        "visual rendering is disabled."
+    )
+    show_row.addWidget(gui.blur_inspector_show_cb)
+    show_row.addStretch(1)
+    blur_layout.addLayout(show_row)
+
+    # --- Blur Radius ---
+    radius_row = QHBoxLayout()
+    radius_label = QLabel("Blur radius")
+    radius_label.setObjectName("sectionTitle")
+    radius_label.setFixedWidth(90)
+    radius_row.addWidget(radius_label)
+    gui.blur_inspector_radius_slider = QSlider(Qt.Horizontal)
+    gui.blur_inspector_radius_slider.setRange(1, 20)
+    gui.blur_inspector_radius_slider.setValue(20)
+    gui.blur_inspector_radius_slider.setToolTip(
+        "How strong the blur is (1 = light, 20 = heavy)."
+    )
+    radius_row.addWidget(gui.blur_inspector_radius_slider, 1)
+    gui.blur_inspector_radius_value_label = QLabel("20")
+    gui.blur_inspector_radius_value_label.setFixedWidth(28)
+    radius_row.addWidget(gui.blur_inspector_radius_value_label)
+    blur_layout.addLayout(radius_row)
+
+    # --- Blur Opacity ---
+    blur_opacity_row = QHBoxLayout()
+    blur_opacity_label = QLabel("Opacity")
+    blur_opacity_label.setObjectName("sectionTitle")
+    blur_opacity_label.setFixedWidth(90)
+    blur_opacity_row.addWidget(blur_opacity_label)
+    gui.blur_inspector_opacity_slider = QSlider(Qt.Horizontal)
+    gui.blur_inspector_opacity_slider.setRange(0, 100)
+    gui.blur_inspector_opacity_slider.setValue(100)
+    gui.blur_inspector_opacity_slider.setToolTip(
+        "Transparency of the blurred region (0% fully transparent, "
+        "100% fully visible)."
+    )
+    blur_opacity_row.addWidget(gui.blur_inspector_opacity_slider, 1)
+    gui.blur_inspector_opacity_value_label = QLabel("100%")
+    gui.blur_inspector_opacity_value_label.setFixedWidth(40)
+    blur_opacity_row.addWidget(gui.blur_inspector_opacity_value_label)
+    blur_layout.addLayout(blur_opacity_row)
+
+    # --- Pixelate toggle ---
+    pixelate_row = QHBoxLayout()
+    pixelate_label = QLabel("Pixelate")
+    pixelate_label.setObjectName("sectionTitle")
+    pixelate_label.setFixedWidth(90)
+    pixelate_row.addWidget(pixelate_label)
+    gui.blur_inspector_pixelate_cb = QCheckBox("Enable pixelate (mosaic)")
+    gui.blur_inspector_pixelate_cb.setChecked(False)
+    gui.blur_inspector_pixelate_cb.setToolTip(
+        "Replace the blur with a mosaic / pixelate effect over the region."
+    )
+    pixelate_row.addWidget(gui.blur_inspector_pixelate_cb)
+    pixelate_row.addStretch(1)
+    blur_layout.addLayout(pixelate_row)
+
+    # --- Pixelate size ---
+    pixel_size_row = QHBoxLayout()
+    pixel_size_label = QLabel("Pixel size")
+    pixel_size_label.setObjectName("sectionTitle")
+    pixel_size_label.setFixedWidth(90)
+    pixel_size_row.addWidget(pixel_size_label)
+    gui.blur_inspector_pixel_size_slider = QSlider(Qt.Horizontal)
+    gui.blur_inspector_pixel_size_slider.setRange(2, 60)
+    gui.blur_inspector_pixel_size_slider.setValue(12)
+    gui.blur_inspector_pixel_size_slider.setToolTip(
+        "Mosaic cell size in pixels (larger = chunkier pixels)."
+    )
+    pixel_size_row.addWidget(gui.blur_inspector_pixel_size_slider, 1)
+    gui.blur_inspector_pixel_size_value_label = QLabel("12")
+    gui.blur_inspector_pixel_size_value_label.setFixedWidth(28)
+    pixel_size_row.addWidget(gui.blur_inspector_pixel_size_value_label)
+    blur_layout.addLayout(pixel_size_row)
+
+    gui.blur_inspector_tip_label = QLabel(
+        "Each click of the 'Blur' button adds a new blur region to this "
+        "track. Toggle 'Show on preview' to hide the visual blur while "
+        "keeping the layers."
+    )
+    gui.blur_inspector_tip_label.setObjectName("helperLabel")
+    gui.blur_inspector_tip_label.setWordWrap(True)
+    blur_layout.addWidget(gui.blur_inspector_tip_label)
+    blur_layout.addStretch(1)
+
+    # --- Logo Track Inspector ---
+    logo_inspector_card = QFrame()
+    logo_inspector_card.setObjectName("statusCard")
+    logo_inspector_card.setMinimumWidth(400)
+    logo_inspector_card.setMaximumWidth(560)
+    gui.logo_inspector_card = logo_inspector_card
+    logo_layout = QVBoxLayout(logo_inspector_card)
+    logo_layout.setContentsMargins(12, 10, 12, 10)
+    logo_layout.setSpacing(6)
+
+    logo_title = QLabel("L1 Logo")
+    logo_title.setObjectName("statusHeadline")
+    logo_layout.addWidget(logo_title)
+    gui.logo_inspector_summary_label = QLabel(
+        "Adjust the watermark image on the video. Drag the logo on the "
+        "preview to reposition; use the controls below for opacity and "
+        "rotation."
+    )
+    gui.logo_inspector_summary_label.setObjectName("helperLabel")
+    gui.logo_inspector_summary_label.setWordWrap(True)
+    logo_layout.addWidget(gui.logo_inspector_summary_label)
+
+    # --- Opacity ---
+    opacity_row = QHBoxLayout()
+    opacity_label = QLabel("Opacity")
+    opacity_label.setObjectName("sectionTitle")
+    opacity_label.setFixedWidth(90)
+    opacity_row.addWidget(opacity_label)
+    gui.logo_inspector_opacity_slider = QSlider(Qt.Horizontal)
+    gui.logo_inspector_opacity_slider.setRange(0, 100)
+    gui.logo_inspector_opacity_slider.setValue(100)
+    gui.logo_inspector_opacity_slider.setToolTip(
+        "Set the transparency of the logo (0% invisible, 100% fully visible)."
+    )
+    opacity_row.addWidget(gui.logo_inspector_opacity_slider, 1)
+    gui.logo_inspector_opacity_value_label = QLabel("100%")
+    gui.logo_inspector_opacity_value_label.setFixedWidth(40)
+    opacity_row.addWidget(gui.logo_inspector_opacity_value_label)
+    logo_layout.addLayout(opacity_row)
+
+    # --- Rotation ---
+    rotation_row = QHBoxLayout()
+    rotation_label = QLabel("Rotation")
+    rotation_label.setObjectName("sectionTitle")
+    rotation_label.setFixedWidth(90)
+    rotation_row.addWidget(rotation_label)
+    gui.logo_inspector_rotation_slider = QSlider(Qt.Horizontal)
+    gui.logo_inspector_rotation_slider.setRange(-180, 180)
+    gui.logo_inspector_rotation_slider.setValue(0)
+    gui.logo_inspector_rotation_slider.setToolTip(
+        "Rotate the logo in degrees (-180 to 180)."
+    )
+    rotation_row.addWidget(gui.logo_inspector_rotation_slider, 1)
+    gui.logo_inspector_rotation_value_label = QLabel("0°")
+    gui.logo_inspector_rotation_value_label.setFixedWidth(40)
+    rotation_row.addWidget(gui.logo_inspector_rotation_value_label)
+    logo_layout.addLayout(rotation_row)
+
+    gui.logo_inspector_tip_label = QLabel(
+        "Tip: drag the logo on the video preview to reposition it; "
+        "use the corner handles to resize. The X button deletes the logo."
+    )
+    gui.logo_inspector_tip_label.setObjectName("helperLabel")
+    gui.logo_inspector_tip_label.setWordWrap(True)
+    logo_layout.addWidget(gui.logo_inspector_tip_label)
+    logo_layout.addStretch(1)
+
+    # --- Mask Track Inspector ---
+    # The mask is a rectangular region that changes the colour of the
+    # underlying video. The user positions / resizes the region via
+    # the draggable overlay (move = drag middle, resize = drag
+    # corners, delete = X button). The inspector only exposes the
+    # colour + opacity; position, size, and mode are not configurable
+    # here. The mask is only applied to the video while the player
+    # is playing (it is cleared on pause / stop).
+    mask_inspector_card = QFrame()
+    mask_inspector_card.setObjectName("statusCard")
+    mask_inspector_card.setMinimumWidth(400)
+    mask_inspector_card.setMaximumWidth(560)
+    gui.mask_inspector_card = mask_inspector_card
+    mask_layout = QVBoxLayout(mask_inspector_card)
+    mask_layout.setContentsMargins(12, 10, 12, 10)
+    mask_layout.setSpacing(6)
+
+    mask_title = QLabel("M1 Mask")
+    mask_title.setObjectName("statusHeadline")
+    mask_layout.addWidget(mask_title)
+    gui.mask_inspector_summary_label = QLabel(
+        "Drag the mask on the video to move it. Drag a corner to "
+        "resize. The X button deletes the mask. The mask is applied "
+        "while the video is playing."
+    )
+    gui.mask_inspector_summary_label.setObjectName("helperLabel")
+    gui.mask_inspector_summary_label.setWordWrap(True)
+    mask_layout.addWidget(gui.mask_inspector_summary_label)
+
+    # --- Colour ---
+    color_row = QHBoxLayout()
+    color_label = QLabel("Colour")
+    color_label.setObjectName("sectionTitle")
+    color_label.setFixedWidth(90)
+    color_row.addWidget(color_label)
+    gui.mask_inspector_color_btn = QPushButton("#000000")
+    gui.mask_inspector_color_btn.setFixedWidth(110)
+    gui.mask_inspector_color_btn.setToolTip(
+        "Pick the colour that the mask will paint over the selected "
+        "region while the video is playing."
+    )
+    color_row.addWidget(gui.mask_inspector_color_btn)
+    color_row.addStretch(1)
+    mask_layout.addLayout(color_row)
+
+    # --- Opacity ---
+    m_opacity_row = QHBoxLayout()
+    m_opacity_label = QLabel("Opacity")
+    m_opacity_label.setObjectName("sectionTitle")
+    m_opacity_label.setFixedWidth(90)
+    m_opacity_row.addWidget(m_opacity_label)
+    gui.mask_inspector_opacity_slider = QSlider(Qt.Horizontal)
+    gui.mask_inspector_opacity_slider.setRange(0, 100)
+    gui.mask_inspector_opacity_slider.setValue(100)
+    gui.mask_inspector_opacity_slider.setToolTip(
+        "Mask transparency (0% invisible, 100% fully visible)."
+    )
+    m_opacity_row.addWidget(gui.mask_inspector_opacity_slider, 1)
+    gui.mask_inspector_opacity_value_label = QLabel("100%")
+    gui.mask_inspector_opacity_value_label.setFixedWidth(40)
+    m_opacity_row.addWidget(gui.mask_inspector_opacity_value_label)
+    mask_layout.addLayout(m_opacity_row)
+
+    gui.mask_inspector_tip_label = QLabel(
+        "Tip: position and resize the mask on the video preview. The "
+        "mask effect is only applied while the player is playing; it "
+        "is cleared on pause / stop."
+    )
+    gui.mask_inspector_tip_label.setObjectName("helperLabel")
+    gui.mask_inspector_tip_label.setWordWrap(True)
+    mask_layout.addWidget(gui.mask_inspector_tip_label)
+    mask_layout.addStretch(1)
+
+    # --- Default / empty inspector ---
+    default_inspector_card = QFrame()
+    default_inspector_card.setObjectName("statusCard")
+    default_inspector_card.setMinimumWidth(400)
+    default_inspector_card.setMaximumWidth(560)
+    gui.default_inspector_card = default_inspector_card
+    default_layout = QVBoxLayout(default_inspector_card)
+    default_layout.setContentsMargins(14, 14, 14, 14)
+    default_layout.setSpacing(10)
+    default_title = QLabel("Track Inspector")
+    default_title.setObjectName("statusHeadline")
+    default_layout.addWidget(default_title)
+    gui.default_inspector_summary_label = QLabel(
+        "Click a layer on a track to view its settings."
+    )
+    gui.default_inspector_summary_label.setObjectName("helperLabel")
+    gui.default_inspector_summary_label.setWordWrap(True)
+    default_layout.addWidget(gui.default_inspector_summary_label)
+    default_layout.addStretch(1)
+
+    # --- Video inspector (V1 Video track) ---
+    video_inspector_card = QFrame()
+    video_inspector_card.setObjectName("statusCard")
+    video_inspector_card.setMinimumWidth(400)
+    video_inspector_card.setMaximumWidth(560)
+    gui.video_inspector_card = video_inspector_card
+    video_layout = QVBoxLayout(video_inspector_card)
+    video_layout.setContentsMargins(14, 14, 14, 14)
+    video_layout.setSpacing(10)
+    video_title = QLabel("V1 Video")
+    video_title.setObjectName("statusHeadline")
+    video_layout.addWidget(video_title)
+    gui.video_inspector_summary_label = QLabel(
+        "Adjust the look of the original video. The filter is applied to the "
+        "export and the live preview."
+    )
+    gui.video_inspector_summary_label.setObjectName("helperLabel")
+    gui.video_inspector_summary_label.setWordWrap(True)
+    video_layout.addWidget(gui.video_inspector_summary_label)
+
+    # --- Preset ---
+    preset_row = QHBoxLayout()
+    preset_label = QLabel("Preset")
+    preset_label.setObjectName("sectionTitle")
+    preset_row.addWidget(preset_label)
+    gui.video_inspector_preset_combo = QComboBox()
+    gui.video_inspector_preset_combo.setToolTip("Choose a video filter preset.")
+    preset_row.addWidget(gui.video_inspector_preset_combo, 1)
+    video_layout.addLayout(preset_row)
+
+    # --- Intensity ---
+    intensity_row = QHBoxLayout()
+    intensity_label = QLabel("Intensity")
+    intensity_label.setObjectName("sectionTitle")
+    intensity_row.addWidget(intensity_label)
+    gui.video_inspector_intensity_slider = QSlider(Qt.Horizontal)
+    gui.video_inspector_intensity_slider.setRange(0, 100)
+    gui.video_inspector_intensity_slider.setToolTip(
+        "How strongly the preset is applied (0 = off, 100 = full)."
+    )
+    intensity_row.addWidget(gui.video_inspector_intensity_slider, 1)
+    gui.video_inspector_intensity_value_label = QLabel("0")
+    gui.video_inspector_intensity_value_label.setFixedWidth(28)
+    intensity_row.addWidget(gui.video_inspector_intensity_value_label)
+    video_layout.addLayout(intensity_row)
+
+    # --- Adjust sliders (brightness/contrast/saturation/...) ---
+    gui.video_inspector_adjust_sliders = {}
+    adjust_fields = [
+        ("brightness", "Brightness"),
+        ("contrast", "Contrast"),
+        ("saturation", "Saturation"),
+        ("temperature", "Temperature"),
+        ("gamma", "Gamma"),
+        ("hue", "Hue"),
+    ]
+    for field_key, field_label in adjust_fields:
+        row = QHBoxLayout()
+        lbl = QLabel(field_label)
+        lbl.setObjectName("sectionTitle")
+        lbl.setFixedWidth(90)
+        row.addWidget(lbl)
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(-100, 100)
+        slider.setValue(0)
+        row.addWidget(slider, 1)
+        value_lbl = QLabel("0")
+        value_lbl.setFixedWidth(28)
+        row.addWidget(value_lbl)
+        gui.video_inspector_adjust_sliders[field_key] = (slider, value_lbl)
+        video_layout.addLayout(row)
+
+    # --- Status + Apply / Revert ---
+    gui.video_inspector_status_label = QLabel("")
+    gui.video_inspector_status_label.setObjectName("helperLabel")
+    gui.video_inspector_status_label.setWordWrap(True)
+    video_layout.addWidget(gui.video_inspector_status_label)
+    action_row = QHBoxLayout()
+    gui.video_inspector_apply_btn = QPushButton("Apply")
+    gui.video_inspector_apply_btn.setToolTip("Apply the filter to the live preview.")
+    gui.video_inspector_revert_btn = QPushButton("Revert")
+    gui.video_inspector_revert_btn.setToolTip("Revert the live preview to the source video.")
+    action_row.addWidget(gui.video_inspector_apply_btn)
+    action_row.addWidget(gui.video_inspector_revert_btn)
+    action_row.addStretch(1)
+    video_layout.addLayout(action_row)
+    video_layout.addStretch(1)
+
+    # Wire the stack. Each card is wrapped in a QScrollArea so tall
+    # content (audio sliders, blur settings, etc.) can scroll instead
+    # of being clipped by the fixed shell width.
+    def _wrap_in_scroll(card_widget):
+        # Wrap each card in a QScrollArea so the inspector content
+        # is scrollable when it exceeds the available height. The
+        # subtitle card's own internal scroll area is flattened
+        # (see below) to avoid nested scroll layers.
+        scroll = QScrollArea()
+        scroll.setObjectName("inspectorCardScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(card_widget)
+        return scroll
+
+    gui.inspector_stack.addWidget(_wrap_in_scroll(inspector_card))        # 0: subtitle
+    gui.inspector_stack.addWidget(_wrap_in_scroll(audio_inspector_card))  # 1: audio
+    gui.inspector_stack.addWidget(_wrap_in_scroll(blur_inspector_card))   # 2: blur
+    gui.inspector_stack.addWidget(_wrap_in_scroll(video_inspector_card))  # 3: video (V1)
+    gui.inspector_stack.addWidget(_wrap_in_scroll(default_inspector_card))  # 4: default
+    gui.inspector_stack.addWidget(_wrap_in_scroll(logo_inspector_card))   # 5: logo (L1)
+    gui.inspector_stack.addWidget(_wrap_in_scroll(mask_inspector_card))   # 6: mask (M1)
+    gui.subtitle_inspector_card = inspector_card
+    gui.inspector_stack.setCurrentIndex(4)
+
+    # Style the scroll bar so it matches the dark theme
+    gui.inspector_stack.setStyleSheet(
+        "QScrollArea#inspectorCardScroll { background: transparent; border: none; }"
+        "QScrollBar:vertical { border: none; background: #142030; width: 10px; margin: 0; }"
+        "QScrollBar::handle:vertical { background: #35506f; min-height: 30px; border-radius: 5px; }"
+        "QScrollBar::handle:vertical:hover { background: #416287; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+    )
+
+    # Collapse handle strip removed - the track inspector is always
+    # expanded. Previously this contained a toggle button and a pin
+    # icon; both are now hidden and the empty strip has been removed.
+    inspector_shell_layout.addWidget(gui.inspector_stack, 1)
+
     gui.subtitle_inspector_shell = inspector_shell
-    gui.subtitle_inspector_handle = inspector_handle
-    inspector_shell.setFixedWidth(max(34, inspector_handle.sizeHint().width() or inspector_handle.width() or 34))
+    # Initial width; the actual value is recomputed by
+    # `_sync_subtitle_inspector_shell_width` based on the active card.
+    inspector_shell.setMinimumWidth(34)
+    inspector_shell.setMaximumWidth(800)
 
     workspace_row = QHBoxLayout()
     workspace_row.setSpacing(10)
-    workspace_row.addWidget(preview_card, 1)
-    workspace_row.addWidget(inspector_shell, 0)
+    # Inspector takes more horizontal space than the preview so the
+    # audio/subtitle controls and segment editor are comfortable.
+    workspace_row.addWidget(preview_card, 2)
+    workspace_row.addWidget(inspector_shell, 3)
 
-    right_layout.addLayout(workspace_row, 5)
-    right_layout.addWidget(timeline_card, 3)
+    right_layout.addLayout(workspace_row, 3)
+    right_layout.addWidget(timeline_card, 5)
     return right_panel

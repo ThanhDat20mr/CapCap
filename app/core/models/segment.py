@@ -36,6 +36,12 @@ class Segment:
         for key in ("tts_group_id", "tts_group_start", "tts_group_end"):
             if key in data and key not in metadata:
                 metadata[key] = data.get(key)
+        raw_ae = data.get("_audio_end")
+        if raw_ae is not None and "_audio_end" not in metadata:
+            try:
+                metadata["_audio_end"] = float(raw_ae)
+            except (TypeError, ValueError):
+                pass
         return cls(
             id=int(segment_id or 0),
             start=float(data.get("start", 0.0) or 0.0),
@@ -118,6 +124,12 @@ class Segment:
             payload["manual_highlights"] = list(self.metadata.get("manual_highlights") or [])
         if self.metadata.get("auto_highlights"):
             payload["auto_highlights"] = list(self.metadata.get("auto_highlights") or [])
+        raw_ae = self.metadata.get("_audio_end")
+        if raw_ae is not None:
+            try:
+                payload["_audio_end"] = float(raw_ae)
+            except (TypeError, ValueError):
+                pass
         return payload
 
     def to_original_subtitle_dict(self) -> dict[str, Any]:

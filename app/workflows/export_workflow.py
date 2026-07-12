@@ -150,13 +150,19 @@ class ExportWorkflow:
         output_fill_focus_y=0.5,
         output_fps=None,
         video_filter_state=None,
+        mask_regions=None,
+        logo_layers=None,
     ):
+        print(f"[Export] _export_subtitle_video: mask_regions={mask_regions}, logo_layers={logo_layers}")
+        print(f"[Export] ass_path={ass_path}, exists={os.path.exists(ass_path) if ass_path else False}")
         if ass_path and os.path.exists(ass_path):
             ok = self.engine_runtime.embed_ass_subtitles(
                 video_path,
                 ass_path,
                 output_path,
                 blur_region=subtitle_style.get("blur_region"),
+                mask_regions=mask_regions,
+                logo_layers=logo_layers,
                 target_width=target_width,
                 target_height=target_height,
                 output_scale_mode=output_scale_mode,
@@ -171,6 +177,8 @@ class ExportWorkflow:
                 srt_path,
                 output_path,
                 subtitle_style=self._subtitle_options(subtitle_style),
+                mask_regions=mask_regions,
+                logo_layers=logo_layers,
                 target_width=target_width,
                 target_height=target_height,
                 output_scale_mode=output_scale_mode,
@@ -181,6 +189,119 @@ class ExportWorkflow:
             )
         if not ok:
             raise RuntimeError("Failed to burn subtitles into the output video.")
+
+    def _extract_overlay_layers(self, state):
+        """Extract mask and logo layers from project state for export."""
+        mask_regions = []
+        logo_layers = []
+        
+        if not state:
+            print("[Export] No project state available, skipping overlay extraction")
+            return mask_regions, logo_layers
+        
+        try:
+            # Extract logo layers from timeline
+            timeline_data = state.artifacts.get("timeline")
+            print(f"[Export] timeline artifact: {timeline_data}")
+            if timeline_data:
+                import json
+                # timeline_data is a file path, not JSON string
+                if isinstance(timeline_data, str) and os.path.exists(timeline_data):
+                    print(f"[Export] Reading timeline from file: {timeline_data}")
+                    try:
+                        with open(timeline_data, "r", encoding="utf-8") as f:
+                            timeline_data = json.load(f)
+                    except (json.JSONDecodeError, IOError) as e:
+                        print(f"[Export] Failed to read timeline file: {e}")
+                        timeline_data = None
+                elif isinstance(timeline_data, str) and timeline_data.strip():
+                    # Fallback: try parsing as JSON string (legacy format)
+                    try:
+                        timeline_data = json.loads(timeline_data)
+                    except json.JSONDecodeError:
+                        timeline_data = None
+            
+            if timeline_data and isinstance(timeline_data, dict):
+                tracks = timeline_data.get("tracks", [])
+                print(f"[Export] Found {len(tracks)} track(s) in timeline")
+                for track in tracks:
+                    track_type = track.get("type", "")
+                    track_name = track.get("name", "")
+                    layers = track.get("layers", [])
+                    print(f"[Export] Checking track: name='{track_name}' type='{track_type}' has {len(layers)} layer(s)")
+                    
+                    # Extract mask regions from mask track (type="mask")
+                    if track_type == "mask":
+                        for layer in layers:
+                            try:
+                                mask_regions.append({
+                                    "x": float(layer.get("position_x", 0.3)),
+                                    "y": float(layer.get("position_y", 0.4)),
+                                    "width": float(layer.get("width", 0.4)),
+                                    "height": float(layer.get("height", 0.2)),
+                                    "color": str(layer.get("color", "#000000")),
+                                    "mode": str(layer.get("mode", "solid")),
+                                    "opacity": float(layer.get("opacity", 1.0)),
+                                    "pixelate_size": int(layer.get("pixelate_size", 12)),
+                                    "blur_strength": int(layer.get("blur_strength", 20)),
+                                })
+                            except (TypeError, ValueError):
+                                continue
+                        print(f"[Export] Extracted {len(mask_regions)} mask region(s) from mask track")
+                    
+                    # Extract logo/image layers from image track (type="image")
+                    if track_type == "image":
+                        for layer in layers:
+                            if layer.get("visible", True):
+                                source = layer.get("source", "")
+                                if not source:
+                                    continue
+                                transform = layer.get("transform", {})
+                                # Transform x,y are in pixels, need to normalize to 0-1
+                                # For now, assume they are percentages (0-100) and convert to 0-1
+                                x = float(transform.get("x", 10.0)) / 100.0
+                                y = float(transform.get("y", 10.0)) / 100.0
+                                # Scale is relative, assume 0.2 (20%) as base size
+                                scale_x = float(transform.get("scale_x", 1.0))
+                                scale_y = float(transform.get("scale_y", 1.0))
+                                w = 0.2 * scale_x
+                                h = 0.2 * scale_y
+                                logo_layers.append({
+                                    "source": str(source),
+                                    "x": x,
+                                    "y": y,
+                                    "width": w,
+                                    "height": h,
+                                    "opacity": float(layer.get("opacity", 1.0)),
+                                    "rotation": float(transform.get("rotation", 0.0)),
+                                })
+                                print(f"[Export] Added logo layer: source={source}, x={x}, y={y}, w={w}, h={h}")
+            
+            # Fallback: extract mask regions from settings if not found in timeline
+            if not mask_regions:
+                mask_state = state.settings.get("mask_state", {})
+                print(f"[Export] Fallback: checking settings mask_state: {mask_state}")
+                if mask_state and mask_state.get("enabled", False):
+                    regions = mask_state.get("regions", [])
+                    print(f"[Export] Found {len(regions)} mask region(s) in settings")
+                    for region in regions:
+                        mask_regions.append({
+                            "x": float(region.get("x", 0.3)),
+                            "y": float(region.get("y", 0.4)),
+                            "width": float(region.get("width", 0.4)),
+                            "height": float(region.get("height", 0.2)),
+                            "mode": str(region.get("mode", "solid")),
+                            "color": str(region.get("color", "#000000")),
+                            "pixelate_size": int(region.get("pixelate_size", 12)),
+                            "blur_strength": int(region.get("blur_strength", 20)),
+                        })
+        except Exception as e:
+            print(f"Warning: Failed to extract overlay layers: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        print(f"[Export] Final overlay extraction: {len(mask_regions)} mask(s), {len(logo_layers)} logo(s)")
+        return mask_regions, logo_layers
 
     def run(
         self,
@@ -210,6 +331,15 @@ class ExportWorkflow:
         state = self._load_state(project_state_path)
         self._mark_started(state)
         self._emit_progress(on_progress, 5, "Preparing final export...")
+        
+        print(f"[Export] Project state loaded: {state is not None}")
+        if state:
+            print(f"[Export] Project root: {state.project_root}")
+            print(f"[Export] Artifacts: {list(state.artifacts.keys())}")
+        
+        # Extract mask and logo layers from project state
+        mask_regions, logo_layers = self._extract_overlay_layers(state)
+        print(f"[Export] Extracted {len(mask_regions)} mask(s), {len(logo_layers)} logo(s)")
 
         tmp_mux_path = ""
         try:
@@ -228,6 +358,8 @@ class ExportWorkflow:
                     output_fill_focus_y=output_fill_focus_y,
                     output_fps=target_fps,
                     video_filter_state=video_filter_state,
+                    mask_regions=mask_regions,
+                    logo_layers=logo_layers,
                 )
             elif mode == "voice":
                 self._emit_progress(on_progress, 25, "Muxing Vietnamese audio into the video...")
@@ -270,6 +402,8 @@ class ExportWorkflow:
                     output_fill_focus_y=output_fill_focus_y,
                     output_fps=target_fps,
                     video_filter_state=video_filter_state,
+                    mask_regions=mask_regions,
+                    logo_layers=logo_layers,
                 )
             else:
                 raise ValueError(f"Unsupported export mode: {mode}")

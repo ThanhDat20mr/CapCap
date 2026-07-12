@@ -71,8 +71,8 @@ def _load_ocr_engine():
         missing = [m for m in required_models if not models_dir or not os.path.isfile(os.path.join(models_dir, m))]
         if missing:
             raise RuntimeError(
-                "OCR models not found. Please open Settings → Manage Resources and download "
-                "'OCR Engine (RapidOCR PP-OCRv4)' before using OCR mode.\n\n"
+                "OCR models not found inside the rapidocr package. "
+                "Reinstall the rapidocr package or open Settings → Manage Resources for hints.\n\n"
                 f"Missing: {', '.join(missing)}\n"
                 f"Looked in: {models_dir or 'rapidocr package directory'}"
             )

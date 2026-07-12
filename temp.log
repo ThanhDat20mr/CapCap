@@ -1,0 +1,153 @@
+[Launcher] Waveform audio extracted: D:\CodingTime\CapCap\temp\waveform_3f44857dff05.wav
+[Launcher] Saving CAPCAP_DEVICE=cuda, GPU=NVIDIA GeForce RTX 2060
+qt.multimedia.ffmpeg: Using Qt multimedia with FFmpeg version 7.1.3 LGPL version 2.1 or later
+[Preview] media backend: libmpv
+[TTS] Vietnamese normalizer loaded with custom dicts from: D:\CodingTime\CapCap\models\vietnormalizer
+Subtitle generated: D:\CodingTime\CapCap\temp\projects\original_video2_fdc81ed7\preview\live_preview_subtitle.srt
+Generated ASS: D:\CodingTime\CapCap\temp\projects\original_video2_fdc81ed7\preview\live_preview_subtitle_styled.ass  (33 lines, 1080x1920, alignment=2, marginV=30, animation=Fade Out, preset=custom) 
+[Preview] audio: original
+Input #0, wav, from 'D:/CodingTime/CapCap/projects/original_video2_fdc81ed7/source/extracted_audio.wav':
+  Metadata:
+    comment         : vid:v0200fg10000d5j1oafog65uuon6tlog
+    encoder         : Lavf62.3.100
+  Duration: 00:01:48.79, bitrate: 256 kb/s
+  Stream #0:0: Audio: pcm_s16le ([1][0][0][0] / 0x0001), 16000 Hz, 1 channels, s16, 256 kb/s
+[VoiceCatalog] catalog_path=D:\CodingTime\CapCap\app\voice_preview_catalog.json voices_in_file=14 piper_models=14 is_remote=False
+[VoiceCatalog] loaded=14
+[Clean Project] Removed 4 intermediate paths.
+[Clean] _return_to_launcher: video_path=D:\Downloads\original_video2.mp4
+[Clean] Removed from recent: D:\Downloads\original_video2.mp4 -> 1 remaining
+[Cleanup] Worker termination complete.
+[Launcher] Waveform audio extracted: D:\CodingTime\CapCap\temp\waveform_68c1ab6e0eb2.wav
+[Launcher] Saving CAPCAP_DEVICE=cuda, GPU=NVIDIA GeForce RTX 2060
+[Preview] media backend: libmpv
+[Preview] audio: original
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'D:/CodingTime/CapCap/short_video_10s.mp4':
+  Metadata:
+    major_brand     : isom
+    minor_version   : 512
+    compatible_brands: isomiso2avc1mp41
+    encoder         : Lavf62.3.100
+  Duration: 00:00:10.23, start: 0.000000, bitrate: 13120 kb/s
+  Stream #0:0[0x1](und): Audio: aac (LC) (mp4a / 0x6134706D), 44100 Hz, stereo, fltp, 132 kb/s (default)
+      Metadata:
+        handler_name    : SoundHandler
+        vendor_id       : [0][0][0][0]
+  Stream #0:1[0x2](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(tv, bt709, progressive), 1080x1920, 12973 kb/s, 60 fps, 60 tbr, 15360 tbn (default)
+      Metadata:
+        handler_name    : VideoHandler
+        vendor_id       : [0][0][0][0]
+        encoder         : Lavc62.11.100 libx264
+[VoiceCatalog] catalog_path=D:\CodingTime\CapCap\app\voice_preview_catalog.json voices_in_file=14 piper_models=14 is_remote=False
+[VoiceCatalog] loaded=14
+[Pipeline] Starting prepare workflow for: D:/CodingTime/CapCap/short_video_10s.mp4
+[Remote API] Listening on http://127.0.0.1:51072
+[Remote API] 127.0.0.1 - "GET /health HTTP/1.1" 200 -
+[Pipeline] Local worker process started at http://127.0.0.1:51072
+[Remote API] POST /v1/prepare from 127.0.0.1
+[Remote API] POST /v1/prepare payload keys: ['workspace_root', 'video_path', 'source_language', 'target_language', 'mode', 'audio_handling_mode', 'translator_ai', 'optimize_subtitles', 'translator_style', 'whisper_model_name', 'transcription_engine', 'skip_translation', 'prefetch_voice_name', 'prefetch_voice_speed']
+--- Step 1: Extracting audio ---
+Executing: D:\CodingTime\CapCap\bin\ffmpeg\ffmpeg.exe -i D:/CodingTime/CapCap/short_video_10s.mp4 -ar 16000 -ac 1 -y D:\CodingTime\CapCap\projects\short_video_10s_98b3dda9\source\extracted_audio.wav
+Audio extraction successful.
+Success: Audio saved to D:\CodingTime\CapCap\projects\short_video_10s_98b3dda9\source\extracted_audio.wav
+[Timing] Extract audio: 0.10s
+[Audio Handling] Selected mode: fast
+[Audio Handling] Fast Mode enabled: skipping Demucs and transcribing directly from extracted audio.
+[Audio Handling] Using extracted audio for Whisper: D:\CodingTime\CapCap\projects\short_video_10s_98b3dda9\source\extracted_audio.wav
+
+--- Step 2: Transcribing audio (SenseVoice) ---
+[ASR] Working audio duration: 10.24s
+[ASR] Using SenseVoice single-pass transcription with Silero VAD.
+[VAD] model: D:\CodingTime\CapCap\bin\silero_vad.onnx, exists=True
+[VAD] initialized OK, window_size=512
+[VAD] audio stats: min=-0.9310 max=0.9562 mean_abs=0.145009
+[VAD] raw segments: 4
+Success: Generated 4 segments.
+[Timing] Transcribe step: 3.45s
+
+--- Step 3: Generating Original Subtitle ---
+Subtitle generated: D:\CodingTime\CapCap\projects\short_video_10s_98b3dda9\subtitle\original.srt
+[Timing] Build original subtitle: 0.00s
+
+--- Step 4: Translating to Vietnamese ---
+[Prepare Workflow] TTS cache prefetch enabled: voice=ngochuyen, speed=1.00, tmp_dir=D:\CodingTime\CapCap\temp\projects\short_video_10s_98b3dda9\tts
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 6143 MiB):
+  Device 0: NVIDIA GeForce RTX 2060, compute capability 7.5, VMM: yes, VRAM: 6143 MiB
+[Translation] Starting Google web translate fallback (batch_size=50)...
+[Prepare Workflow] Queue TTS cache prefetch: start=0, count=4
+[Translation] Success: Google web translate completed.
+[TTS] Vietnamese normalizer loaded with custom dicts from: D:\CodingTime\CapCap\models\vietnormalizer
+[Voice Workflow] Prepared TTS text: adjusted=0/4
+[Voice Workflow] Priming TTS cache: segments=4, voice=ngochuyen, provider=piper, index_offset=0
+[Voice Workflow] TTS synth jobs: pending=3, cache_hits=1, workers=1, native_speed=1.00
+[Prepare Workflow] TTS cache prefetch complete: batches=1
+[Timing] Translate/refine: 6.01s
+
+--- Step 5: Generating Vietnamese Subtitle ---
+Subtitle generated: D:\CodingTime\CapCap\projects\short_video_10s_98b3dda9\subtitle\subtitle.srt
+[Timing] Build translated subtitle: 0.00s
+[Timing] Prepare workflow total: 9.59s
+
+COMPLETED! Project saved at: D:\CodingTime\CapCap\projects\short_video_10s_98b3dda9
+[Whisper] All cached models unloaded
+[Remote API] 127.0.0.1 - "POST /v1/prepare HTTP/1.1" 200 -
+Subtitle generated: D:\CodingTime\CapCap\temp\projects\short_video_10s_98b3dda9\preview\live_preview_subtitle.srt
+Generated ASS: D:\CodingTime\CapCap\temp\projects\short_video_10s_98b3dda9\preview\live_preview_subtitle_styled.ass  (4 lines, 1080x1920, alignment=2, marginV=30, animation=Fade Out, preset=custom)
+[Preview] audio: original
+Input #0, wav, from 'D:/CodingTime/CapCap/projects/short_video_10s_98b3dda9/source/extracted_audio.wav':
+  Metadata:
+    encoder         : Lavf62.3.100
+  Duration: 00:00:10.24, bitrate: 256 kb/s
+  Stream #0:0: Audio: pcm_s16le ([1][0][0][0] / 0x0001), 16000 Hz, 1 channels, s16, 256 kb/s
+[Voiceover] Cache check: force=False, cached_sig=<empty>, new_sig=5db8a17dd30addca..., match=False, required_output=, exists=False
+[Voiceover] Selected voice: text='Ngọc Huyền', data='ngochuyen', id='ngochuyen'
+[Voiceover] Starting with audio_mode=fast, voice=ngochuyen, speed=1.00, segments=4, translated_chars=386, background=D:\CodingTime\CapCap\projects\short_video_10s_98b3dda9\source\extracted_audio.wav 
+[Voiceover] State snapshot: project=D:\CodingTime\CapCap\projects\short_video_10s_98b3dda9, steps={'extract_audio': 'done', 'transcribe': 'done', 'translate_raw': 'done', 'refine_translation': 'skipped', 'separate_audio': 'skipped', 'generate_tts': 'pending', 'build_subtitle': 'done', 'mix_audio': 'pending', 'export': 'pending'}, artifacts={'extracted_audio': 'D:\\CodingTime\\CapCap\\projects\\short_video_10s_98b3dda9\\source\\extracted_audio.wav', 'transcript_raw': 'D:\\CodingTime\\CapCap\\projects\\short_video_10s_98b3dda9\\analysis\\transcript_raw.json', 'transcript_segments': 'D:\\CodingTime\\CapCap\\projects\\short_video_10s_98b3dda9\\analysis\\transcript_segments.json', 'subtitle_original_srt': 'D:\\CodingTime\\CapCap\\projects\\short_video_10s_98b3dda9\\subtitle\\original.srt', 
+'translation_final': 'D:\\CodingTime\\CapCap\\projects\\short_video_10s_98b3dda9\\translation\\translation_final.json', 'subtitle_translated_srt': 'D:\\CodingTime\\CapCap\\projects\\short_video_10s_98b3dda9\\subtitle\\subtitle.srt'}
+[VoiceOverWorker DEBUG] Starting with voice_name='ngochuyen'
+[VoiceOverWorker DEBUG] voice_name='ngochuyen'
+[Voice Workflow] Audio handling mode: fast
+[TTS] Vietnamese normalizer loaded with custom dicts from: D:\CodingTime\CapCap\models\vietnormalizer
+[Voice Workflow] Prepared TTS text: adjusted=0/4
+[Voice Workflow] TTS synth jobs: pending=0, cache_hits=4, workers=0, native_speed=1.00
+[Voice Fit] Summary: segments=4, over_target=3/4, min_ratio=0.994, max_ratio=1.963
+[Voice Deficit] Summary: overlap=1, stretch=0, silence_fade=0, no_action=0
+[Voice Workflow] Speed plan: requested=1.00, native=1.00, residual=1.00
+[Voice Workflow] Voice track created at D:\CodingTime\CapCap\temp\projects\short_video_10s_98b3dda9\tts\voice_vi.wav. Mixed audio will be generated at export time.
+[Timing] Voice workflow: synthesize=0.36s, build_track=0.01s, mix=0.00s, total=0.46s
+Subtitle generated: D:\CodingTime\CapCap\temp\projects\short_video_10s_98b3dda9\preview\live_preview_subtitle.srt
+Generated ASS: D:\CodingTime\CapCap\temp\projects\short_video_10s_98b3dda9\preview\live_preview_subtitle_styled.ass  (4 lines, 1080x1920, alignment=2, marginV=30, animation=Fade Out, preset=custom)
+Subtitle generated: D:\CodingTime\CapCap\projects\short_video_10s_98b3dda9\subtitle\subtitle.srt
+[Pipeline] Voiceover complete. Preparing video preview.
+[Preview] _start_video_preview called
+[Export] Mixed audio created: D:\CodingTime\CapCap\temp\export_mixed_temp.wav
+[Filter] get_video_filter_state: preset=cool, active=True, effective={'brightness': 0, 'contrast': 11, 'saturation': 4, 'temperature': -15, 'highlights': -8, 'shadows': -4}
+[Filter] has_active_video_filters check: preset=cool, active=True
+[Preview] has_active_video_filters=True
+[Preview] Found 0 mask region(s) from M1 track
+[Preview] Checking track: name=V1 Video type=video
+[Preview] Checking track: name=A1 Audio type=audio
+[Preview] Checking track: name=TS1 type=dub_subtitle
+[Preview] Final overlay extraction: 0 mask(s), 0 logo(s)
+[Preview] Starting full preview render: mode=both, preview_out=D:\CodingTime\CapCap\temp\projects\short_video_10s_98b3dda9\preview\preview_vi_voice_1783610148.mp4
+Subtitle generated: D:\CodingTime\CapCap\temp\projects\short_video_10s_98b3dda9\preview\preview_subtitle_full.srt
+[Filter] get_video_filter_state: preset=cool, active=True, effective={'brightness': 0, 'contrast': 11, 'saturation': 4, 'temperature': -15, 'highlights': -8, 'shadows': -4}
+[Preview] video=D:/CodingTime/CapCap/short_video_10s.mp4
+[Preview] audio=D:\CodingTime\CapCap\temp\export_mixed_temp.wav
+[Preview] out=D:\CodingTime\CapCap\temp\projects\short_video_10s_98b3dda9\preview\preview_vi_voice_1783610148.mp4
+[Preview] app_mode=both
+[Preview] render_mode=styled
+[Preview] styled cache miss: f1c37d60fa
+[Filter] get_video_filter_state: preset=cool, active=True, effective={'brightness': 0, 'contrast': 11, 'saturation': 4, 'temperature': -15, 'highlights': -8, 'shadows': -4}
+[Preview] Starting preview thread
+[Voiceover] Generated Vietnamese voice track: D:\CodingTime\CapCap\temp\projects\short_video_10s_98b3dda9\tts\voice_vi.wav (No background mix created.)
+[Preview] audio: both
+Input #0, wav, from 'D:/CodingTime/CapCap/temp/projects/short_video_10s_98b3dda9/tts/voice_vi.wav':
+  Duration: 00:00:10.71, bitrate: 256 kb/s
+  Stream #0:0: Audio: pcm_s16le ([1][0][0][0] / 0x0001), 16000 Hz, 1 channels, s16, 256 kb/s
+[Preview] on_preview_ready called: preview_path=D:\CodingTime\CapCap\temp\projects\short_video_10s_98b3dda9\preview\preview_vi_voice_1783610148.mp4, error=
+[Filter] get_video_filter_state: preset=cool, active=True, effective={'brightness': 0, 'contrast': 11, 'saturation': 4, 'temperature': -15, 'highlights': -8, 'shadows': -4}
+[Filter] has_active_video_filters check: preset=cool, active=True
+[Preview] Re-enabled Apply button
+[Preview] Preview successful, loading into player: D:\CodingTime\CapCap\temp\projects\short_video_10s_98b3dda9\preview\preview_vi_voice_1783610148.mp4
+[Preview] ready=D:\CodingTime\CapCap\temp\projects\short_video_10s_98b3dda9\preview\preview_vi_voice_1783610148.mp4

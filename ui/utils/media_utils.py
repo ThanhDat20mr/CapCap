@@ -17,6 +17,11 @@ def setup_media_player(gui):
     gui.media_player.positionChanged.connect(gui.position_changed)
     gui.media_player.durationChanged.connect(gui.duration_changed)
 
+    # Re-apply the M1 mask filter on play / pause / stop so the mask
+    # only shows while the video is playing.
+    if hasattr(gui.media_player, "stateChanged"):
+        gui.media_player.stateChanged.connect(gui._on_preview_state_changed)
+
 
 def refresh_video_dimensions(gui, path: str, get_video_dimensions):
     try:
@@ -49,11 +54,25 @@ def toggle_play(gui):
 
         if gui.media_player.is_playing():
             gui.media_player.pause()
+            if hasattr(gui, "refresh_play_button_icon"):
+                gui.refresh_play_button_icon()
             if hasattr(gui, "media_player"):
                 gui.media_player.clear_blur_region()
             if hasattr(gui, "_sync_blur_controls"):
                 gui._sync_blur_controls()
             gui.timeline.set_playing(False)
+            # Clear the M1 mask filter on pause so the video shows
+            # through (the mask only renders while playing). We call
+            # clear_mask_region directly instead of
+            # _apply_mask_to_preview(force=True) because the latter
+            # would re-apply the mask when regions exist.
+            if hasattr(gui, "media_player") and hasattr(
+                gui.media_player, "clear_mask_region"
+            ):
+                try:
+                    gui.media_player.clear_mask_region()
+                except Exception:
+                    pass
             if (
                 has_active_video_filters
                 and filter_workflow_active
@@ -84,8 +103,6 @@ def toggle_play(gui):
                     gui.preview_video()
                     return
             gui.seek_frame_preview_timer.stop()
-            if hasattr(gui, "set_subtitle_inspector_details_visible"):
-                gui.set_subtitle_inspector_details_visible(False, sync=False)
             if hasattr(gui, "hide_filter_thumbnail_preview"):
                 gui.hide_filter_thumbnail_preview()
             if hasattr(gui, "apply_preview_blur_region"):
@@ -97,10 +114,20 @@ def toggle_play(gui):
                 and gui._blur_effect_enabled()
             ):
                 gui.video_view.set_blur_edit_enabled(False)
+            # The track inspector is always expanded - no auto-collapse.
             gui.media_player.play()
             gui.timeline.set_playing(True)
-        if hasattr(gui, "_refresh_preview_audio_controls"):
-            gui._refresh_preview_audio_controls()
+            if hasattr(gui, "refresh_play_button_icon"):
+                gui.refresh_play_button_icon()
+            # Apply the M1 mask filter on play so the colour shows
+            # while the video is playing. Use force=True to bypass
+            # the is_playing() check (the play() call above already
+            # set the state to PlayingState).
+            if hasattr(gui, "_apply_mask_to_preview"):
+                try:
+                    gui._apply_mask_to_preview(force=True)
+                except Exception:
+                    pass
     except Exception as exc:
         if hasattr(gui, "log"):
             gui.log(f"[Preview] toggle play failed: {exc}")
@@ -114,14 +141,14 @@ def stop_video(gui):
     if hasattr(gui, "audio_preview_player"):
         gui.audio_preview_player.stop()
     gui.media_player.stop()
+    if hasattr(gui, "refresh_play_button_icon"):
+        gui.refresh_play_button_icon()
     if hasattr(gui, "media_player"):
         gui.media_player.clear_blur_region()
     if hasattr(gui, "_sync_blur_controls"):
         gui._sync_blur_controls()
     gui.timeline.set_playing(False)
     gui.schedule_seek_frame_preview()
-    if hasattr(gui, "_refresh_preview_audio_controls"):
-        gui._refresh_preview_audio_controls()
 
 
 def position_changed(gui, position):
@@ -132,6 +159,104 @@ def position_changed(gui, position):
     except Exception as exc:
         if hasattr(gui, "log"):
             gui.log(f"[Preview] position highlight error: {exc}")
+    # Apply audio fade-in/fade-out during playback
+    try:
+        _apply_audio_fade(gui, position)
+    except Exception:
+        pass
+    # Disable the play button when the playhead reaches the end of
+    # the video (within 250 ms of the duration) so the user can tell
+    # at a glance that playback has finished. The button is re-enabled
+    # on seek (`set_position`) or when a new source is loaded.
+    try:
+        if hasattr(gui, "play_btn") and not getattr(
+            gui, "_disable_play_at_end", False
+        ):
+            duration_ms = 0
+            try:
+                duration_ms = int(gui.media_player.duration() or 0)
+            except Exception:
+                duration_ms = 0
+            at_end = duration_ms > 0 and position >= duration_ms - 250
+            try:
+                is_playing = bool(gui.media_player.is_playing())
+            except Exception:
+                is_playing = False
+            gui.play_btn.setEnabled(not at_end)
+            # When playback ends naturally, update the icon/tooltip to
+            # "Play" so the next click re-starts from the end.
+            if at_end and not is_playing and hasattr(gui, "refresh_play_button_icon"):
+                gui.refresh_play_button_icon()
+    except Exception:
+        pass
+
+
+def _apply_audio_fade(gui, position_ms: int):
+    """Apply fade-in/fade-out to audio track volumes during playback.
+
+    The fade values are stored in each track's metadata. During the
+    fade-in window the volume ramps from 0 to the set volume; during
+    the fade-out window it ramps from the set volume down to 0.
+    """
+    if not getattr(gui, "media_player", None):
+        return
+    try:
+        duration_ms = int(gui.media_player.duration())
+    except Exception:
+        duration_ms = 0
+    if duration_ms <= 0:
+        return
+    pos_s = position_ms / 1000.0
+    for track_name in ("A1 Audio", "TS1"):
+        track, _ = _find_audio_track(gui, track_name)
+        if track is None:
+            continue
+        meta = getattr(track, "metadata", None) or {}
+        try:
+            fade_in = float(meta.get("_fade_in", 0.0))
+            fade_out = float(meta.get("_fade_out", 0.0))
+        except (TypeError, ValueError):
+            fade_in = fade_out = 0.0
+        base_vol = _compute_base_volume(gui, track, meta)
+        # Compute fade multiplier
+        mult = 1.0
+        if fade_in > 0 and pos_s < fade_in:
+            mult = min(mult, pos_s / fade_in if fade_in > 0 else 1.0)
+        if fade_out > 0:
+            remaining = (duration_ms - position_ms) / 1000.0
+            if remaining < fade_out:
+                mult = min(mult, max(0.0, remaining / fade_out) if fade_out > 0 else 1.0)
+        effective = base_vol * mult
+        if track_name == "A1 Audio":
+            if hasattr(gui.media_player, "set_original_volume"):
+                gui.media_player.set_original_volume(effective)
+        elif track_name == "TS1":
+            if hasattr(gui.media_player, "set_dubbed_volume"):
+                gui.media_player.set_dubbed_volume(effective)
+
+
+def _find_audio_track(gui, name: str):
+    if not getattr(gui, "timeline", None) or not gui.timeline._timeline:
+        return None, None
+    for t in gui.timeline._timeline.tracks:
+        if t.name == name:
+            return t, name
+    return None, None
+
+
+def _compute_base_volume(gui, track, meta) -> float:
+    track_name = getattr(track, "name", "") or ""
+    default_vol = 50.0 if track_name.startswith("A1") else 100.0
+    try:
+        vol = float(meta.get("_volume", default_vol))
+    except (TypeError, ValueError):
+        vol = default_vol
+    try:
+        gain_db = float(meta.get("_gain_db", 0.0))
+    except (TypeError, ValueError):
+        gain_db = 0.0
+    effective = vol * (10 ** (gain_db / 20.0))
+    return max(0.0, min(200.0, effective))
 
 
 def duration_changed(gui, duration):
@@ -149,6 +274,17 @@ def set_position(gui, position):
     except Exception as exc:
         if hasattr(gui, "log"):
             gui.log(f"[Preview] seek highlight error: {exc}")
+    # Seeking away from the end re-enables the play button.
+    try:
+        if hasattr(gui, "play_btn"):
+            duration_ms = 0
+            try:
+                duration_ms = int(gui.media_player.duration() or 0)
+            except Exception:
+                duration_ms = 0
+            gui.play_btn.setEnabled(duration_ms <= 0 or position < duration_ms - 250)
+    except Exception:
+        pass
     if (
         hasattr(gui, "has_active_video_filters")
         and gui.has_active_video_filters()
@@ -211,8 +347,6 @@ def browse_video(gui):
     QTimer.singleShot(220, gui.video_view.reposition_subtitle)
     gui.refresh_ui_state()
     gui.sync_live_subtitle_preview()
-    if hasattr(gui, "_refresh_preview_audio_controls"):
-        gui._refresh_preview_audio_controls()
 
 
 def update_frame_preview_thumbnail(gui, image_path: str, qpixmap_cls, qt):

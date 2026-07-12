@@ -30,6 +30,35 @@ def _probe_wav_duration_seconds(wav_path: str) -> float:
     return max(0.0, float(frame_count) / float(frame_rate))
 
 
+def ffprobe_wav_duration(wav_path: str) -> float:
+    """Return the actual duration of a wav file via ffprobe.
+
+    Uses ffprobe's `format=duration` for the most accurate reading —
+    important for segment preview/regenerate flows where the wav
+    may have been re-encoded and the wave header is stale. Returns
+    0.0 if ffprobe is missing or the call fails.
+    """
+    ffprobe = _ffprobe_path()
+    if not os.path.exists(ffprobe):
+        return 0.0
+    try:
+        out = subprocess.run(
+            [
+                ffprobe, "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                wav_path,
+            ],
+            capture_output=True, text=True, timeout=10,
+            **_subprocess_run_kwargs(),
+        )
+        if out.returncode != 0:
+            return 0.0
+        return max(0.0, float(out.stdout.strip()))
+    except (ValueError, subprocess.TimeoutExpired, OSError):
+        return 0.0
+
+
 def _build_atempo_filter(speed_ratio: float) -> str:
     ratio = max(0.01, float(speed_ratio))
     filters = []
@@ -56,7 +85,7 @@ def fit_wav_to_duration(
     mode_key = (mode or "off").strip().lower()
     if mode_key == "force fit":
         mode_key = "force"
-    if mode_key not in {"smart", "force"}:
+    if mode_key not in {"smart", "force", "timeline"}:
         return input_wav_path
     if not os.path.exists(input_wav_path):
         raise FileNotFoundError(f"Input wav not found: {input_wav_path}")
@@ -67,38 +96,70 @@ def fit_wav_to_duration(
         return input_wav_path
 
     fit_ratio = target_duration / source_duration
-    if abs(fit_ratio - 1.0) < 0.02:
-        return input_wav_path
-    if mode_key == "smart":
-        # Smart mode should avoid "saving" bad TTS by over-stretching.
-        # Past this range the text itself likely needs to be shorter.
-        if fit_ratio < 1.0 and fit_ratio < smart_min_ratio:
-            return input_wav_path
-        if fit_ratio > 1.0 and fit_ratio > smart_max_ratio:
-            return input_wav_path
-
     ffmpeg = _ffmpeg_path()
     if not os.path.exists(ffmpeg):
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
 
     os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
-    filter_chain = _build_atempo_filter(1.0 / fit_ratio)
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-i",
-        input_wav_path,
-        "-filter:a",
-        filter_chain,
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        output_wav_path,
-    ]
+
+    if mode_key == "timeline":
+        # Timeline Priority: always cut the audio to the segment
+        # window. The end of the speech may be skipped if it exceeds
+        # the segment duration — playback continues with the next
+        # segment immediately after. No atempo, no early return.
+        if abs(fit_ratio - 1.0) < 0.02:
+            return input_wav_path
+        cmd = [
+            ffmpeg, "-y", "-i", input_wav_path,
+            "-t", str(target_duration),
+            "-ar", "16000", "-ac", "1",
+            output_wav_path,
+        ]
+    elif mode_key == "smart":
+        # Smart mode: when the audio is too long, TRIM (cut) it to
+        # match the target duration instead of speeding it up. When it's
+        # too short, stretch (atempo) up to the safe range.
+        if abs(fit_ratio - 1.0) < 0.02:
+            return input_wav_path
+        if fit_ratio < 1.0:
+            # Audio shorter than target — stretch to fit.
+            if fit_ratio < smart_min_ratio:
+                return input_wav_path
+            atempo_ratio = 1.0 / fit_ratio
+            filter_chain = _build_atempo_filter(atempo_ratio)
+            cmd = [
+                ffmpeg, "-y", "-i", input_wav_path,
+                "-filter:a", filter_chain,
+                "-ar", "16000", "-ac", "1",
+                output_wav_path,
+            ]
+        else:
+            # Audio longer than target — TRIM (cut) to fit, no speed
+            # change. Use ffmpeg's `-t` flag to set the output duration.
+            cmd = [
+                ffmpeg, "-y", "-i", input_wav_path,
+                "-t", str(target_duration),
+                "-ar", "16000", "-ac", "1",
+                output_wav_path,
+            ]
+    else:
+        # Force mode: use atempo to speed up the audio so it fits the
+        # target duration. This is the legacy behaviour.
+        if abs(fit_ratio - 1.0) < 0.02:
+            return input_wav_path
+        if fit_ratio > 1.0 and fit_ratio > smart_max_ratio:
+            return input_wav_path
+        filter_chain = _build_atempo_filter(1.0 / fit_ratio)
+        cmd = [
+            ffmpeg, "-y", "-i", input_wav_path,
+            "-filter:a", filter_chain,
+            "-ar", "16000", "-ac", "1",
+            output_wav_path,
+        ]
+
     proc = subprocess.run(cmd, capture_output=True, text=True, **_subprocess_run_kwargs())
     if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg time-stretch failed:\n{proc.stderr or proc.stdout}")
+        raise RuntimeError(f"FFmpeg fit failed:\n{proc.stderr or proc.stdout}")
     return output_wav_path
 
 
@@ -137,6 +198,67 @@ def change_wav_speed(
     proc = subprocess.run(cmd, capture_output=True, text=True, **_subprocess_run_kwargs())
     if proc.returncode != 0:
         raise RuntimeError(f"FFmpeg speed adjustment failed:\n{proc.stderr or proc.stdout}")
+    return output_wav_path
+
+
+def trim_trailing_silence(
+    *,
+    input_wav_path: str,
+    output_wav_path: str,
+    silence_threshold: float = -40.0,
+    min_silence_duration: float = 0.5,
+) -> str:
+    """Remove trailing silence from a wav file using ffmpeg
+    silencedetect. Keeps audio up to the last detected sound, then
+    trims after a short padding. Returns output_wav_path if trimming
+    was applied, or input_wav_path if the file has no trailing silence.
+    """
+    if not os.path.exists(input_wav_path):
+        return input_wav_path
+    ffmpeg = _ffmpeg_path()
+    if not os.path.exists(ffmpeg):
+        return input_wav_path
+    os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
+    detect_cmd = [
+        ffmpeg, "-y", "-i", input_wav_path,
+        "-af", f"silencedetect=noise={silence_threshold}dB:d={min_silence_duration}",
+        "-f", "null", "-",
+    ]
+    try:
+        proc = subprocess.run(
+            detect_cmd, capture_output=True, text=True, timeout=60,
+            **_subprocess_run_kwargs(),
+        )
+    except subprocess.TimeoutExpired:
+        return input_wav_path
+    if proc.returncode != 0:
+        return input_wav_path
+
+    last_end = 0.0
+    for line in proc.stderr.splitlines():
+        if "silence_end" in line:
+            try:
+                parts = line.split()
+                for i, p in enumerate(parts):
+                    if p == "silence_end":
+                        last_end = float(parts[i + 1])
+                        break
+            except (ValueError, IndexError):
+                continue
+    if last_end <= 0.0:
+        return input_wav_path
+
+    padding = 0.1
+    trim_to = last_end + padding
+    cmd = [
+        ffmpeg, "-y", "-i", input_wav_path,
+        "-t", str(trim_to),
+        "-ar", "16000", "-ac", "1",
+        output_wav_path,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, **_subprocess_run_kwargs())
+    if proc.returncode != 0:
+        return input_wav_path
     return output_wav_path
 
 
@@ -313,7 +435,7 @@ def mix_voice_with_background(
     voice_gain_db: float = 0.0,
     ducking_mode: str = "off",
     ducking_segments: list | None = None,
-    ducking_amount_db: float = -6.0,
+    ducking_amount_db: float = 0.0,
     ducking_threshold: float = 0.015,
     ducking_ratio: float = 10.0,
     ducking_attack_ms: float = 15.0,
@@ -420,6 +542,42 @@ def mix_voice_with_background(
         vc = vc + AudioSegment.silent(duration=(len(bg) - len(vc)), frame_rate=16000)
 
     mixed = bg.overlay(vc)
+    os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
+    mixed.export(output_wav_path, format="wav")
+    return output_wav_path
+
+
+def mix_original_with_dub(
+    *,
+    original_wav_path: str,
+    dub_wav_path: str,
+    output_wav_path: str,
+    original_gain_db: float = 0.0,
+    dub_gain_db: float = 0.0,
+) -> str:
+    """Mix original audio (A1) with dub audio (A2) at specified gain levels."""
+    if not os.path.exists(original_wav_path):
+        raise FileNotFoundError(f"Original file not found: {original_wav_path}")
+    if not os.path.exists(dub_wav_path):
+        raise FileNotFoundError(f"Dub file not found: {dub_wav_path}")
+
+    _require_pydub()
+    from pydub import AudioSegment
+
+    original = AudioSegment.from_file(original_wav_path).set_frame_rate(16000).set_channels(1)
+    dub = AudioSegment.from_file(dub_wav_path).set_frame_rate(16000).set_channels(1)
+
+    if original_gain_db:
+        original = original + original_gain_db
+    if dub_gain_db:
+        dub = dub + dub_gain_db
+
+    if len(dub) > len(original):
+        original = original + AudioSegment.silent(duration=(len(dub) - len(original)), frame_rate=16000)
+    elif len(original) > len(dub):
+        dub = dub + AudioSegment.silent(duration=(len(original) - len(dub)), frame_rate=16000)
+
+    mixed = original.overlay(dub)
     os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
     mixed.export(output_wav_path, format="wav")
     return output_wav_path

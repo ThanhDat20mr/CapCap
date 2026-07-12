@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ..errors import TranslationConfigError, TranslationProviderError, TranslationValidationError
 from ..srt_utils import parse_numbered_lines, validate_texts
-from runtime_paths import join_root, models_path
+from runtime_paths import join_root, models_path, bundle_root
 from services.gpu_stage_scheduler import GPUStageScheduler
 
 
@@ -25,6 +25,9 @@ class LocalPolisherProvider:
         workspace_cuda_bin = join_root("bin", "cuda12_fw")
         if os.path.isdir(workspace_cuda_bin):
             candidates.append(workspace_cuda_bin)
+        bundle_cuda_bin = os.path.join(bundle_root(), "bin", "cuda12_fw")
+        if os.path.isdir(bundle_cuda_bin):
+            candidates.append(bundle_cuda_bin)
         try:
             import site
 

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+import os
+
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 
 class _SubtitleOverlayWidget(QWidget):
     """A real-time overlay widget for MpvVideoView."""
+
+    LINE_HEIGHT_FACTOR = 1.35
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -14,6 +18,7 @@ class _SubtitleOverlayWidget(QWidget):
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setMouseTracking(False)
         self.current_text = ""
+        self.current_lines: list[str] = []
         self.font_name = "Segoe UI"
         self.font_size = 20
         self.font_color = QColor(255, 255, 255)
@@ -35,8 +40,31 @@ class _SubtitleOverlayWidget(QWidget):
         pass
 
     def set_text(self, text):
-        if self.current_text != text:
+        new_lines = [text] if text else []
+        if self.current_lines != new_lines or self.current_text != text:
             self.current_text = text
+            self.current_lines = new_lines
+            self._update_height()
+            self.update()
+
+    def set_lines(self, lines):
+        """Set multiple subtitle lines (e.g. when two segments overlap).
+        Each line is drawn on its own row, stacked vertically.
+        """
+        cleaned = [str(line or "").strip() for line in (lines or []) if str(line or "").strip()]
+        joined = "\n".join(cleaned)
+        if self.current_lines != cleaned or self.current_text != joined:
+            self.current_lines = cleaned
+            self.current_text = joined
+            self._update_height()
+            self.update()
+
+    def _update_height(self):
+        line_count = max(1, len(self.current_lines))
+        line_height = max(24, int(self.font_size * self.LINE_HEIGHT_FACTOR))
+        new_h = max(96, int(self.font_size * 4) + max(0, line_count - 1) * line_height)
+        if new_h != self.H:
+            self.H = new_h
             self.update()
 
     def set_style(self, font_name, font_size, font_color, outline_width=2, outline_color=None, background_box=None, background_color=None, single_line=None):
@@ -51,7 +79,7 @@ class _SubtitleOverlayWidget(QWidget):
             self.background_color = background_color
         if single_line is not None:
             self.single_line = bool(single_line)
-        self.H = max(96, int(font_size * 4))
+        self.H = max(96, int(self.font_size * 4) + max(0, len(self.current_lines) - 1) * int(self.font_size * self.LINE_HEIGHT_FACTOR))
         self.update()
 
     def set_alignment(self, alignment: str):
@@ -78,45 +106,56 @@ class _SubtitleOverlayWidget(QWidget):
             self.update()
 
     def paintEvent(self, event):
-        if not self.current_text and not self.isVisible():
+        if not self.current_text and not self.current_lines and not self.isVisible():
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(0, 0, float(self.W), float(self.H))
 
-        if self.current_text:
-            painter.setPen(self.font_color)
-            font = QFont(self.font_name)
-            font.setPixelSize(max(1, int(self.font_size)))
-            font.setBold(True)
-            painter.setFont(font)
-            flags = Qt.AlignCenter if self.single_line else (Qt.AlignCenter | Qt.TextWordWrap)
+        if not self.current_lines:
+            return
 
-            if self.background_box:
-                metrics = painter.fontMetrics()
-                text_rect = metrics.boundingRect(rect.toRect(), int(flags), self.current_text).adjusted(-18, -10, 18, 10)
-                text_rect = text_rect.intersected(rect.toRect().adjusted(4, 4, -4, -4))
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(self.background_color)
+        painter.setPen(self.font_color)
+        font = QFont(self.font_name)
+        font.setPixelSize(max(1, int(self.font_size)))
+        font.setBold(True)
+        painter.setFont(font)
+        line_height = max(24, int(self.font_size * self.LINE_HEIGHT_FACTOR))
+        wrap_flags = Qt.AlignCenter | Qt.TextWordWrap
+
+        line_rects: list[QRectF] = []
+        if len(self.current_lines) == 1:
+            line_rects = [rect]
+        else:
+            total_h = line_height * len(self.current_lines)
+            y0 = max(0.0, (rect.height() - total_h) / 2.0)
+            for i in range(len(self.current_lines)):
+                line_rects.append(QRectF(rect.x(), rect.y() + y0 + i * line_height, rect.width(), line_height))
+
+        if self.background_box:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self.background_color)
+            metrics = painter.fontMetrics()
+            for line_text, line_rect in zip(self.current_lines, line_rects):
+                text_rect = metrics.boundingRect(line_rect.toRect(), int(wrap_flags), line_text).adjusted(-18, -4, 18, 4)
+                text_rect = text_rect.intersected(line_rect.toRect().adjusted(4, 0, -4, 0))
                 painter.drawRoundedRect(QRectF(text_rect), 14, 14)
 
-            # Outline
-            if self.outline_width > 0:
-                painter.setPen(self.outline_color)
-                # Drawing offsets based on outline width
-                w = max(1.0, self.outline_width)
-                offsets = [
-                    (-w, 0), (w, 0), (0, -w), (0, w),
-                    (-w*0.7, -w*0.7), (w*0.7, -w*0.7),
-                    (-w*0.7, w*0.7), (w*0.7, w*0.7)
-                ]
+        if self.outline_width > 0:
+            w = max(1.0, self.outline_width)
+            offsets = [
+                (-w, 0), (w, 0), (0, -w), (0, w),
+                (-w*0.7, -w*0.7), (w*0.7, -w*0.7),
+                (-w*0.7, w*0.7), (w*0.7, w*0.7)
+            ]
+            painter.setPen(self.outline_color)
+            for line_text, line_rect in zip(self.current_lines, line_rects):
                 for dx, dy in offsets:
-                    painter.drawText(rect.translated(dx, dy), flags, self.current_text)
+                    painter.drawText(line_rect.translated(dx, dy), int(wrap_flags), line_text)
 
-            painter.setPen(self.font_color)
-            painter.drawText(rect, flags, self.current_text)
-        else:
-            return
+        painter.setPen(self.font_color)
+        for line_text, line_rect in zip(self.current_lines, line_rects):
+            painter.drawText(line_rect, int(wrap_flags), line_text)
 
 
 
@@ -168,11 +207,15 @@ class _BlurRegionOverlayWindow(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, not self._editable)
         self.setCursor(Qt.OpenHandCursor if self._editable else Qt.ArrowCursor)
         if self._editable:
-            if not self._regions:
-                self.add_region(emit_change=False)
-                if callable(self._on_region_changed):
-                    self._on_region_changed()
-            self.sync_to_view()
+            # Only show the overlay if there are regions to edit. Do NOT
+            # auto-add a region here - that previously caused a phantom
+            # blur rectangle to appear on project reopen even when the
+            # user had deleted all blurs. The user must press "+" to add
+            # a region explicitly.
+            if self._regions:
+                self.sync_to_view()
+            else:
+                self.hide()
         else:
             self.hide()
         self.update()
@@ -476,12 +519,331 @@ class _BlurRegionOverlayWindow(QWidget):
                     close_rect.bottom() - pad,
                 )
 
+
+class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
+    """Logo overlay that reuses the blur overlay's full structure.
+
+    Inherits move, resize, corner-handle drag, and the X close button
+    (which deletes the logo by popping the single region). Renders the
+    logo image inside the rect instead of a colored blur fill.
+    """
+
+    logoMoved = Signal(float, float, float, float)
+    logoDeleted = Signal()
+    logoEditFinished = Signal()
+
+    def __init__(self, on_region_changed=None, on_edit_finished=None):
+        super().__init__(on_region_changed=on_region_changed, on_edit_finished=on_edit_finished)
+        self._pixmap = None
+        self._sync_timer = None
+        self._opacity: float = 1.0
+        self._rotation: float = 0.0
+
+    def attach_to_view(self, view: QWidget):
+        # Inherit the base behavior (event filter on main window,
+        # initial sync).
+        super().attach_to_view(view)
+        # Also install an event filter on the target view so the
+        # overlay follows it on Resize/Move (the base blur overlay
+        # only filters the main window).
+        if view is not None:
+            try:
+                view.installEventFilter(self)
+            except Exception:
+                pass
+        # Periodic sync as a fallback to keep the overlay aligned
+        # with the target view (covers missed resize/move events,
+        # e.g. when the dock is resized by the splitter).
+        if self._sync_timer is None:
+            self._sync_timer = QTimer(self)
+            self._sync_timer.setInterval(300)
+            self._sync_timer.timeout.connect(self.sync_to_view)
+        self._sync_timer.start()
+
+    def eventFilter(self, watched, event):
+        if watched is self._target_view and event.type() in (
+            QEvent.Resize, QEvent.Move,
+        ):
+            # Re-sync the overlay to the target view's new position/size.
+            QTimer.singleShot(0, self.sync_to_view)
+        return super().eventFilter(watched, event)
+
+    def set_pixmap(self, path):
+        if path and os.path.exists(path):
+            self._pixmap = QPixmap(path)
+        else:
+            self._pixmap = None
+        self.update()
+
+    def set_opacity(self, opacity: float):
+        self._opacity = max(0.0, min(1.0, float(opacity)))
+        self.update()
+
+    def get_opacity(self) -> float:
+        return float(self._opacity)
+
+    def set_rotation(self, rotation: float):
+        self._rotation = float(rotation) % 360.0
+        self.update()
+
+    def get_rotation(self) -> float:
+        return float(self._rotation)
+
+    def set_logo_rect(self, x, y, w, h):
+        if not self._regions:
+            self._regions.append(QRectF(0.0, 0.0, 1.0, 1.0))
+        self._regions[0] = QRectF(
+            max(0.0, min(1.0, x)),
+            max(0.0, min(1.0, y)),
+            max(0.01, min(1.0, w)),
+            max(0.01, min(1.0, h)),
+        )
+        self._active_index = 0
+        self.update()
+
+    def get_logo_rect(self):
+        if not self._regions:
+            return QRectF(0.0, 0.0, 0.0, 0.0)
+        return QRectF(self._regions[0])
+
+    def add_logo(self, x=0.1, y=0.1, w=0.2, h=0.2):
+        self._regions = [QRectF(x, y, w, h)]
+        self._active_index = 0
+
+    def set_regions(self, regions):
+        if isinstance(regions, QRectF):
+            self._regions = [QRectF(regions)]
+        elif isinstance(regions, list) and regions:
+            self._regions = [QRectF(regions[0])]
+        else:
+            self._regions = []
+        self._active_index = 0 if self._regions else -1
+
+    def paintEvent(self, event):
+        if not self.isVisible():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        for index, _region in enumerate(self._regions):
+            rect = self.region_rect(index)
+            if rect.width() <= 0 or rect.height() <= 0:
+                continue
+            # Apply opacity and rotation around the center of the logo.
+            painter.save()
+            painter.setOpacity(self._opacity)
+            cx = rect.center().x()
+            cy = rect.center().y()
+            painter.translate(cx, cy)
+            painter.rotate(self._rotation)
+            painter.translate(-cx, -cy)
+            if self._pixmap is not None and not self._pixmap.isNull():
+                painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+                painter.drawPixmap(rect, self._pixmap, self._pixmap.rect())
+            # Reset transform/opacity before drawing chrome (handles,
+            # border, close button) so they remain axis-aligned and
+            # fully opaque even when the logo is rotated or faded.
+            painter.restore()
+            pen = QPen(QColor(110, 231, 214, int(255 * max(self._opacity, 0.4))),
+                       2, Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(rect)
+            if self._editable:
+                painter.setBrush(QColor(110, 231, 214))
+                painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
+                for handle_rect in self._handle_rects(rect).values():
+                    painter.drawEllipse(handle_rect)
+                close_rect = self._close_rect(rect)
+                painter.setBrush(QColor(12, 24, 38, 230))
+                painter.setPen(QPen(QColor(110, 231, 214), 1))
+                painter.drawEllipse(close_rect)
+                painter.setPen(QPen(QColor(255, 255, 255, 235), 1.5))
+                pad = 5
+                painter.drawLine(close_rect.left() + pad, close_rect.top() + pad, close_rect.right() - pad, close_rect.bottom() - pad)
+                painter.drawLine(close_rect.right() - pad, close_rect.top() + pad, close_rect.left() + pad, close_rect.bottom() - pad)
+
+    def mousePressEvent(self, event):
+        if not self._editable or event.button() != Qt.LeftButton:
+            event.ignore()
+            return
+        pos = QPointF(event.position())
+        for index, _region in enumerate(self._regions):
+            close_rect = self._close_rect(self.region_rect(index))
+            if close_rect.contains(pos):
+                if 0 <= index < len(self._regions):
+                    self._regions.pop(index)
+                if self._sync_timer is not None:
+                    self._sync_timer.stop()
+                self.logoDeleted.emit()
+                if callable(self._on_region_changed):
+                    self._on_region_changed()
+                if callable(self._on_edit_finished):
+                    self._on_edit_finished()
+                self.sync_to_view()
+                self.update()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+
+class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
+    """Mask overlay that reuses the blur overlay's full structure.
+
+    Inherits move (drag the middle), corner-resize, and the X close
+    button. Renders a single rectangular region with the active mask
+    colour so the user can see what they are editing.
+
+    The mask mpv filter itself never applies a blur between solid and
+    pixelate modes — it draws a coloured rectangle (solid) or
+    pixelates the cropped region (pixelate). The overlay here is only
+    a UI affordance for the user to position the region.
+    """
+
+    maskMoved = Signal(float, float, float, float)
+    maskDeleted = Signal()
+    maskEditFinished = Signal()
+
+    # Mask overlay accent colour (used for the border + handles).
+    ACCENT = QColor(201, 140, 90)  # M1 mask colour
+
+    def __init__(self, on_region_changed=None, on_edit_finished=None):
+        super().__init__(on_region_changed=on_region_changed, on_edit_finished=on_edit_finished)
+        self._fill_color = QColor(201, 140, 90)
+        self._sync_timer = None
+
+    def set_fill_color(self, color: str | QColor):
+        """Set the fill colour used to draw the overlay rectangle."""
+        if isinstance(color, QColor):
+            self._fill_color = QColor(color)
+        else:
+            try:
+                self._fill_color = QColor(str(color))
+            except Exception:
+                self._fill_color = QColor(201, 140, 90)
+        self.update()
+
+    def get_mask_rect(self) -> QRectF:
+        if not self._regions:
+            return QRectF(0.0, 0.0, 0.0, 0.0)
+        return QRectF(self._regions[0])
+
+    def add_mask(self, x: float = 0.3, y: float = 0.3, w: float = 0.4, h: float = 0.2):
+        self._regions = [QRectF(x, y, w, h)]
+        self._active_index = 0
+
+    def set_mask_rect(self, x: float, y: float, w: float, h: float):
+        self._regions = [QRectF(
+            max(0.0, min(1.0, x)),
+            max(0.0, min(1.0, y)),
+            max(0.01, min(1.0, w)),
+            max(0.01, min(1.0, h)),
+        )]
+        self._active_index = 0
+        self.update()
+
+    def set_regions(self, regions):
+        if isinstance(regions, QRectF):
+            self._regions = [QRectF(regions)]
+        elif isinstance(regions, list) and regions:
+            self._regions = [QRectF(regions[0])]
+        else:
+            self._regions = []
+        self._active_index = 0 if self._regions else -1
+
+    def attach_to_view(self, view: QWidget):
+        super().attach_to_view(view)
+        # Re-sync on view resize/move (the blur overlay already filters
+        # the main window; we additionally filter the target view so
+        # the mask follows when only the view is resized).
+        if view is not None:
+            try:
+                view.installEventFilter(self)
+            except Exception:
+                pass
+        if self._sync_timer is None:
+            self._sync_timer = QTimer(self)
+            self._sync_timer.setInterval(300)
+            self._sync_timer.timeout.connect(self.sync_to_view)
+        self._sync_timer.start()
+
+    def eventFilter(self, watched, event):
+        if watched is self._target_view and event.type() in (
+            QEvent.Resize, QEvent.Move,
+        ):
+            QTimer.singleShot(0, self.sync_to_view)
+        return super().eventFilter(watched, event)
+
+    def paintEvent(self, event):
+        if not self.isVisible():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        for index, _region in enumerate(self._regions):
+            rect = self.region_rect(index)
+            if rect.width() <= 0 or rect.height() <= 0:
+                continue
+            # Translucent fill of the M1 accent colour (NOT the mask
+            # colour) so the user can see the region outline while
+            # positioning, regardless of the mask's actual colour.
+            # The actual mask colour is only applied to the video via
+            # the mpv filter when the layer is set to visible.
+            accent = QColor(self.ACCENT)
+            painter.fillRect(rect, QColor(accent.red(), accent.green(), accent.blue(), 60))
+            pen = QPen(accent, 2, Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(rect)
+            if self._editable:
+                painter.setBrush(accent)
+                painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
+                for handle_rect in self._handle_rects(rect).values():
+                    painter.drawEllipse(handle_rect)
+                close_rect = self._close_rect(rect)
+                painter.setBrush(QColor(12, 24, 38, 230))
+                painter.setPen(QPen(accent, 1))
+                painter.drawEllipse(close_rect)
+                painter.setPen(QPen(QColor(255, 255, 255, 235), 1.5))
+                pad = 5
+                painter.drawLine(close_rect.left() + pad, close_rect.top() + pad, close_rect.right() - pad, close_rect.bottom() - pad)
+                painter.drawLine(close_rect.right() - pad, close_rect.top() + pad, close_rect.left() + pad, close_rect.bottom() - pad)
+
+    def mousePressEvent(self, event):
+        if not self._editable or event.button() != Qt.LeftButton:
+            event.ignore()
+            return
+        pos = QPointF(event.position())
+        for index, _region in enumerate(self._regions):
+            close_rect = self._close_rect(self.region_rect(index))
+            if close_rect.contains(pos):
+                if 0 <= index < len(self._regions):
+                    self._regions.pop(index)
+                if self._sync_timer is not None:
+                    self._sync_timer.stop()
+                self.maskDeleted.emit()
+                if callable(self._on_region_changed):
+                    self._on_region_changed()
+                if callable(self._on_edit_finished):
+                    self._on_edit_finished()
+                self.sync_to_view()
+                self.update()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+
 class MpvVideoView(QWidget):
     """Hosts an MPV video surface and overlays."""
     blurRegionChanged = Signal()
     blurEditFinished = Signal()
     subtitlePositionChanged = Signal(int, int)  # x_percent, y_percent
     framingChanged = Signal(float, float)
+    logoMoved = Signal(float, float, float, float)  # x, y, w, h
+    logoDeleted = Signal()
+    logoEditFinished = Signal()
+    maskRegionChanged = Signal()
+    maskMoved = Signal(float, float, float, float)  # x, y, w, h
+    maskDeleted = Signal()
+    maskEditFinished = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -507,6 +869,16 @@ class MpvVideoView(QWidget):
             on_edit_finished=self.blurEditFinished.emit,
         )
         self._blur_event_filter_installed = False
+        self.mask_overlay = _MaskRegionOverlayWindow(
+            on_region_changed=self.maskRegionChanged.emit,
+            on_edit_finished=self.maskEditFinished.emit,
+        )
+        # Forward the overlay's internal delete signal to the public
+        # MpvVideoView.maskDeleted signal so the main window can react
+        # to X-button clicks on the mask overlay. Without this the
+        # maskDeleted signal is emitted but nothing listens, so the
+        # layer is never removed from the timeline.
+        self.mask_overlay.maskDeleted.connect(self.maskDeleted.emit)
         self.ratio_badge = QLabel(self)
         self.ratio_badge.setObjectName("previewRatioBadge")
         self.ratio_badge.setAlignment(Qt.AlignCenter)
@@ -546,11 +918,13 @@ class MpvVideoView(QWidget):
         self.reposition_subtitle()
         self._update_ratio_badge()
         self.blur_overlay.sync_to_view()
+        self.mask_overlay.sync_to_view()
         self.update()
 
     def moveEvent(self, event):
         super().moveEvent(event)
         self.blur_overlay.sync_to_view()
+        self.mask_overlay.sync_to_view()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -563,10 +937,12 @@ class MpvVideoView(QWidget):
         self._sync_preview_stack()
         self._update_ratio_badge()
         self.blur_overlay.sync_to_view()
+        self.mask_overlay.sync_to_view()
 
     def hideEvent(self, event):
         super().hideEvent(event)
         self.blur_overlay.hide()
+        self.mask_overlay.hide()
 
     def set_preview_aspect_ratio(self, aspect_key: str):
         self.preview_aspect_key = str(aspect_key or "source").strip().lower() or "source"
@@ -575,6 +951,7 @@ class MpvVideoView(QWidget):
         self._update_ratio_badge()
         self.reposition_subtitle()
         self.blur_overlay.sync_to_view()
+        self.mask_overlay.sync_to_view()
         self.update()
 
     def set_preview_scale_mode(self, scale_mode: str):
@@ -582,6 +959,10 @@ class MpvVideoView(QWidget):
         self.video_surface.setGeometry(self.get_video_content_rect().toRect())
         self._sync_preview_stack()
         self._update_ratio_badge()
+        self.reposition_subtitle()
+        self.blur_overlay.sync_to_view()
+        self.mask_overlay.sync_to_view()
+        self.update()
         self.reposition_subtitle()
         self.blur_overlay.sync_to_view()
         self.update()
@@ -826,6 +1207,79 @@ class MpvVideoView(QWidget):
     def clear_blur_region(self):
         self.blur_overlay.clear_region()
         self.blurRegionChanged.emit()
+
+    # --- Mask / M1 overlay ---
+    def add_mask_region(self, *, x: float = 0.3, y: float = 0.3,
+                        w: float = 0.4, h: float = 0.2,
+                        color: str | QColor = "#c98c5a"):
+        self.mask_overlay.attach_to_view(self)
+        self.mask_overlay.add_mask(x, y, w, h)
+        self.mask_overlay.set_fill_color(color)
+        self.mask_overlay.set_editable(True)
+        self.mask_overlay.sync_to_view()
+
+    def set_mask_region(self, *, x: float, y: float, w: float, h: float,
+                        color: str | QColor | None = None,
+                        editable: bool = True):
+        self.mask_overlay.attach_to_view(self)
+        self.mask_overlay.set_mask_rect(x, y, w, h)
+        if color is not None:
+            self.mask_overlay.set_fill_color(color)
+        self.mask_overlay.set_editable(bool(editable))
+        self.mask_overlay.sync_to_view()
+
+    def clear_mask_region(self):
+        self.mask_overlay.set_editable(False)
+        self.mask_overlay.clear_region()
+
+    # --- Logo / Watermark overlay ---
+    def set_logo(self, path: str, x: float, y: float, w: float, h: float):
+        """Show the logo overlay at the given normalized position/size.
+
+        The overlay reuses the blur overlay structure, so it supports
+        drag-to-move, corner-resize, and an X close button to delete
+        the logo. Connect to logoMoved / logoDeleted to react to
+        changes.
+        """
+        if not hasattr(self, "logo_overlay") or self.logo_overlay is None:
+            def _on_logo_region_changed():
+                if not hasattr(self, "logo_overlay") or self.logo_overlay is None:
+                    return
+                r = self.logo_overlay.get_logo_rect()
+                if r.width() > 0 and r.height() > 0:
+                    self.logoMoved.emit(r.x(), r.y(), r.width(), r.height())
+            self.logo_overlay = _LogoRegionOverlayWindow(
+                on_region_changed=_on_logo_region_changed,
+                on_edit_finished=self.logoEditFinished.emit,
+            )
+            self.logo_overlay.logoDeleted.connect(self.logoDeleted.emit)
+        self.logo_overlay.set_pixmap(path)
+        self.logo_overlay.add_logo(x, y, w, h)
+        self.logo_overlay.set_editable(True)
+        self.logo_overlay.attach_to_view(self)
+        self.logo_overlay.sync_to_view()
+        # Delayed syncs in case the view geometry isn't ready yet
+        QTimer.singleShot(50, self.logo_overlay.sync_to_view)
+        QTimer.singleShot(200, self.logo_overlay.sync_to_view)
+        QTimer.singleShot(500, self.logo_overlay.sync_to_view)
+
+    def update_logo_rect(self, x: float, y: float, w: float, h: float):
+        if hasattr(self, "logo_overlay") and self.logo_overlay is not None:
+            self.logo_overlay.set_logo_rect(x, y, w, h)
+            self.logo_overlay.sync_to_view()
+
+    def set_logo_opacity(self, opacity: float):
+        if hasattr(self, "logo_overlay") and self.logo_overlay is not None:
+            self.logo_overlay.set_opacity(opacity)
+
+    def set_logo_rotation(self, rotation: float):
+        if hasattr(self, "logo_overlay") and self.logo_overlay is not None:
+            self.logo_overlay.set_rotation(rotation)
+
+    def clear_logo(self):
+        if hasattr(self, "logo_overlay") and self.logo_overlay is not None:
+            self.logo_overlay.set_editable(False)
+            self.logo_overlay.clear_region()
 
     def has_blur_region(self) -> bool:
         return self.blur_overlay.has_region()

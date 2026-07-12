@@ -259,7 +259,7 @@ class TranslationOrchestrator:
 
     def _describe_ai_provider(self, provider_type: str) -> str:
         if provider_type == "gemini":
-            return f"OpenAI ({self.gemini_polisher.model_name})"
+            return f"Gemini ({self.gemini_polisher.model_name})"
         if provider_type == "local":
             return f"Local GGUF ({os.path.basename(self.local_polisher.model_path)})"
         return f"Local GGUF ({os.path.basename(self.local_polisher.model_path)})"
@@ -732,6 +732,7 @@ class TranslationOrchestrator:
                 updated['tts_group_id'] = group_id
                 updated['tts_group_start'] = round(start, 3)
                 updated['tts_group_end'] = round(end, 3)
+                updated.pop('_audio_end', None)
                 split_segments.append(updated)
                 continue
 
@@ -739,6 +740,7 @@ class TranslationOrchestrator:
             cursor = start
             for idx, chunk in enumerate(chunks):
                 updated = dict(seg)
+                updated.pop('_audio_end', None)
                 updated['text'] = chunk
                 updated['tts_group_id'] = group_id
                 updated['tts_group_start'] = round(start, 3)

@@ -93,7 +93,7 @@ class PipelineController:
         self._stop_prepare_status_polling()
         self.prepare_status_phase = ""
         timer = QTimer(self.gui)
-        timer.setInterval(500)
+        timer.setInterval(10000)
         timer.timeout.connect(self._poll_prepare_status)
         self.prepare_status_timer = timer
         timer.start()
@@ -324,7 +324,9 @@ class PipelineController:
             self.pipeline_fail(f"Could not start local worker process: {exc}")
             return
         self._start_prepare_status_polling()
-        transcription_engine = os.getenv("TRANSCRIPTION_ENGINE", "whisper")
+        cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
+        default_engine = "sensevoice" if cpu_mode else "whisper"
+        transcription_engine = os.getenv("TRANSCRIPTION_ENGINE", default_engine)
         skip_translation = self.gui.is_skip_translation()
         output_mode = self.gui.get_output_mode_key()
         self.gui.prepare_workflow_thread = PrepareWorkflowWorker(

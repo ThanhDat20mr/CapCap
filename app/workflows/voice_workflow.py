@@ -114,6 +114,13 @@ class VoiceWorkflow:
             print(f"[Voice Workflow] Auto-gain compensation failed: {exc}")
             return 0.0
 
+    def _percent_to_db(self, percent: int) -> float:
+        """Convert volume percentage (0-200) to dB gain."""
+        if percent <= 0:
+            return -60.0
+        import math
+        return 20.0 * math.log10(percent / 100.0)
+
     def _mark_started(self, state, *, with_background: bool):
         if not state:
             return
@@ -1111,22 +1118,30 @@ class VoiceWorkflow:
             return False
         return abs(new_ratio - 1.0) < abs(old_ratio - 1.0)
 
-    def _apply_segment_speed(self, *, wavs, tmp_dir: str, voice_speed: float):
-        speed_value = float(voice_speed)
-        if abs(speed_value - 1.0) < 0.02:
-            return wavs
-
+    def _apply_segment_speed(self, *, wavs, tmp_dir: str, voice_speed: float, segments: list | None = None):
+        """Apply global or per-segment voice speed to each wav."""
         adjusted_wavs = []
         for idx, wav_path in enumerate(wavs):
             if not wav_path or not os.path.exists(wav_path):
                 adjusted_wavs.append(wav_path)
                 continue
-            adjusted_path = os.path.join(tmp_dir, f"seg_{idx:04d}_speed_{int(round(speed_value * 100)):03d}.wav")
+            seg_speed = float(voice_speed)
+            if segments and idx < len(segments):
+                try:
+                    raw = segments[idx].get("voice_speed")
+                    if raw is not None:
+                        seg_speed = float(raw)
+                except (TypeError, ValueError):
+                    pass
+            if abs(seg_speed - 1.0) < 0.02:
+                adjusted_wavs.append(wav_path)
+                continue
+            adjusted_path = os.path.join(tmp_dir, f"seg_{idx:04d}_speed_{int(round(seg_speed * 100)):03d}.wav")
             adjusted_wavs.append(
                 self.engine_runtime.change_wav_speed(
                     input_wav_path=wav_path,
                     output_wav_path=adjusted_path,
-                    speed_ratio=speed_value,
+                    speed_ratio=seg_speed,
                 )
             )
         return adjusted_wavs
@@ -1147,6 +1162,21 @@ class VoiceWorkflow:
             target_duration = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
             actual_duration = self._probe_wav_duration_seconds(wav_path)
             ratio = (actual_duration / target_duration) if target_duration > 0 else 0.0
+
+            # SMART: trim trailing silence first so the duration
+            # estimate used by speed-adjustment heuristics is based
+            # on actual speech, not dead air.
+            if (sync_mode or "off").strip().lower() == "smart":
+                trimmed_path = os.path.join(tmp_dir, f"seg_{idx:04d}_silencetrim.wav")
+                trimmed = self.engine_runtime.trim_trailing_silence(
+                    input_wav_path=polished_wavs[idx],
+                    output_wav_path=trimmed_path,
+                )
+                if trimmed != polished_wavs[idx]:
+                    polished_wavs[idx] = trimmed
+                    actual_duration = self._probe_wav_duration_seconds(trimmed)
+                    ratio = (actual_duration / target_duration) if target_duration > 0 else 0.0
+                    seg["_trimmed_silence"] = True
             speech_cost = int(((seg.get("_tts_metrics") or {}).get("speech_cost")) or 0)
             duration_sec = float(((seg.get("_tts_metrics") or {}).get("duration_sec")) or target_duration)
             attempt_count = int((seg.get("attempt_count") or (seg.get("_tts_metrics") or {}).get("attempt_count") or 1))
@@ -1239,13 +1269,37 @@ class VoiceWorkflow:
                         target_duration_seconds=target_duration,
                         mode="smart",
                     )
-        if abs(float(voice_speed) - 1.0) >= 0.02:
+            if (sync_mode or "off").strip().lower() in ("timeline", "timeline priority"):
+                # Timeline Priority: cut audio to fit the segment window,
+                # but extend to fill gaps to the next segment to minimize cutting.
+                # Calculate extended duration if there's a gap to next segment
+                extended_duration = target_duration
+                if idx + 1 < len(segments):
+                    next_seg = segments[idx + 1]
+                    next_start = float(next_seg.get("start", 0.0))
+                    seg_end = float(seg.get("end", 0.0))
+                    gap = next_start - seg_end
+                    if gap > 0.01:  # Only extend if gap is meaningful (>10ms)
+                        extended_duration = target_duration + gap
+                        print(f"[Timeline Priority] Segment {idx+1}: extending by {gap:.3f}s to fill gap")
+                
+                synced_path = os.path.join(tmp_dir, f"seg_{idx:04d}_timelinefit.wav")
+                polished_wavs[idx] = self.engine_runtime.fit_wav_to_duration(
+                    input_wav_path=polished_wavs[idx],
+                    output_wav_path=synced_path,
+                    target_duration_seconds=extended_duration,
+                    mode="timeline",
+                )
+        if abs(float(voice_speed) - 1.0) >= 0.02 or any(
+            seg.get("voice_speed") for seg in (segments or [])
+        ):
             polished_wavs = self._apply_segment_speed(
                 wavs=polished_wavs,
                 tmp_dir=tmp_dir,
                 voice_speed=voice_speed,
+                segments=segments,
             )
-        if (sync_mode or "off").strip().lower() == "force":
+        if (sync_mode or "off").strip().lower() in ("force", "force fit"):
             for idx, (seg, wav_path) in enumerate(zip(list(segments or []), polished_wavs)):
                 if not wav_path or not os.path.exists(wav_path):
                     continue
@@ -1267,7 +1321,6 @@ class VoiceWorkflow:
     def _apply_deficit_timing_polish(self, *, segments, wavs, tmp_dir, sync_mode):
         polished_wavs = list(wavs or [])
         segments = list(segments or [])
-        total_shift_s = 0.0
         overlap_count = 0
         stretch_count = 0
         silence_count = 0
@@ -1282,16 +1335,7 @@ class VoiceWorkflow:
             ratio = (actual_d / target_d) if target_d > 0 else 1.0
 
             if ratio >= 1.0 or ratio <= 0.01:
-                if total_shift_s > 0:
-                    seg["start"] += total_shift_s
-                    seg["end"] += total_shift_s
                 continue
-
-            if total_shift_s > 0:
-                seg["start"] += total_shift_s
-                seg["end"] += total_shift_s
-                target_d = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
-                ratio = (actual_d / target_d) if target_d > 0 else 1.0
 
             gap_ms = int((target_d - actual_d) * 1000)
             if gap_ms <= 20:
@@ -1325,14 +1369,13 @@ class VoiceWorkflow:
         print(
             "[Voice Deficit] Summary: "
             f"overlap={overlap_count}, stretch={stretch_count}, "
-            f"silence_fade={silence_count}, no_action={no_action_count}, "
-            f"timeline_shift={total_shift_s:.2f}s"
+            f"silence_fade={silence_count}, no_action={no_action_count}"
         )
         return segments, polished_wavs
 
     def _fit_segment_wavs_to_timeline(self, *, segments, wavs, tmp_dir: str, sync_mode: str):
         mode_key = (sync_mode or "off").strip().lower()
-        if mode_key != "smart":
+        if mode_key not in {"smart", "timeline"}:
             return wavs
 
         synced_wavs = []
@@ -1341,7 +1384,8 @@ class VoiceWorkflow:
                 synced_wavs.append(wav_path)
                 continue
             target_duration = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
-            synced_path = os.path.join(tmp_dir, f"seg_{idx:04d}_smartfit.wav")
+            suffix = "timelinefit" if mode_key == "timeline" else "smartfit"
+            synced_path = os.path.join(tmp_dir, f"seg_{idx:04d}_{suffix}.wav")
             fitted_path = self.engine_runtime.fit_wav_to_duration(
                 input_wav_path=wav_path,
                 output_wav_path=synced_path,
@@ -1350,6 +1394,31 @@ class VoiceWorkflow:
             )
             synced_wavs.append(fitted_path)
         return synced_wavs
+
+    def _extend_segment_ends_to_audio(self, *, segments, wavs) -> None:
+        """Record the actual TTS audio end on each segment when the audio
+        is longer than the original segment window.
+        
+        This is used for overlap detection in the timeline, NOT for visual display.
+        The visual display uses layer.end strictly, but overlap detection needs
+        to know the actual audio duration to determine when segments should stack.
+        """
+        for seg, wav_path in zip(segments, wavs or []):
+            if not wav_path or not os.path.exists(wav_path):
+                continue
+            actual_d = self._probe_wav_duration_seconds(wav_path)
+            if actual_d <= 0:
+                continue
+            try:
+                start_s = float(seg.get("start", 0.0))
+                end_s = float(seg.get("end", 0.0))
+            except (TypeError, ValueError):
+                continue
+            audio_end = start_s + actual_d
+            if audio_end > end_s + 0.01:
+                if "end" in seg and "_original_end" not in seg:
+                    seg["_original_end"] = end_s
+                seg["_audio_end"] = audio_end
 
     def _synthesize_segment_wavs(
         self,
@@ -1551,9 +1620,8 @@ class VoiceWorkflow:
         voice_name: str = "ngochuyen",
         voice_speed: float = 1.0,
         timing_sync_mode: str = "off",
-        voice_gain_db: float = 0.0,
-        bg_gain_db: float = 0.0,
-        ducking_amount_db: float = -6.0,
+        original_volume: int = 50,
+        dub_volume: int = 100,
         project_state_path: str = "",
         project_temp_dir: str = "",
         ai_rewrite_dubbing: bool = False,
@@ -1638,6 +1706,7 @@ class VoiceWorkflow:
             tmp_dir=tmp_dir,
             sync_mode=timing_sync_mode,
         )
+        self._extend_segment_ends_to_audio(segments=segments, wavs=wavs)
 
         synth_elapsed = time.perf_counter() - synth_started
         print(
@@ -1645,51 +1714,20 @@ class VoiceWorkflow:
             f"requested={safe_voice_speed:.2f}, native={provider_speed:.2f}, residual={residual_speed:.2f}"
         )
 
-        voice_track = os.path.join(output_dir, "voice_vi.wav")
+        voice_track = os.path.join(tmp_dir, "voice_vi.wav")
         build_started = time.perf_counter()
         self.engine_runtime.build_voice_track(
             segments=segments,
             tts_wav_paths=wavs,
             output_wav_path=voice_track,
-            gain_db=float(voice_gain_db),
+            gain_db=0.0,
         )
         build_elapsed = time.perf_counter() - build_started
 
+        # Skip mixed audio creation - will be generated at export time with current volumes
         mixed = ""
-        if background_path and os.path.exists(background_path):
-            mixed = os.path.normpath(os.path.join(output_dir, "mixed_vi.wav"))
-            effective_bg_gain = float(bg_gain_db)
-            # Auto-gain compensation for Demucs-separated background
-            if audio_mode_key == "clean" and state:
-                original_audio = state.artifacts.get("extracted_audio", "")
-                if original_audio and os.path.exists(original_audio):
-                    auto_compensation = self._compute_background_gain_compensation(original_audio, background_path)
-                    if auto_compensation != 0.0:
-                        effective_bg_gain += auto_compensation
-                        print(
-                            f"[Voice Workflow] Auto-gain applied: +{auto_compensation:+.2f}dB "
-                            f"(manual={bg_gain_db:+.2f}dB, total={effective_bg_gain:+.2f}dB)"
-                        )
-            if audio_mode_key == "fast":
-                print(f"[Voice Workflow] Fast Mode mix: ducking original/extracted background source {background_path}")
-            else:
-                print(f"[Voice Workflow] Clean Voice mix: overlaying TTS with separated background stem {background_path}")
-            mix_started = time.perf_counter()
-            self.engine_runtime.mix_voice_with_background(
-                background_wav_path=background_path,
-                voice_wav_path=voice_track,
-                output_wav_path=mixed,
-                background_gain_db=effective_bg_gain,
-                voice_gain_db=0.0,
-                ducking_mode="timeline" if audio_mode_key == "fast" else "off",
-                ducking_segments=segments if audio_mode_key == "fast" else None,
-                ducking_amount_db=float(ducking_amount_db),
-            )
-            mix_elapsed = time.perf_counter() - mix_started
-            print(f"[Voice Workflow] Mixed output created: {mixed}")
-        else:
-            mix_elapsed = 0.0
-            print("[Voice Workflow] No background source found. Generating voice track only.")
+        mix_elapsed = 0.0
+        print(f"[Voice Workflow] Voice track created at {voice_track}. Mixed audio will be generated at export time.")
 
         self._mark_completed(
             state,

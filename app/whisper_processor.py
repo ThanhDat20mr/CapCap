@@ -5,6 +5,7 @@ import traceback
 from pathlib import Path
 
 from runtime_paths import models_path, workspace_root
+from services.resource_download_service import ResourceDownloadService
 
 
 _WHISPER_MODEL_CACHE: dict[tuple[str, str, str], object] = {}
@@ -184,7 +185,7 @@ def _download_whisper_from_custom_repo(model_name: str) -> str | None:
     ):
         return target_dir
 
-    repo_id = "Hacht/CapCapResource"
+    repo_id = ResourceDownloadService.HF_RESOURCE_REPO
     base_subfolder = f"faster_whisper/models--Systran--faster-whisper-{model_name}"
 
     try:
@@ -240,10 +241,6 @@ def _load_whisper_model(model_name):
     }
 
     original_name = str(model_name)
-    if not os.path.isdir(original_name):
-        local_dir = _download_whisper_from_custom_repo(original_name)
-        if local_dir:
-            model_name = local_dir
     if not os.path.isdir(str(model_name)):
         model_kwargs["download_root"] = _faster_whisper_cache_dir()
     cache_key = (str(model_name), str(model_kwargs["device"]), str(model_kwargs["compute_type"]))

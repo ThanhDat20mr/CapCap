@@ -142,12 +142,14 @@ class EngineRuntime:
             style_instruction=style_instruction,
         )
 
-    def embed_subtitles(self, video_path: str, srt_path: str, output_path: str, *, subtitle_style=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None) -> bool:
+    def embed_subtitles(self, video_path: str, srt_path: str, output_path: str, *, subtitle_style=None, mask_regions=None, logo_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, fast=False) -> bool:
         return self.ffmpeg.embed_subtitles(
             video_path,
             srt_path,
             output_path,
             subtitle_style=subtitle_style,
+            mask_regions=mask_regions,
+            logo_layers=logo_layers,
             target_width=target_width,
             target_height=target_height,
             output_scale_mode=output_scale_mode,
@@ -155,14 +157,17 @@ class EngineRuntime:
             output_fill_focus_y=output_fill_focus_y,
             output_fps=output_fps,
             video_filter_state=video_filter_state,
+            fast=fast,
         )
 
-    def embed_ass_subtitles(self, video_path: str, ass_path: str, output_path: str, *, blur_region=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None) -> bool:
+    def embed_ass_subtitles(self, video_path: str, ass_path: str, output_path: str, *, blur_region=None, mask_regions=None, logo_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, fast=False) -> bool:
         return self.ffmpeg.embed_ass_subtitles(
             video_path,
             ass_path,
             output_path,
             blur_region=blur_region,
+            mask_regions=mask_regions,
+            logo_layers=logo_layers,
             target_width=target_width,
             target_height=target_height,
             output_scale_mode=output_scale_mode,
@@ -170,13 +175,14 @@ class EngineRuntime:
             output_fill_focus_y=output_fill_focus_y,
             output_fps=output_fps,
             video_filter_state=video_filter_state,
+            fast=fast,
         )
 
     def get_video_dimensions(self, video_path: str):
         return self.ffmpeg.get_video_dimensions(video_path)
 
-    def generate_srt(self, segments, output_path: str) -> str:
-        return self.subtitle.generate_srt(segments, output_path)
+    def generate_srt(self, segments, output_path: str, max_gap_ms: float = 100.0) -> str:
+        return self.subtitle.generate_srt(segments, output_path, max_gap_ms=max_gap_ms)
 
     def synthesize_segment(
         self,
@@ -217,6 +223,21 @@ class EngineRuntime:
             smart_max_ratio=smart_max_ratio,
         )
 
+    def trim_trailing_silence(
+        self,
+        *,
+        input_wav_path: str,
+        output_wav_path: str,
+        silence_threshold: float = -40.0,
+        min_silence_duration: float = 0.5,
+    ) -> str:
+        return self.audio_mix.trim_trailing_silence(
+            input_wav_path=input_wav_path,
+            output_wav_path=output_wav_path,
+            silence_threshold=silence_threshold,
+            min_silence_duration=min_silence_duration,
+        )
+
     def change_wav_speed(
         self,
         *,
@@ -240,7 +261,7 @@ class EngineRuntime:
         voice_gain_db: float = 0.0,
         ducking_mode: str = "off",
         ducking_segments=None,
-        ducking_amount_db: float = -6.0,
+        ducking_amount_db: float = 0.0,
     ) -> str:
         return self.audio_mix.mix_voice_with_background(
             background_wav_path=background_wav_path,
@@ -251,6 +272,23 @@ class EngineRuntime:
             ducking_mode=ducking_mode,
             ducking_segments=ducking_segments,
             ducking_amount_db=ducking_amount_db,
+        )
+
+    def mix_original_with_dub(
+        self,
+        *,
+        original_wav_path: str,
+        dub_wav_path: str,
+        output_wav_path: str,
+        original_gain_db: float = 0.0,
+        dub_gain_db: float = 0.0,
+    ) -> str:
+        return self.audio_mix.mix_original_with_dub(
+            original_wav_path=original_wav_path,
+            dub_wav_path=dub_wav_path,
+            output_wav_path=output_wav_path,
+            original_gain_db=original_gain_db,
+            dub_gain_db=dub_gain_db,
         )
 
     def mux_audio_for_preview(self, video_path: str, audio_path: str, output_video_path: str, *, target_width=None, target_height=None, output_scale_mode="fit", focus_x=0.5, focus_y=0.5, output_fps=None, video_filter_state=None) -> str:

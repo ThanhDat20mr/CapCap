@@ -17,6 +17,94 @@ class PreviewController:
     def __init__(self, gui):
         self.gui = gui
 
+    def _extract_overlay_layers(self):
+        mask_regions = []
+        logo_layers = []
+        try:
+            if hasattr(self.gui, "_current_mask_regions_payload"):
+                raw_masks = self.gui._current_mask_regions_payload()
+                print(f"[Preview] Found {len(raw_masks)} mask region(s) from M1 track")
+                for region in raw_masks:
+                    mask_regions.append({
+                        "x": float(region.get("x", 0.3)),
+                        "y": float(region.get("y", 0.4)),
+                        "width": float(region.get("width", 0.4)),
+                        "height": float(region.get("height", 0.2)),
+                        "mode": str(region.get("mode", "solid")),
+                        "color": str(region.get("color", "#000000")),
+                        "opacity": float(region.get("opacity", 1.0)),
+                        "pixelate_size": int(region.get("pixelate_size", 12)),
+                        "blur_strength": int(region.get("blur_strength", 20)),
+                    })
+        except Exception as e:
+            print(f"Warning: Failed to extract mask regions: {e}")
+
+        try:
+            if hasattr(self.gui, "timeline") and hasattr(self.gui.timeline, "_timeline"):
+                timeline_obj = self.gui.timeline._timeline
+                if timeline_obj:
+                    for tr in timeline_obj.tracks:
+                        track_type = tr.type.value if hasattr(tr.type, "value") else str(tr.type)
+                        print(f"[Preview] Checking track: name={tr.name} type={track_type}")
+                        if track_type == "mask":
+                            for layer in tr.layers:
+                                try:
+                                    mask_regions.append({
+                                        "x": float(getattr(layer, "position_x", 0.3)),
+                                        "y": float(getattr(layer, "position_y", 0.4)),
+                                        "width": float(getattr(layer, "width", 0.4)),
+                                        "height": float(getattr(layer, "height", 0.2)),
+                                        "mode": str(getattr(layer, "mode", "solid")),
+                                        "color": str(getattr(layer, "color", "#000000")),
+                                        "opacity": float(getattr(layer, "opacity", 1.0)),
+                                        "pixelate_size": int(getattr(layer, "pixelate_size", 12)),
+                                        "blur_strength": int(getattr(layer, "blur_strength", 20)),
+                                    })
+                                except (TypeError, ValueError):
+                                    continue
+                        elif track_type == "image":
+                            for layer in tr.layers:
+                                try:
+                                    if not getattr(layer, "visible", True):
+                                        continue
+                                    source = getattr(layer, "source", "")
+                                    if not source:
+                                        continue
+                                    transform = getattr(layer, "transform", None)
+                                    if transform:
+                                        # Transform x,y are in pixels or percentage, normalize to 0-1
+                                        x = float(getattr(transform, "x", 10.0)) / 100.0
+                                        y = float(getattr(transform, "y", 10.0)) / 100.0
+                                        scale_x = float(getattr(transform, "scale_x", 1.0))
+                                        scale_y = float(getattr(transform, "scale_y", 1.0))
+                                        w = 0.2 * scale_x
+                                        h = 0.2 * scale_y
+                                        rotation = float(getattr(transform, "rotation", 0.0))
+                                    else:
+                                        x = 0.1
+                                        y = 0.1
+                                        w = 0.2
+                                        h = 0.2
+                                        rotation = 0.0
+                                    logo_layers.append({
+                                        "source": str(source),
+                                        "x": x,
+                                        "y": y,
+                                        "width": w,
+                                        "height": h,
+                                        "opacity": float(getattr(layer, "opacity", 1.0)),
+                                        "rotation": rotation,
+                                    })
+                                    print(f"[Preview] Added logo layer: source={source}, x={x}, y={y}")
+                                except (TypeError, ValueError) as e:
+                                    print(f"[Preview] Failed to extract logo layer: {e}")
+                                    continue
+        except Exception as e:
+            print(f"Warning: Failed to extract logo layers: {e}")
+
+        print(f"[Preview] Final overlay extraction: {len(mask_regions)} mask(s), {len(logo_layers)} logo(s)")
+        return mask_regions, logo_layers
+
     @staticmethod
     def _format_duration_ms(duration_ms: int) -> str:
         total_seconds = max(0, int(round(float(duration_ms or 0) / 1000.0)))
@@ -235,6 +323,69 @@ class PreviewController:
         box.exec()
         return box.clickedButton() is start_btn
 
+    def _check_audio_freshness(self, audio_path: str) -> bool:
+        """Check if the audio file matches current voice settings.
+        
+        Always returns True - no popup, just proceed with export.
+        """
+        return True
+    
+    def _regenerate_mixed_audio_with_current_volumes(self) -> str:
+        """Regenerate the mixed audio file using current volume settings from Audio tab.
+        
+        Returns the path to the newly generated mixed audio file, or empty string if failed.
+        """
+        if not hasattr(self.gui, 'last_voice_vi_path') or not self.gui.last_voice_vi_path:
+            print("[Export] No voice file path available")
+            return ""
+        
+        voice_path = self.gui.last_voice_vi_path
+        if not os.path.exists(voice_path):
+            print(f"[Export] Voice file not found at: {voice_path}")
+            return ""
+        
+        # Get current volume settings from Audio tab
+        original_volume = int(self.gui.audio_a1_volume_slider.value()) if hasattr(self.gui, 'audio_a1_volume_slider') else 50
+        dub_volume = int(self.gui.audio_a2_volume_slider.value()) if hasattr(self.gui, 'audio_a2_volume_slider') else 100
+        
+        # Get background audio path
+        bg_path = self.gui._resolve_preview_background_audio_path() if hasattr(self.gui, '_resolve_preview_background_audio_path') else ""
+        
+        if not bg_path or not os.path.exists(bg_path):
+            # No background, just use voice with dub volume
+            print(f"[Export] No background audio, using voice only: {voice_path}")
+            return voice_path
+        
+        # Generate new mixed audio with current volumes
+        try:
+            from audio_mixer import mix_original_with_dub
+            
+            # Create output path in temp directory
+            temp_dir = os.path.join(self.gui.workspace_root, "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            output_path = os.path.join(temp_dir, "export_mixed_temp.wav")
+            
+            # Convert percentages to dB
+            original_gain_db = self.gui._percent_to_db(original_volume) if hasattr(self.gui, '_percent_to_db') else 0.0
+            dub_gain_db = self.gui._percent_to_db(dub_volume) if hasattr(self.gui, '_percent_to_db') else 0.0
+            
+            # Mix the audio
+            mix_original_with_dub(
+                original_wav_path=bg_path,
+                dub_wav_path=voice_path,
+                output_wav_path=output_path,
+                original_gain_db=original_gain_db,
+                dub_gain_db=dub_gain_db,
+            )
+            
+            print(f"[Export] Mixed audio created: {output_path}")
+            return output_path
+        except Exception as e:
+            print(f"[Export] Failed to regenerate mixed audio: {e}")
+            import traceback
+            traceback.print_exc()
+            return ""
+
     def _prepare_current_export_srt(self) -> str:
         segments = list(self.gui.get_active_segments() or [])
         if not segments:
@@ -278,7 +429,7 @@ class PreviewController:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def _build_styled_preview_signature(self, *, video_path: str, audio_path: str, mode: str, srt_path: str, subtitle_style: dict) -> str:
+    def _build_styled_preview_signature(self, *, video_path: str, audio_path: str, mode: str, srt_path: str, subtitle_style: dict, mask_regions=None, logo_layers=None) -> str:
         payload = {
             "kind": "styled_preview_v2",
             "mode": mode,
@@ -293,6 +444,8 @@ class PreviewController:
             "output_fill_focus": self.gui.get_output_fill_focus(),
             "output_fps": self.gui.get_output_fps_key(),
             "video_filter": self.gui.get_video_filter_state() if hasattr(self.gui, "get_video_filter_state") else {},
+            "mask_regions": mask_regions or [],
+            "logo_layers": logo_layers or [],
         }
         return hashlib.sha1(json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -306,7 +459,21 @@ class PreviewController:
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         translated_srt_path = self.gui.last_translated_srt_path
         translated_ass_path = self.gui.live_preview_ass_path
-        chosen_audio = self.gui.resolve_selected_audio_path()
+        
+        # For voice/both modes, regenerate mixed audio with current volume settings
+        chosen_audio = ""
+        if mode in ("voice", "both"):
+            chosen_audio = self._regenerate_mixed_audio_with_current_volumes()
+            if not chosen_audio:
+                # Fallback to cached audio if regeneration failed
+                chosen_audio = self.gui.resolve_selected_audio_path()
+        else:
+            chosen_audio = self.gui.resolve_selected_audio_path()
+
+        # Check if audio needs regeneration due to changed settings
+        if mode in ("voice", "both") and chosen_audio:
+            if not self._check_audio_freshness(chosen_audio):
+                return
 
         if mode in ("subtitle", "both"):
             translated_srt_path = self._prepare_current_export_srt()
@@ -358,6 +525,10 @@ class PreviewController:
         ):
             return
 
+        # Persist timeline data before export so mask/logo layers are available
+        if hasattr(self.gui, "persist_current_timeline_project_data"):
+            self.gui.persist_current_timeline_project_data()
+
         self.gui.export_btn.setEnabled(False)
         self.gui.export_btn.setText("Exporting...")
         self.gui.progress_bar.setValue(96)
@@ -367,6 +538,12 @@ class PreviewController:
 
         project_state_path = self.gui.project_service.project_file(self.gui.current_project_state.project_root) if self.gui.current_project_state else ""
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
+        
+        # Check if an export is already running
+        if hasattr(self.gui, 'export_thread') and self.gui.export_thread.isRunning():
+            self.gui.log("[Export] Export already running, ignoring request")
+            return
+        
         self.gui.export_thread = FinalExportWorker(
             workspace_root=self.gui.workspace_root,
             video_path=video_path,
@@ -408,7 +585,13 @@ class PreviewController:
         os.makedirs(out_dir, exist_ok=True)
 
         translated_srt_path = self.gui.last_translated_srt_path
-        chosen_audio = self.gui.resolve_selected_audio_path()
+        chosen_audio = ""
+        if mode in ("voice", "both"):
+            chosen_audio = self._regenerate_mixed_audio_with_current_volumes()
+            if not chosen_audio:
+                chosen_audio = self.gui.resolve_selected_audio_path()
+        else:
+            chosen_audio = self.gui.resolve_selected_audio_path()
 
         if mode in ("subtitle", "both") and (not translated_srt_path or not os.path.exists(translated_srt_path)):
             QMessageBox.warning(self.gui, "Error", "Vietnamese subtitle file not found. Please run translation first.")
@@ -426,6 +609,7 @@ class PreviewController:
         duration_seconds = 5.0
         target_width, target_height = self._resolve_output_canvas_dimensions(video_path)
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
+        mask_regions, logo_layers = self._extract_overlay_layers()
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         self.gui.cleanup_file_if_exists(self.gui.last_exact_preview_5s_path)
         preview_output = os.path.join(out_dir, f"{video_name}_preview5s_{int(time.time())}.mp4")
@@ -447,6 +631,11 @@ class PreviewController:
         except Exception:
             pass
 
+        # Check if a quick preview is already running
+        if hasattr(self.gui, 'quick_preview_thread') and self.gui.quick_preview_thread.isRunning():
+            self.gui.log("[Preview] 5s preview already running, ignoring request")
+            return
+
         self.gui.quick_preview_thread = QuickPreviewWorker(
             video_path=video_path,
             output_path=preview_output,
@@ -462,6 +651,8 @@ class PreviewController:
             output_fill_focus_x=fill_focus_x,
             output_fill_focus_y=fill_focus_y,
             video_filter_state=self.gui.get_video_filter_state() if hasattr(self.gui, "get_video_filter_state") else {},
+            mask_regions=mask_regions,
+            logo_layers=logo_layers,
             temp_dir=self.gui.get_project_temp_dir("preview"),
         )
         self.gui.quick_preview_thread.finished.connect(self.gui.on_quick_preview_ready)
@@ -509,6 +700,11 @@ class PreviewController:
         use_output_canvas = bool(show_dialog)
         target_width, target_height = ((None, None) if not use_output_canvas else self._resolve_output_canvas_dimensions(video_path))
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
+
+        # Check if a frame preview is already running
+        if hasattr(self.gui, 'frame_preview_thread') and self.gui.frame_preview_thread.isRunning():
+            self.gui.log("[Preview] Frame preview already running, ignoring request")
+            return
 
         self.gui.frame_preview_thread = ExactFramePreviewWorker(
             video_path=video_path,
@@ -661,15 +857,30 @@ class PreviewController:
         self._start_video_preview()
 
     def _start_video_preview(self):
+        self.gui.log("[Preview] _start_video_preview called")
+        
+        # Check if a preview is already running
+        if hasattr(self.gui, 'preview_thread') and self.gui.preview_thread.isRunning():
+            self.gui.log("[Preview] Preview already running, ignoring request")
+            return
+        
         if hasattr(self.gui, "ensure_media_backend_ready"):
             self.gui.ensure_media_backend_ready()
         video_path = self.gui.video_path_edit.text().strip()
-        audio_path = self.gui.resolve_selected_audio_path()
         mode = self.gui.get_output_mode_key()
+        audio_path = ""
+        if mode in ("voice", "both"):
+            audio_path = self._regenerate_mixed_audio_with_current_volumes()
+            if not audio_path:
+                audio_path = self.gui.resolve_selected_audio_path()
+        else:
+            audio_path = self.gui.resolve_selected_audio_path()
         if not video_path or not os.path.exists(video_path):
+            self.gui.log("[Preview] Video file not found, showing error")
             QMessageBox.warning(self.gui, "Error", "Video file not found. Please select a video first.")
             return
         if mode in ("voice", "both") and (not audio_path or not os.path.exists(audio_path)):
+            self.gui.log(f"[Preview] Audio file not found for mode={mode}, showing error")
             QMessageBox.warning(
                 self.gui,
                 "Error",
@@ -678,10 +889,14 @@ class PreviewController:
             return
 
         has_active_video_filters = bool(hasattr(self.gui, "has_active_video_filters") and self.gui.has_active_video_filters())
-        self.gui._preview_video_has_burned_subtitles = bool(mode == "subtitle" and has_active_video_filters)
+        self.gui.log(f"[Preview] has_active_video_filters={has_active_video_filters}")
+        mask_regions, logo_layers = self._extract_overlay_layers()
+        has_overlays = bool(mask_regions or logo_layers)
+        self.gui._preview_video_has_burned_subtitles = bool(mode == "subtitle" and (has_active_video_filters or has_overlays))
 
-        # Subtitle-only preview can stay live when no canvas/filter processing is needed.
-        if mode == "subtitle" and not has_active_video_filters:
+        # Subtitle-only preview can stay live when no canvas/filter/overlay processing is needed.
+        if mode == "subtitle" and not has_active_video_filters and not has_overlays:
+            self.gui.log("[Preview] Subtitle-only mode, no filters/overlays, using live preview")
             try:
                 self.gui._preview_video_has_burned_subtitles = False
                 if hasattr(self.gui.video_view, "set_preview_aspect_ratio"):
@@ -690,13 +905,13 @@ class PreviewController:
                     self.gui.video_view.set_preview_scale_mode(self.gui.get_output_scale_mode_key())
                 self.gui.media_player.setSource(QUrl.fromLocalFile(video_path))
                 self.gui.sync_live_subtitle_preview()
-                self.gui._refresh_preview_audio_controls()
                 self.gui.refresh_ui_state()
             except Exception:
                 pass
             return
         ts = int(time.time())
         preview_out = self.gui.get_project_temp_path("preview", f"preview_vi_voice_{ts}.mp4", create_parent=True)
+        self.gui.log(f"[Preview] Starting full preview render: mode={mode}, preview_out={preview_out}")
         preview_srt_path = ""
         preview_segments = []
         subtitle_style = {}
@@ -714,6 +929,8 @@ class PreviewController:
                 mode=mode,
                 srt_path=preview_srt_path,
                 subtitle_style=subtitle_style,
+                mask_regions=mask_regions,
+                logo_layers=logo_layers,
             )
             cached_preview = str(getattr(self.gui, "last_styled_preview_path", "") or "").strip()
             cached_signature = str(getattr(self.gui, "last_styled_preview_signature", "") or "").strip()
@@ -739,6 +956,9 @@ class PreviewController:
         except Exception:
             pass
 
+        # Don't quit/wait on preview thread - let it finish naturally
+        # The Apply button is disabled to prevent double-clicks
+
         self.gui.log(f"[Preview] video={video_path}")
         self.gui.log(f"[Preview] audio={audio_path or '<none>'}")
         self.gui.log(f"[Preview] out={preview_out}")
@@ -762,21 +982,25 @@ class PreviewController:
             mode=mode,
             srt_path=preview_srt_path,
             subtitle_style=subtitle_style,
-            render_subtitles=bool(mode == "subtitle" and has_active_video_filters),
+            render_subtitles=bool(mode == "subtitle" and (has_active_video_filters or has_overlays)),
             target_width=target_width,
             target_height=target_height,
             output_scale_mode=self.gui.get_output_scale_mode_key(),
             output_fill_focus_x=fill_focus_x,
             output_fill_focus_y=fill_focus_y,
             video_filter_state=self.gui.get_video_filter_state() if hasattr(self.gui, "get_video_filter_state") else {},
+            mask_regions=mask_regions,
+            logo_layers=logo_layers,
             temp_dir=self.gui.get_project_temp_dir("preview"),
         )
         self.gui.preview_thread.finished.connect(
             lambda preview_path, error: self.gui.on_preview_ready(preview_path, error, styled_signature)
         )
+        self.gui.log(f"[Preview] Starting preview thread")
         self.gui.preview_thread.start()
 
     def on_preview_ready(self, preview_path, error, styled_signature=""):
+        self.gui.log(f"[Preview] on_preview_ready called: preview_path={preview_path}, error={error}")
         if hasattr(self.gui, "ensure_media_backend_ready"):
             self.gui.ensure_media_backend_ready()
         self.gui._styled_preview_running = False
@@ -784,9 +1008,25 @@ class PreviewController:
         if hasattr(self.gui, "preview_btn"):
             self.gui.preview_btn.setEnabled(True)
         self.gui.progress_bar.setValue(100)
-        self.gui.refresh_ui_state()
+        try:
+            self.gui.refresh_ui_state()
+        except Exception as e:
+            if hasattr(self.gui, "log"):
+                self.gui.log(f"[Preview] UI refresh error: {e}")
+        try:
+            if hasattr(self.gui, "_refresh_video_inspector_status"):
+                self.gui._refresh_video_inspector_status()
+        except Exception as e:
+            if hasattr(self.gui, "log"):
+                self.gui.log(f"[Preview] Inspector status error: {e}")
+        
+        # Re-enable Apply button after preview is ready
+        if hasattr(self.gui, "video_inspector_apply_btn"):
+            self.gui.video_inspector_apply_btn.setEnabled(True)
+            self.gui.log("[Preview] Re-enabled Apply button")
 
         if error:
+            self.gui.log(f"[Preview] Error occurred: {error}")
             self.gui._video_filter_preview_dirty = bool(hasattr(self.gui, "has_active_video_filters") and self.gui.has_active_video_filters())
             self.gui._video_filter_apply_requested = False
             self.gui._play_video_filter_preview_when_ready = False
@@ -797,6 +1037,7 @@ class PreviewController:
             return
 
         if preview_path and os.path.exists(preview_path):
+            self.gui.log(f"[Preview] Preview successful, loading into player: {preview_path}")
             self.gui._video_filter_preview_dirty = False
             self.gui._video_filter_apply_requested = False
             if hasattr(self.gui, "hide_filter_thumbnail_preview"):
@@ -813,7 +1054,6 @@ class PreviewController:
             else:
                 self.gui.sync_live_subtitle_preview()
             self.gui.sync_preview_audio_track_to_output(apply_to_player=False)
-            self.gui._refresh_preview_audio_controls()
             if getattr(self.gui, "_play_video_filter_preview_when_ready", False):
                 self.gui._play_video_filter_preview_when_ready = False
                 self.gui.media_player.play()
