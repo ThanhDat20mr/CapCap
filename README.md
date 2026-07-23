@@ -39,8 +39,8 @@
 - **Per-track inspectors** — clicking a layer on any track opens a dedicated inspector card (Subtitle, Audio, Blur, Logo, Mask, Video) with controls tailored to the track. The subtitle inspector is a flat single panel (no tabs) with action buttons at top, shared original text, segment editor, and voice widgets below.
 - **TS1 track label mute** — clicking the TS1 label toggles dubbed audio mute (same as A1/A2). Hover cursor now uses `MUTE_PREFIXES` so the pointing hand shows on all clickable labels.
 - **Drag-to-position overlay regions** — Blur, Logo, and Mask regions share the same overlay UX: drag the middle to move, drag corner handles to resize, X to delete
-- **Logo / Watermark track (L1)** — add an image and place it on the video; pick colour / opacity / rotation from the inspector. The overlay stays in sync with the layer position.
-- **Mask track (M1)** — paint a solid-colour rectangle on the video to recolour a region (e.g. hide a watermark, redact a face). The colour is only applied while the video is playing to keep the drag smooth and avoid preview lag.
+- **Logo / Watermark track (L1)** — add multiple images and place them independently on the video; pick colour / opacity / rotation from the inspector. The selected overlay stays in sync with its layer position.
+- **Mask track (M1)** — add multiple solid-colour rectangles to recolour regions (e.g. hide watermarks, redact faces). All mask regions remain visible in the editor; the selected region exposes drag handles. The colour is only applied while the video is playing to keep dragging smooth and avoid preview lag.
 - **Blur inspector** — per-region blur radius (1-20), opacity, and pixelate (mosaic) toggle
 - **Vietnamese normalizer dictionary manager** (More → Normalizer Dictionary) — CRUD editor for custom acronym/non-Vietnamese word mappings
 - **GGUF translator improvements** — automatic enable when provider is local, absolute model paths, smarter CJK quality validation, increased token limit

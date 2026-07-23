@@ -165,13 +165,10 @@ class _BlurRegionOverlayWindow(QWidget):
     MIN_WIDTH = HANDLE_SIZE * 2
     MIN_HEIGHT = HANDLE_SIZE * 2
     CLOSE_SIZE = 16
-    COLORS = [
-        QColor(110, 231, 214),
-        QColor(255, 193, 94),
-        QColor(117, 181, 255),
-        QColor(255, 124, 168),
-        QColor(174, 235, 104),
-    ]
+    BLUR_COLOR = QColor(110, 231, 214)
+    # Kept as a compatibility alias for region-placement code. Blur is a
+    # single effect, so every entry deliberately resolves to one colour.
+    COLORS = [BLUR_COLOR] * 5
 
     def __init__(self, on_region_changed=None, on_edit_finished=None):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
@@ -251,6 +248,7 @@ class _BlurRegionOverlayWindow(QWidget):
         self.update()
 
     def set_regions(self, regions):
+        previous_active = self._active_index
         next_regions = []
         raw_regions = regions
         if isinstance(raw_regions, dict):
@@ -269,7 +267,10 @@ class _BlurRegionOverlayWindow(QWidget):
                 if width > 0.0 and height > 0.0:
                     next_regions.append(QRectF(x, y, width, height))
         self._regions = next_regions
-        self._active_index = len(self._regions) - 1
+        self._active_index = (
+            min(previous_active, len(self._regions) - 1)
+            if previous_active >= 0 else len(self._regions) - 1
+        )
         self._drag_index = -1
         self._drag_mode = ""
         self.sync_to_view()
@@ -383,18 +384,25 @@ class _BlurRegionOverlayWindow(QWidget):
         return QRectF(rect.right() - size + 2, rect.top() - 2, size, size)
 
     def _hit_test(self, pos: QPointF) -> tuple[int, str]:
-        for index in range(len(self._regions) - 1, -1, -1):
-            rect = self.region_rect(index)
-            if rect.width() <= 0 or rect.height() <= 0:
-                continue
-            if self._close_rect(rect).contains(pos):
-                return index, "close"
-            for handle_name, handle_rect in self._handle_rects(rect).items():
-                if handle_rect.contains(pos):
-                    return index, handle_name
-            if rect.contains(pos):
-                return index, "move"
+        index = self._active_index
+        if index < 0 or index >= len(self._regions):
+            return -1, ""
+        rect = self.region_rect(index)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return -1, ""
+        if self._close_rect(rect).contains(pos):
+            return index, "close"
+        for handle_name, handle_rect in self._handle_rects(rect).items():
+            if handle_rect.contains(pos):
+                return index, handle_name
+        if rect.contains(pos):
+            return index, "move"
         return -1, ""
+
+    def set_active_index(self, index: int):
+        if self._regions:
+            self._active_index = max(0, min(int(index), len(self._regions) - 1))
+            self.update()
 
     def mousePressEvent(self, event):
         if not self._editable or event.button() != Qt.LeftButton:
@@ -484,18 +492,28 @@ class _BlurRegionOverlayWindow(QWidget):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        # This is a translucent top-level overlay. Explicitly clear its
+        # backing surface before repainting; otherwise stale pixels from a
+        # prior active region can remain as dark rectangles in inactive
+        # regions after the timeline selection changes.
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
         for index, _region in enumerate(self._regions):
             rect = self.region_rect(index)
             if rect.width() <= 0 or rect.height() <= 0:
                 continue
-            color = self.COLORS[index % len(self.COLORS)]
-            overlay_path = QPainterPath()
-            overlay_path.addRoundedRect(rect, 12, 12)
-            painter.fillPath(overlay_path, QColor(color.red(), color.green(), color.blue(), 62))
+            # B1 is a single effect type: unlike generic region tools,
+            # every blur layer uses the same visual identity.
+            color = self.BLUR_COLOR
+            # Blur regions are outlines only. Any translucent fill blends
+            # with the frame beneath it and can look dark blue on inactive
+            # regions, even though the logical overlay colour is identical.
+            painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 235), 2))
             painter.drawRoundedRect(rect, 12, 12)
 
-            if self._editable:
+            if self._editable and index == self._active_index:
                 painter.setBrush(QColor(color.red(), color.green(), color.blue(), 235))
                 painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
                 for handle_rect in self._handle_rects(rect).values():
@@ -535,6 +553,7 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
     def __init__(self, on_region_changed=None, on_edit_finished=None):
         super().__init__(on_region_changed=on_region_changed, on_edit_finished=on_edit_finished)
         self._pixmap = None
+        self._logo_items: list[dict] = []
         self._sync_timer = None
         self._opacity: float = 1.0
         self._rotation: float = 0.0
@@ -573,10 +592,14 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
             self._pixmap = QPixmap(path)
         else:
             self._pixmap = None
+        if 0 <= self._active_index < len(self._logo_items):
+            self._logo_items[self._active_index]["pixmap"] = self._pixmap
         self.update()
 
     def set_opacity(self, opacity: float):
         self._opacity = max(0.0, min(1.0, float(opacity)))
+        if 0 <= self._active_index < len(self._logo_items):
+            self._logo_items[self._active_index]["opacity"] = self._opacity
         self.update()
 
     def get_opacity(self) -> float:
@@ -584,6 +607,8 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
 
     def set_rotation(self, rotation: float):
         self._rotation = float(rotation) % 360.0
+        if 0 <= self._active_index < len(self._logo_items):
+            self._logo_items[self._active_index]["rotation"] = self._rotation
         self.update()
 
     def get_rotation(self) -> float:
@@ -592,32 +617,61 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
     def set_logo_rect(self, x, y, w, h):
         if not self._regions:
             self._regions.append(QRectF(0.0, 0.0, 1.0, 1.0))
-        self._regions[0] = QRectF(
+            self._active_index = 0
+        self._regions[self._active_index] = QRectF(
             max(0.0, min(1.0, x)),
             max(0.0, min(1.0, y)),
             max(0.01, min(1.0, w)),
             max(0.01, min(1.0, h)),
         )
-        self._active_index = 0
         self.update()
 
     def get_logo_rect(self):
         if not self._regions:
             return QRectF(0.0, 0.0, 0.0, 0.0)
-        return QRectF(self._regions[0])
+        return QRectF(self._regions[self._active_index])
 
     def add_logo(self, x=0.1, y=0.1, w=0.2, h=0.2):
         self._regions = [QRectF(x, y, w, h)]
         self._active_index = 0
 
-    def set_regions(self, regions):
-        if isinstance(regions, QRectF):
-            self._regions = [QRectF(regions)]
-        elif isinstance(regions, list) and regions:
-            self._regions = [QRectF(regions[0])]
-        else:
-            self._regions = []
-        self._active_index = 0 if self._regions else -1
+    def set_logos(self, logos, active_index: int = 0):
+        """Display every L1 logo while making one layer editable."""
+        regions, items = [], []
+        for logo in logos or []:
+            try:
+                x = max(0.0, min(1.0, float(logo.get("x", 0.1))))
+                y = max(0.0, min(1.0, float(logo.get("y", 0.1))))
+                w = max(0.01, min(1.0 - x, float(logo.get("width", 0.2))))
+                h = max(0.01, min(1.0 - y, float(logo.get("height", 0.2))))
+                opacity = max(0.0, min(1.0, float(logo.get("opacity", 1.0))))
+                rotation = float(logo.get("rotation", 0.0)) % 360.0
+            except (AttributeError, TypeError, ValueError):
+                continue
+            path = str(logo.get("source", "") or "")
+            regions.append({"x": x, "y": y, "width": w, "height": h})
+            items.append({"pixmap": QPixmap(path) if path and os.path.exists(path) else None,
+                          "opacity": opacity, "rotation": rotation})
+        super().set_regions(regions)
+        self._logo_items = items
+        if self._regions:
+            self._active_index = max(0, min(int(active_index), len(self._regions) - 1))
+            item = self._logo_items[self._active_index]
+            self._pixmap = item["pixmap"]
+            self._opacity = item["opacity"]
+            self._rotation = item["rotation"]
+
+    def _hit_test(self, pos: QPointF) -> tuple[int, str]:
+        index = self._active_index
+        if index < 0 or index >= len(self._regions):
+            return -1, ""
+        rect = self.region_rect(index)
+        if self._close_rect(rect).contains(pos):
+            return index, "close"
+        for handle_name, handle_rect in self._handle_rects(rect).items():
+            if handle_rect.contains(pos):
+                return index, handle_name
+        return (index, "move") if rect.contains(pos) else (-1, "")
 
     def paintEvent(self, event):
         if not self.isVisible():
@@ -630,25 +684,29 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
                 continue
             # Apply opacity and rotation around the center of the logo.
             painter.save()
-            painter.setOpacity(self._opacity)
+            item = self._logo_items[index] if index < len(self._logo_items) else {}
+            opacity = float(item.get("opacity", self._opacity))
+            rotation = float(item.get("rotation", self._rotation))
+            pixmap = item.get("pixmap", self._pixmap)
+            painter.setOpacity(opacity)
             cx = rect.center().x()
             cy = rect.center().y()
             painter.translate(cx, cy)
-            painter.rotate(self._rotation)
+            painter.rotate(rotation)
             painter.translate(-cx, -cy)
-            if self._pixmap is not None and not self._pixmap.isNull():
+            if pixmap is not None and not pixmap.isNull():
                 painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-                painter.drawPixmap(rect, self._pixmap, self._pixmap.rect())
+                painter.drawPixmap(rect, pixmap, pixmap.rect())
             # Reset transform/opacity before drawing chrome (handles,
             # border, close button) so they remain axis-aligned and
             # fully opaque even when the logo is rotated or faded.
             painter.restore()
-            pen = QPen(QColor(110, 231, 214, int(255 * max(self._opacity, 0.4))),
+            pen = QPen(QColor(110, 231, 214, int(255 * max(opacity, 0.4))),
                        2, Qt.DashLine)
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(rect)
-            if self._editable:
+            if self._editable and index == self._active_index:
                 painter.setBrush(QColor(110, 231, 214))
                 painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
                 for handle_rect in self._handle_rects(rect).values():
@@ -667,12 +725,15 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
             event.ignore()
             return
         pos = QPointF(event.position())
-        for index, _region in enumerate(self._regions):
+        index = self._active_index
+        if 0 <= index < len(self._regions):
             close_rect = self._close_rect(self.region_rect(index))
             if close_rect.contains(pos):
-                if 0 <= index < len(self._regions):
-                    self._regions.pop(index)
-                if self._sync_timer is not None:
+                self._regions.pop(index)
+                if index < len(self._logo_items):
+                    self._logo_items.pop(index)
+                self._active_index = min(index, len(self._regions) - 1)
+                if not self._regions and self._sync_timer is not None:
                     self._sync_timer.stop()
                 self.logoDeleted.emit()
                 if callable(self._on_region_changed):
@@ -723,9 +784,9 @@ class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
         self.update()
 
     def get_mask_rect(self) -> QRectF:
-        if not self._regions:
+        if not self._regions or self._active_index < 0:
             return QRectF(0.0, 0.0, 0.0, 0.0)
-        return QRectF(self._regions[0])
+        return QRectF(self._regions[self._active_index])
 
     def add_mask(self, x: float = 0.3, y: float = 0.3, w: float = 0.4, h: float = 0.2):
         self._regions = [QRectF(x, y, w, h)]
@@ -738,17 +799,31 @@ class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
             max(0.01, min(1.0, w)),
             max(0.01, min(1.0, h)),
         )]
-        self._active_index = 0
         self.update()
 
-    def set_regions(self, regions):
-        if isinstance(regions, QRectF):
-            self._regions = [QRectF(regions)]
-        elif isinstance(regions, list) and regions:
-            self._regions = [QRectF(regions[0])]
-        else:
-            self._regions = []
-        self._active_index = 0 if self._regions else -1
+    def set_mask_regions(self, regions, active_index: int = 0):
+        """Display every M1 region while making one layer editable."""
+        super().set_regions(regions)
+        if self._regions:
+            self._active_index = max(0, min(int(active_index), len(self._regions) - 1))
+
+    def _hit_test(self, pos: QPointF) -> tuple[int, str]:
+        """Only the selected mask can be edited from the preview.
+
+        Other M1 regions remain visible as context, while timeline selection
+        determines the active layer and avoids accidentally updating a
+        different layer through the single-layer inspector binding.
+        """
+        index = self._active_index
+        if index < 0 or index >= len(self._regions):
+            return -1, ""
+        rect = self.region_rect(index)
+        if self._close_rect(rect).contains(pos):
+            return index, "close"
+        for handle_name, handle_rect in self._handle_rects(rect).items():
+            if handle_rect.contains(pos):
+                return index, handle_name
+        return (index, "move") if rect.contains(pos) else (-1, "")
 
     def attach_to_view(self, view: QWidget):
         super().attach_to_view(view)
@@ -793,7 +868,7 @@ class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(rect)
-            if self._editable:
+            if self._editable and index == self._active_index:
                 painter.setBrush(accent)
                 painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
                 for handle_rect in self._handle_rects(rect).values():
@@ -812,13 +887,12 @@ class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
             event.ignore()
             return
         pos = QPointF(event.position())
-        for index, _region in enumerate(self._regions):
+        index = self._active_index
+        if 0 <= index < len(self._regions):
             close_rect = self._close_rect(self.region_rect(index))
             if close_rect.contains(pos):
-                if 0 <= index < len(self._regions):
-                    self._regions.pop(index)
-                if self._sync_timer is not None:
-                    self._sync_timer.stop()
+                self._regions.pop(index)
+                self._active_index = min(index, len(self._regions) - 1)
                 self.maskDeleted.emit()
                 if callable(self._on_region_changed):
                     self._on_region_changed()
@@ -1204,6 +1278,10 @@ class MpvVideoView(QWidget):
     def set_blur_regions_normalized(self, regions):
         self.blur_overlay.set_regions(regions)
 
+    def set_blur_active_index(self, index: int):
+        """Choose the sole editable B1 region; all others remain visible."""
+        self.blur_overlay.set_active_index(index)
+
     def clear_blur_region(self):
         self.blur_overlay.clear_region()
         self.blurRegionChanged.emit()
@@ -1225,6 +1303,14 @@ class MpvVideoView(QWidget):
         self.mask_overlay.set_mask_rect(x, y, w, h)
         if color is not None:
             self.mask_overlay.set_fill_color(color)
+        self.mask_overlay.set_editable(bool(editable))
+        self.mask_overlay.sync_to_view()
+
+    def set_mask_regions(self, regions, *, active_index: int = 0,
+                         editable: bool = True):
+        """Show all mask outlines and make one selected M1 layer editable."""
+        self.mask_overlay.attach_to_view(self)
+        self.mask_overlay.set_mask_regions(regions, active_index)
         self.mask_overlay.set_editable(bool(editable))
         self.mask_overlay.sync_to_view()
 
@@ -1262,6 +1348,15 @@ class MpvVideoView(QWidget):
         QTimer.singleShot(50, self.logo_overlay.sync_to_view)
         QTimer.singleShot(200, self.logo_overlay.sync_to_view)
         QTimer.singleShot(500, self.logo_overlay.sync_to_view)
+
+    def set_logos(self, logos, *, active_index: int = 0):
+        """Render all L1 logos; only the selected layer is editable."""
+        if not hasattr(self, "logo_overlay") or self.logo_overlay is None:
+            self.set_logo("", 0.1, 0.1, 0.2, 0.2)
+        self.logo_overlay.set_logos(logos, active_index)
+        self.logo_overlay.set_editable(True)
+        self.logo_overlay.attach_to_view(self)
+        self.logo_overlay.sync_to_view()
 
     def update_logo_rect(self, x: float, y: float, w: float, h: float):
         if hasattr(self, "logo_overlay") and self.logo_overlay is not None:

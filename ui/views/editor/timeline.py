@@ -29,6 +29,7 @@ class EditorTimeline(QGraphicsView):
     TRACK_LABEL_H = 24
     TRACK_MIN_H = 32
     TRACK_DEFAULT_H = 56
+    REGION_TRACK_ROW_H = 60
     CHILD_TRACK_H = 48
     CHROME_H = 24
     HANDLE_W = 8
@@ -394,16 +395,18 @@ class EditorTimeline(QGraphicsView):
             self._track_heights[track.id] = self._compute_track_height(track)
 
     def _compute_track_height(self, track) -> int:
-        """Compute a track's height. Blur tracks allocate one full base
-        slot per visible layer. Subtitle and dub tracks (overlap-stacked)
+        """Compute a track's height. Region tracks (Blur, Logo, Mask)
+        allocate one full base slot per visible layer. Subtitle and dub tracks (overlap-stacked)
         use the same CHILD_TRACK_H slot for every row — primary and
         overlap-child rows are equally small — so the whole track stays
         compact.
         """
         base = int(getattr(track, "height", None) or self.TRACK_DEFAULT_H)
-        if self._is_blur_track(track):
+        if self._uses_layer_rows(track):
             num_layers = max(1, len([l for l in track.layers if l.visible]))
-            return base * num_layers
+            # B1, L1, and M1 intentionally share the same compact row
+            # size. Older B1 projects may carry a 100px track height.
+            return self.REGION_TRACK_ROW_H * num_layers
         if self._should_overlap_stack(track):
             visible = [l for l in track.layers if l.visible]
             # Sort by start time for proper overlap detection
@@ -420,6 +423,25 @@ class EditorTimeline(QGraphicsView):
             return True
         return any(getattr(l, "type", None) == LayerType.BLUR
                    for l in getattr(track, "layers", []))
+
+    @classmethod
+    def _uses_layer_rows(cls, track) -> bool:
+        """Whether every visible layer receives its own vertical row.
+
+        B1 has always worked this way. L1 and M1 layers commonly span the
+        full video too, so without the same layout the last painted clip
+        hides every earlier logo/mask layer and they cannot be selected.
+        """
+        if cls._is_blur_track(track):
+            return True
+        name = (getattr(track, "name", "") or "").lower()
+        prefix = name.split(" ")[0] if name else ""
+        if prefix in ("l1", "m1"):
+            return True
+        return any(
+            getattr(layer, "type", None) == LayerType.MASK
+            for layer in getattr(track, "layers", [])
+        )
 
     @staticmethod
     def _is_subtitle_track(track) -> bool:
@@ -616,7 +638,7 @@ class EditorTimeline(QGraphicsView):
                            scroll_x: int, y: int, h: int) -> None:
         margin = 4
         view_w = self.viewport().width()
-        is_blur = self._is_blur_track(track)
+        uses_layer_rows = self._uses_layer_rows(track)
         overlap_stack = self._should_overlap_stack(track)
         # Force every bar on a subtitle track to share the same orange
         # color, regardless of the layer's runtime class or type. This
@@ -657,7 +679,7 @@ class EditorTimeline(QGraphicsView):
                     row = 0
                 bar_y, slot_h = row_slots[row]
                 bar_h = max(slot_h - margin * 2, 8)
-            elif is_blur:
+            elif uses_layer_rows:
                 visible_count = sum(1 for l in track.layers[:track.layers.index(layer) + 1] if l.visible)
                 z = max(0, visible_count - 1)
                 z = min(z, num_layers - 1)
@@ -877,7 +899,7 @@ class EditorTimeline(QGraphicsView):
                 continue
             visible_layers = [l for l in track.layers if l.visible]
             num_layers = max(1, len(visible_layers))
-            is_blur = self._is_blur_track(track)
+            uses_layer_rows = self._uses_layer_rows(track)
             overlap_stack = self._should_overlap_stack(track)
             layers_in_row = []
             if overlap_stack and num_layers > 1:
@@ -899,8 +921,11 @@ class EditorTimeline(QGraphicsView):
                 for visible_idx, layer in enumerate(visible_layers_sorted):
                     if layer_rows[visible_idx] == row:
                         layers_in_row.append(layer)
-            elif is_blur and num_layers > 1:
-                return None, ""
+            elif uses_layer_rows and num_layers > 1:
+                row_h = (th - margin * 2) / num_layers
+                rel_y = click_y - y - margin
+                row = max(0, min(int(rel_y / row_h), num_layers - 1))
+                layers_in_row = [visible_layers[row]]
             else:
                 layers_in_row = list(layers for layers in track.layers if layers.visible)
             for layer in layers_in_row:
@@ -1053,7 +1078,7 @@ class EditorTimeline(QGraphicsView):
                 continue
             visible_layers = [l for l in track.layers if l.visible]
             num_layers = max(1, len(visible_layers))
-            is_blur = self._is_blur_track(track)
+            uses_layer_rows = self._uses_layer_rows(track)
             overlap_stack = self._should_overlap_stack(track)
             if overlap_stack and num_layers > 1:
                 # Sort by start time for proper overlap detection
@@ -1082,7 +1107,7 @@ class EditorTimeline(QGraphicsView):
                     if lx - 4 <= pos.x() <= lx + lw + 4:
                         return layer.id
                 return ""
-            if is_blur and num_layers > 1:
+            if uses_layer_rows and num_layers > 1:
                 row_h = (th - margin * 2) / num_layers
                 rel_y = click_y - y - margin
                 row = max(0, min(int(rel_y / row_h), num_layers - 1))

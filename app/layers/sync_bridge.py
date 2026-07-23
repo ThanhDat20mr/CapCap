@@ -243,7 +243,9 @@ def sync_blur_regions_to_layers(
         remove_track(timeline, "B1")
         return
 
-    blur_track = find_or_create_track(timeline, "B1", LayerType.BLUR, 100)
+    # Keep B1 rows the same compact height as M1/L1 in the editor.
+    blur_track = find_or_create_track(timeline, "B1", LayerType.BLUR, 60)
+    blur_track.height = 60
     blur_track.layers.clear()
 
     for i, br in enumerate(blur_regions):

@@ -4514,7 +4514,29 @@ class VideoTranslatorGUI(QMainWindow):
 
         self.video_view.logoMoved.connect(_moved_handler)
         self.video_view.logoDeleted.connect(_deleted_handler)
-        self.video_view.set_logo(path, x, y, w, h)
+
+        logos = []
+        active_index = 0
+        for index, candidate in enumerate(track.layers):
+            source = str(getattr(candidate, "source", "") or "")
+            candidate_transform = getattr(candidate, "transform", None)
+            if candidate_transform is not None and hasattr(candidate_transform, "x"):
+                logo_x = float(getattr(candidate_transform, "x", 0.1)) / 100.0
+                logo_y = float(getattr(candidate_transform, "y", 0.1)) / 100.0
+                logo_w = 0.2 * float(getattr(candidate_transform, "scale_x", 1.0))
+                logo_h = 0.2 * float(getattr(candidate_transform, "scale_y", 1.0))
+                logo_rotation = float(getattr(candidate_transform, "rotation", 0.0) or 0.0)
+            else:
+                logo_x, logo_y, logo_w, logo_h, logo_rotation = 0.1, 0.1, 0.2, 0.2, 0.0
+            logos.append({
+                "source": source, "x": logo_x, "y": logo_y,
+                "width": logo_w, "height": logo_h,
+                "opacity": float(getattr(candidate, "opacity", 1.0) or 1.0),
+                "rotation": logo_rotation,
+            })
+            if candidate is layer:
+                active_index = index
+        self.video_view.set_logos(logos, active_index=active_index)
 
         # Push opacity + rotation from the layer to the overlay. We
         # default to fully opaque + 0° for a freshly created logo.
@@ -4532,6 +4554,8 @@ class VideoTranslatorGUI(QMainWindow):
         """Remove the logo layer from the L1 track and clean up."""
         if not hasattr(self, "timeline") or not self.timeline._timeline:
             return
+        remaining_track = None
+        remaining_layer = None
         for track in self.timeline._timeline.tracks:
             if layer in track.layers:
                 track.layers.remove(layer)
@@ -4542,17 +4566,26 @@ class VideoTranslatorGUI(QMainWindow):
                         pass
                     if hasattr(self.timeline, "_track_heights") and track.id in self.timeline._track_heights:
                         del self.timeline._track_heights[track.id]
+                else:
+                    remaining_track = track
+                    remaining_layer = track.layers[0]
                 break
         try:
-            self.timeline._selected_layer_id = ""
+            self.timeline._selected_layer_id = remaining_layer.id if remaining_layer else ""
         except Exception:
             pass
         if hasattr(self.timeline, "_redraw"):
             self.timeline._redraw()
         if hasattr(self.timeline, "viewport"):
             self.timeline.viewport().update()
-        if hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
+        if remaining_layer is not None:
+            self._show_logo_overlay(remaining_track, remaining_layer)
+        elif hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
             self.video_view.clear_logo()
+        try:
+            self.persist_current_timeline_project_data()
+        except Exception:
+            pass
         if hasattr(self, "_show_default_inspector"):
             self._show_default_inspector()
 
@@ -4623,11 +4656,11 @@ class VideoTranslatorGUI(QMainWindow):
         self.video_view.maskRegionChanged.connect(_region_changed_handler)
         self.video_view.maskDeleted.connect(_deleted_handler)
 
-        x = float(getattr(layer, "position_x", 0.3))
-        y = float(getattr(layer, "position_y", 0.4))
-        w = float(getattr(layer, "width", 0.4))
-        h = float(getattr(layer, "height", 0.2))
-        color = str(getattr(layer, "color", "#000000"))
+        regions = self._current_mask_regions_payload()
+        try:
+            active_index = list(track.layers).index(layer)
+        except ValueError:
+            active_index = 0
         # The overlay is always shown so the user can move / resize
         # the region regardless of the M1 track toggle. The toggle
         # only controls whether the mpv filter is applied (see
@@ -4639,8 +4672,8 @@ class VideoTranslatorGUI(QMainWindow):
             is_playing = bool(self.media_player.is_playing())
         except Exception:
             is_playing = False
-        self.video_view.set_mask_region(
-            x=x, y=y, w=w, h=h, color=color, editable=not is_playing,
+        self.video_view.set_mask_regions(
+            regions, active_index=active_index, editable=not is_playing,
         )
 
     def _on_mask_moved(self, layer, x, y, w, h):
@@ -4703,7 +4736,8 @@ class VideoTranslatorGUI(QMainWindow):
         if overlay is None or not overlay._regions:
             return
         try:
-            rect = overlay._regions[0]
+            active_index = int(getattr(overlay, "_active_index", -1))
+            rect = overlay._regions[active_index]
             x = float(rect.x())
             y = float(rect.y())
             w = float(rect.width())
@@ -4722,6 +4756,8 @@ class VideoTranslatorGUI(QMainWindow):
         """Remove the mask layer from the M1 track and clean up."""
         if not hasattr(self, "timeline") or not self.timeline._timeline:
             return
+        remaining_track = None
+        remaining_layer = None
         for track in self.timeline._timeline.tracks:
             if layer in track.layers:
                 track.layers.remove(layer)
@@ -4732,16 +4768,21 @@ class VideoTranslatorGUI(QMainWindow):
                         pass
                     if hasattr(self.timeline, "_track_heights") and track.id in self.timeline._track_heights:
                         del self.timeline._track_heights[track.id]
+                else:
+                    remaining_track = track
+                    remaining_layer = track.layers[0]
                 break
         try:
-            self.timeline._selected_layer_id = ""
+            self.timeline._selected_layer_id = remaining_layer.id if remaining_layer else ""
         except Exception:
             pass
         if hasattr(self.timeline, "_redraw"):
             self.timeline._redraw()
         if hasattr(self.timeline, "viewport"):
             self.timeline.viewport().update()
-        if hasattr(self, "video_view") and hasattr(self.video_view, "clear_mask_region"):
+        if remaining_layer is not None:
+            self._show_mask_overlay(remaining_track, remaining_layer)
+        elif hasattr(self, "video_view") and hasattr(self.video_view, "clear_mask_region"):
             self.video_view.clear_mask_region()
         try:
             if hasattr(self, "_apply_mask_to_preview"):
@@ -4872,6 +4913,14 @@ class VideoTranslatorGUI(QMainWindow):
         self._wire_blur_inspector_controls()
         if track is None:
             return
+        # B1 mirrors M1 interaction: all regions remain visible in the
+        # preview, but only the layer selected in the timeline is editable.
+        if layer is not None:
+            try:
+                active_index = list(track.layers).index(layer)
+                self.video_view.set_blur_active_index(active_index)
+            except (AttributeError, ValueError):
+                pass
         track_name = str(getattr(track, "name", "Blur"))
         if hasattr(self, "blur_inspector_track_name_label"):
             self.blur_inspector_track_name_label.setText(track_name)
@@ -5782,13 +5831,19 @@ class VideoTranslatorGUI(QMainWindow):
         if not hasattr(self, "video_view"):
             return
         if is_shown:
-            # Re-show the logo by finding the L1 Logo track layer and
-            # re-displaying the overlay.
+            # Re-show the selected L1 layer when possible.  This matters
+            # now that L1 can contain more than one independent logo.
             if hasattr(self, "timeline") and self.timeline._timeline:
+                selected_id = getattr(self.timeline, "_selected_layer_id", "")
                 for track in self.timeline._timeline.tracks:
                     if track.name == "L1 Logo" and track.layers:
                         try:
-                            self._show_logo_overlay(track, track.layers[0])
+                            layer = next(
+                                (item for item in track.layers
+                                 if item.id == selected_id),
+                                track.layers[0],
+                            )
+                            self._show_logo_overlay(track, layer)
                         except Exception:
                             pass
                         return
@@ -5954,19 +6009,13 @@ class VideoTranslatorGUI(QMainWindow):
             if not path:
                 return
             img_track = find_or_create_track(tl, "L1 Logo", LayerType.IMAGE, 80)
-            # L1 is a singleton: a new logo replaces the old one. Clear
-            # the existing layers and the logo overlay before adding
-            # the new layer.
-            img_track.layers.clear()
-            if hasattr(self.video_view, "logo_overlay"):
-                try:
-                    self.video_view.logo_overlay.clear_region()
-                except Exception:
-                    pass
-            idx = 0
+            # L1 supports multiple independent logo layers.  Keep existing
+            # layers intact; selecting a timeline layer determines which
+            # logo is currently editable in the preview overlay.
+            idx = len(img_track.layers)
             dur = tl.duration if tl.duration > 0 else 10.0
             layer = ImageLayer(
-                name="Logo 1",
+                name=f"Logo {idx + 1}",
                 source=path,
                 start=0.0,
                 end=dur,
@@ -6095,23 +6144,18 @@ class VideoTranslatorGUI(QMainWindow):
         elif layer_type == "mask":
             from app.layers.mask import MaskLayer
             mask_track = find_or_create_track(tl, "M1", LayerType.MASK, 60)
-            # M1 is a singleton: a new mask replaces the old one. Clear
-            # the existing layers and the mask overlay before adding
-            # the new layer.
-            mask_track.layers.clear()
-            if hasattr(self.video_view, "mask_overlay"):
-                try:
-                    self.video_view.mask_overlay.clear_region()
-                except Exception:
-                    pass
             if hasattr(self.timeline, "_track_heights"):
                 self.timeline._track_heights[mask_track.id] = (
                     mask_track.height or 60
                 )
+            idx = len(mask_track.layers)
+            # Offset new regions slightly so their draggable overlays do
+            # not start perfectly on top of an existing mask.
+            stagger = idx % 4
             layer = MaskLayer(
-                name="Mask 1",
-                position_x=0.3,
-                position_y=0.4,
+                name=f"Mask {idx + 1}",
+                position_x=0.3 + (stagger % 2) * 0.08,
+                position_y=0.4 + (stagger // 2) * 0.08,
                 width=0.4,
                 height=0.2,
                 color="#000000",
@@ -6124,7 +6168,7 @@ class VideoTranslatorGUI(QMainWindow):
                 # not a short 5-second segment.
                 end=tl.duration if tl.duration > 0 else 5.0,
             )
-            layer.z_index = 0
+            layer.z_index = idx
             # Visibility is gated by the play state in
             # _apply_mask_to_preview: the mask filter is only pushed
             # to mpv while the video is playing, so a freshly added
@@ -6477,18 +6521,22 @@ class VideoTranslatorGUI(QMainWindow):
                     # Show default inspector
                     if hasattr(self, "_show_default_inspector"):
                         self._show_default_inspector()
-                    # If the deleted layer was a logo, clear the logo
-                    # overlay so it does not remain on the preview.
+                    # Keep remaining Logo / Mask layers visible. Clearing
+                    # the whole overlay here used to hide every surviving
+                    # layer until the user clicked one in the timeline.
                     if str(getattr(track, "name", "")) == "L1 Logo":
-                        if hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
+                        if track.layers:
+                            next_layer = track.layers[min(layer_idx, len(track.layers) - 1)]
+                            self.timeline._selected_layer_id = next_layer.id
+                            self._show_logo_overlay(track, next_layer)
+                        elif hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
                             self.video_view.clear_logo()
-                        try:
-                            self.timeline._selected_layer_id = ""
-                        except Exception:
-                            pass
-                    # Same for the M1 mask overlay.
                     if str(getattr(track, "name", "")) == "M1":
-                        if hasattr(self, "video_view") and hasattr(self.video_view, "clear_mask_region"):
+                        if track.layers:
+                            next_layer = track.layers[min(layer_idx, len(track.layers) - 1)]
+                            self.timeline._selected_layer_id = next_layer.id
+                            self._show_mask_overlay(track, next_layer)
+                        elif hasattr(self, "video_view") and hasattr(self.video_view, "clear_mask_region"):
                             self.video_view.clear_mask_region()
                         try:
                             if hasattr(self, "_apply_mask_to_preview"):
