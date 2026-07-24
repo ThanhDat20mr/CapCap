@@ -576,12 +576,14 @@ class PreviewController:
             return
 
         mode = self.gui.get_output_mode_key()
-        state = getattr(self.gui, "current_project_state", None)
-        project_root = getattr(state, "project_root", "") if state else ""
-        if project_root:
-            out_dir = os.path.join(project_root, "export")
-        else:
-            out_dir = self.gui.final_output_folder_edit.text().strip() or os.path.join(self.gui.workspace_root, "output")
+        default_dir = self.gui.final_output_folder_edit.text().strip() or os.path.join(self.gui.workspace_root, "output")
+        out_dir = QFileDialog.getExistingDirectory(
+            self.gui,
+            "Choose Fast Preview Output Folder",
+            default_dir,
+        )
+        if not out_dir:
+            return
         os.makedirs(out_dir, exist_ok=True)
 
         translated_srt_path = self.gui.last_translated_srt_path
@@ -611,7 +613,6 @@ class PreviewController:
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
         mask_regions, logo_layers = self._extract_overlay_layers()
         video_name = os.path.splitext(os.path.basename(video_path))[0]
-        self.gui.cleanup_file_if_exists(self.gui.last_exact_preview_5s_path)
         preview_output = os.path.join(out_dir, f"{video_name}_preview5s_{int(time.time())}.mp4")
         preview_srt_path = ""
         preview_segments = []
@@ -623,7 +624,7 @@ class PreviewController:
                 return
 
         self.gui.preview_5s_btn.setEnabled(False)
-        self.gui.preview_5s_btn.setText("Exporting 5s...")
+        self.gui.preview_5s_btn.setText("Rendering...")
         self.gui.progress_bar.setValue(92)
 
         try:
@@ -836,7 +837,7 @@ class PreviewController:
             self.gui.ensure_media_backend_ready()
         self.gui._suspend_live_subtitle_sync = False
         self.gui.preview_5s_btn.setEnabled(True)
-        self.gui.preview_5s_btn.setText("Export 5-Second Preview")
+        self.gui.preview_5s_btn.setText("Fast Preview")
         self.gui.progress_bar.setValue(100)
 
         if error:

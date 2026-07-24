@@ -68,6 +68,20 @@ def _escape_path_for_filter(path):
     return clean
 
 
+def _ass_filter_expression(ass_path: str) -> str:
+    """Build an ASS filter that uses the same local font collection as Qt."""
+    escaped_ass = _escape_path_for_filter(ass_path)
+    bundled_fonts = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "assets", "fonts"))
+    if os.path.isdir(bundled_fonts) and any(name.lower().endswith((".ttf", ".otf")) for name in os.listdir(bundled_fonts)):
+        escaped_fonts = _escape_path_for_filter(bundled_fonts)
+        return f"ass=filename='{escaped_ass}':fontsdir='{escaped_fonts}'"
+    windows_fonts = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+    if os.path.isdir(windows_fonts):
+        escaped_fonts = _escape_path_for_filter(windows_fonts)
+        return f"ass=filename='{escaped_ass}':fontsdir='{escaped_fonts}'"
+    return f"ass=filename='{escaped_ass}'"
+
+
 def _build_blur_filter_chain(blur_region, video_width, video_height):
     raw_regions = blur_region
     if isinstance(raw_regions, dict):
@@ -452,10 +466,14 @@ def _position_override_tag(
     custom_position_enabled: bool = False,
     custom_position_x: float = 50.0,
     custom_position_y: float = 86.0,
+    custom_position_bottom_y: float | None = None,
 ) -> str:
     if not custom_position_enabled:
         return ""
     x, y = _custom_anchor_position(video_width, video_height, custom_position_x, custom_position_y)
+    if custom_position_bottom_y is not None:
+        _unused, y = _custom_anchor_position(video_width, video_height, custom_position_x, custom_position_bottom_y)
+        return rf"\an2\pos({x},{y})"
     return rf"\an5\pos({x},{y})"
 
 
@@ -543,6 +561,7 @@ def _apply_animation_tags(
     custom_position_enabled: bool = False,
     custom_position_x: float = 50.0,
     custom_position_y: float = 86.0,
+    custom_position_bottom_y: float | None = None,
 ) -> str:
     safe_text = (text or "").replace("\n", "\\N")
     style = (animation_style or "Static").strip().lower()
@@ -553,6 +572,7 @@ def _apply_animation_tags(
         custom_position_enabled=custom_position_enabled,
         custom_position_x=custom_position_x,
         custom_position_y=custom_position_y,
+        custom_position_bottom_y=custom_position_bottom_y,
     )
     if style == "pop in":
         return rf"{{{position_tag}\fscx118\fscy118\t(0,{total_ms},\fscx100\fscy100)}}" + safe_text
@@ -729,6 +749,7 @@ def _build_karaoke_dialogue_events(
     custom_position_enabled: bool = False,
     custom_position_x: float = 50.0,
     custom_position_y: float = 86.0,
+    custom_position_bottom_y: float | None = None,
     margin_v: int = 0,
 ) -> list[str]:
     source_text = text or ""
@@ -747,6 +768,7 @@ def _build_karaoke_dialogue_events(
         custom_position_enabled=custom_position_enabled,
         custom_position_x=custom_position_x,
         custom_position_y=custom_position_y,
+        custom_position_bottom_y=custom_position_bottom_y,
     )
     base_text = (rf"{{{position_tag}}}" if position_tag else "") + base_text
     mv = int(max(0, margin_v or 0))
@@ -850,7 +872,10 @@ def srt_to_ass(srt_path: str,
                custom_position_enabled: bool = False,
                custom_position_x: float = 50.0,
                custom_position_y: float = 86.0,
-               single_line: bool = False) -> str:
+               custom_position_bottom_y: float | None = None,
+               single_line: bool = False,
+               font_scale: float = 1.0,
+               log_generation: bool = True) -> str:
     """Convert an SRT file to a fully-styled ASS file.
 
     Key insight: by setting PlayResX/PlayResY equal to the ACTUAL video
@@ -877,6 +902,7 @@ def srt_to_ass(srt_path: str,
     bold_flag = -1 if bold else 0
 
     wrap_style = 2 if single_line else 1
+    ass_font_scale = max(10, int(round(max(0.1, float(font_scale)) * 100)))
     header = (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
@@ -892,7 +918,7 @@ def srt_to_ass(srt_path: str,
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,{font_name},{font_size},"
         f"{font_color},{highlight_color},{style_outline_color},{back_color},"
-        f"{bold_flag},0,0,0,100,100,0,0,{border_style},{outline},{shadow},"
+        f"{bold_flag},0,0,0,{ass_font_scale},{ass_font_scale},0,0,{border_style},{outline},{shadow},"
         f"{alignment},60,60,{margin_v},1\n"
         "\n"
         "[Events]\n"
@@ -961,6 +987,7 @@ def srt_to_ass(srt_path: str,
                     custom_position_enabled=custom_position_enabled,
                     custom_position_x=custom_position_x,
                     custom_position_y=custom_position_y,
+                    custom_position_bottom_y=custom_position_bottom_y,
                     margin_v=row_margin_v,
                 )
             )
@@ -987,6 +1014,7 @@ def srt_to_ass(srt_path: str,
             custom_position_enabled=custom_position_enabled,
             custom_position_x=custom_position_x,
             custom_position_y=custom_position_y,
+            custom_position_bottom_y=custom_position_bottom_y,
     )
         events.append(f"Dialogue: 0,{start},{end},Default,,0,0,{row_margin_v},,{text}")
 
@@ -994,8 +1022,10 @@ def srt_to_ass(srt_path: str,
         f.write(header)
         f.write('\n'.join(events) + '\n')
 
-    print(f"Generated ASS: {ass_path}  ({len(events)} lines, "
-          f"{video_width}x{video_height}, alignment={alignment}, marginV={margin_v}, animation={animation_style}, preset={preset_key or 'custom'})")
+    if log_generation:
+        print(f"Generated ASS: {ass_path}  ({len(events)} lines, "
+              f"{video_width}x{video_height}, font={font_name}, fontSize={font_size}, fontScale={font_scale}, bold={bool(bold)}, "
+              f"alignment={alignment}, marginV={margin_v}, animation={animation_style}, preset={preset_key or 'custom'})")
     return ass_path
 
 
@@ -1008,7 +1038,6 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
     if not os.path.exists(ass_path):
         raise FileNotFoundError(f"ASS subtitle file not found at {ass_path}")
 
-    escaped_ass = _escape_path_for_filter(ass_path)
     video_w, video_h = get_video_dimensions(video_path)
 
     scale_chain = _build_canvas_filter_chain(target_width, target_height, output_scale_mode, output_fill_focus_x, output_fill_focus_y)
@@ -1060,7 +1089,6 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             # Extract the final output label from mask_chain
             if "[m" in mask_chain:
                 # Find the last [mN] label
-                import re
                 matches = re.findall(r'\[m\d+\]', mask_chain)
                 if matches:
                     current_label = matches[-1]
@@ -1069,7 +1097,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             filter_parts.append(f"{current_label}{blur_chain}[blurred]")
             current_label = "[blurred]"
         
-        filter_parts.append(f"{current_label}ass='{escaped_ass}'[out]")
+        filter_parts.append(f"{current_label}{_ass_filter_expression(ass_path)}[out]")
         filter_complex = ";".join(part for part in filter_parts if part)
         
         video_encoder_args = _preferred_h264_encoder_args(ffmpeg, fast=fast)
@@ -1078,7 +1106,10 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             ffmpeg,
             '-hide_banner',
             '-loglevel',
-            'error',
+            # Keep libass diagnostics in the captured process output so we
+            # can record the actual selected font face without flooding the
+            # application log.
+            'verbose',
             '-y',
             '-i', video_path,
             '-map', '[out]',
@@ -1101,7 +1132,12 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
     print(f"Executing ({encoder_name}): {' '.join(command)}")
 
     try:
-        subprocess.run(command, capture_output=True, text=True, check=True, **_subprocess_run_kwargs())
+        result = subprocess.run(command, capture_output=True, text=True, check=True, **_subprocess_run_kwargs())
+        font_selects = re.findall(r".*fontselect:.*", result.stderr or "", flags=re.IGNORECASE)
+        if font_selects:
+            print(f"[Subtitle Font] libass selected: {font_selects[-1].strip()}")
+        else:
+            print("[Subtitle Font] libass did not report a selected face; check FFmpeg/libass build diagnostics.")
         print(f"ASS subtitles embedded successfully using {encoder_name}.")
         return True
     except subprocess.CalledProcessError as e:
@@ -1120,7 +1156,10 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             
             print(f"NVENC failed, retrying with libx264. Error:\n{e.stderr}")
             try:
-                subprocess.run(command, capture_output=True, text=True, check=True, **_subprocess_run_kwargs())
+                result = subprocess.run(command, capture_output=True, text=True, check=True, **_subprocess_run_kwargs())
+                font_selects = re.findall(r".*fontselect:.*", result.stderr or "", flags=re.IGNORECASE)
+                if font_selects:
+                    print(f"[Subtitle Font] libass selected: {font_selects[-1].strip()}")
                 print("ASS subtitles embedded successfully using libx264 fallback.")
                 return True
             except subprocess.CalledProcessError as fallback_error:
@@ -1233,8 +1272,7 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
         logo_input_idx += 1
     
     # 3. Burn subtitles
-    escaped_ass = _escape_path_for_filter(ass_path)
-    filter_parts.append(f"[{current_label}]ass='{escaped_ass}'[final]")
+    filter_parts.append(f"[{current_label}]{_ass_filter_expression(ass_path)}[final]")
     
     # Join all filter parts
     filter_complex = ";".join(filter_parts)
@@ -1309,7 +1347,9 @@ def embed_subtitles(video_path, srt_path, output_path,
                     custom_position_enabled=False,
                     custom_position_x=50.0,
                     custom_position_y=86.0,
+                    custom_position_bottom_y=None,
                     single_line=False,
+                    font_scale=1.0,
                     blur_region=None,
                     mask_regions=None,
                     logo_layers=None,
@@ -1370,7 +1410,9 @@ def embed_subtitles(video_path, srt_path, output_path,
         custom_position_enabled=custom_position_enabled,
         custom_position_x=custom_position_x,
         custom_position_y=custom_position_y,
+        custom_position_bottom_y=custom_position_bottom_y,
         single_line=single_line,
+        font_scale=font_scale,
     )
 
     success = embed_ass_subtitles(

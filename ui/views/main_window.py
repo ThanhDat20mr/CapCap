@@ -78,7 +78,11 @@ def _build_header_bar(gui):
     gui.export_btn.setObjectName("secondaryActionBtn")
     gui.export_btn.setMinimumHeight(42)
     layout.addWidget(gui.export_btn)
-    layout.addSpacing(8)
+    gui.preview_5s_btn.setObjectName("secondaryActionBtn")
+    gui.preview_5s_btn.setMinimumHeight(42)
+    gui.preview_5s_btn.setMinimumWidth(140)
+    gui.preview_5s_btn.setToolTip("Render five seconds with final export subtitle styling")
+    layout.addWidget(gui.preview_5s_btn)
 
     gui.toggle_panel_btn = QPushButton("Control")
     gui.toggle_panel_btn.setObjectName("secondaryActionBtn")
@@ -90,7 +94,6 @@ def _build_header_bar(gui):
     # Hide the toggle button - the workflow panel is always visible.
     gui.toggle_panel_btn.setVisible(False)
     layout.addWidget(gui.toggle_panel_btn)
-    layout.addSpacing(6)
 
     gui.more_actions_btn = QPushButton("More")
     gui.more_actions_btn.setObjectName("secondaryActionBtn")
@@ -103,8 +106,6 @@ def _build_header_bar(gui):
     gui.download_subtitle_action.triggered.connect(gui.download_subtitle)
     gui.download_original_action = more_menu.addAction("Original Script")
     gui.download_original_action.triggered.connect(gui.download_original_script)
-    gui.preview_5s_action = more_menu.addAction("Export 5-Second Preview")
-    gui.preview_5s_action.triggered.connect(gui.preview_five_seconds)
     more_menu.addSeparator()
     gui.clean_project_action = more_menu.addAction("Clean")
     gui.clean_project_action.triggered.connect(gui.clean_current_project)
@@ -270,6 +271,9 @@ def _connect_ui_signals(gui):
         gui.anchor_inspector_cb.toggled.connect(gui.on_anchor_inspector_toggled)
     gui.subtitle_font_combo.currentTextChanged.connect(gui.update_subtitle_preview_style)
     gui.subtitle_font_size_spin.valueChanged.connect(gui.update_subtitle_preview_style)
+    if hasattr(gui, "subtitle_font_scale_combo"):
+        gui.subtitle_font_scale_combo.currentIndexChanged.connect(gui.on_subtitle_font_scale_changed)
+        gui.subtitle_font_size_spin.valueChanged.connect(gui.sync_subtitle_font_scale_control)
     gui.subtitle_animation_combo.currentTextChanged.connect(gui.on_subtitle_animation_changed)
     gui.subtitle_bold_cb.toggled.connect(gui.update_subtitle_preview_style)
     gui.subtitle_preset_tiktok_radio.toggled.connect(gui.on_subtitle_preset_changed)
@@ -370,7 +374,9 @@ def _initialize_ui_state(gui):
     gui._syncing_hidden_editor_text = False
     gui._segment_editor_rows = []
     gui._selected_segment_index = -1
-    gui.subtitle_export_font_scale = 1.3
+    # Export-only calibration. Keep it at 1.0 for the authored size; raise
+    # it when the burned ASS text needs to match a larger Qt preview.
+    gui.subtitle_export_font_scale = 1
     gui.use_exact_subtitle_preview = True
 
     gui.update_subtitle_preview_style()

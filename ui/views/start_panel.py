@@ -214,7 +214,7 @@ def build_start_group(gui, left_layout):
     gui.export_btn.setObjectName("mainActionBtn")
     gui.export_btn.clicked.connect(gui.export_final_video)
 
-    gui.preview_5s_btn = QPushButton("Export 5-Second Preview")
+    gui.preview_5s_btn = QPushButton("Fast Preview")
     gui.preview_5s_btn.clicked.connect(gui.preview_five_seconds)
     gui.preview_frame_btn = QPushButton("Open Large Frame Preview")
     gui.preview_frame_btn.clicked.connect(gui.preview_exact_frame)
@@ -672,8 +672,14 @@ def build_start_group(gui, left_layout):
     gui.subtitle_font_combo.addItems(["Montserrat", "Roboto", "Inter", "Poppins", "Arial", "Segoe UI", "Tahoma", "Verdana", "Times New Roman"])
     gui.subtitle_font_combo.setCurrentText("Segoe UI")
     gui.subtitle_font_size_spin = QSpinBox()
-    gui.subtitle_font_size_spin.setRange(12, 72)
+    # Retained as the canonical source-video size for projects/export. The
+    # percentage picker below is the user-facing control.
+    gui.subtitle_font_size_spin.setRange(30, 90)
     gui.subtitle_font_size_spin.setValue(60)
+    gui.subtitle_font_scale_combo = QComboBox()
+    for percent in (50, 75, 100, 125, 150):
+        gui.subtitle_font_scale_combo.addItem(f"{percent}%", percent)
+    gui.subtitle_font_scale_combo.setCurrentIndex(2)
     gui.subtitle_color_btn = QPushButton("White")
     gui.subtitle_color_hex = "#FFFFFF"
     gui.subtitle_color_btn.clicked.connect(gui.choose_subtitle_color)
@@ -717,7 +723,7 @@ def build_start_group(gui, left_layout):
     custom_controls_layout.addWidget(QLabel("Font:"), 0, 0)
     custom_controls_layout.addWidget(gui.subtitle_font_combo, 0, 1)
     custom_controls_layout.addWidget(QLabel("Size:"), 1, 0)
-    custom_controls_layout.addWidget(gui.subtitle_font_size_spin, 1, 1)
+    custom_controls_layout.addWidget(gui.subtitle_font_scale_combo, 1, 1)
     custom_controls_layout.addWidget(QLabel("Text Color:"), 2, 0)
     custom_controls_layout.addWidget(gui.subtitle_color_btn, 2, 1)
     custom_controls_layout.addWidget(QLabel("Background color:"), 3, 0)

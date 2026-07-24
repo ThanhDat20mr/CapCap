@@ -92,6 +92,7 @@ class PreviewAdapter:
             custom_position_enabled=subtitle_style.get("custom_position_enabled", False),
             custom_position_x=subtitle_style.get("custom_position_x", 50),
             custom_position_y=subtitle_style.get("custom_position_y", 86),
+            custom_position_bottom_y=subtitle_style.get("custom_position_bottom_y"),
             single_line=subtitle_style.get("single_line", False),
         )
 

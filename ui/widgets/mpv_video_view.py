@@ -1,29 +1,52 @@
 from __future__ import annotations
 
 import os
+import re
+import math
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 
 class _SubtitleOverlayWidget(QWidget):
     """A real-time overlay widget for MpvVideoView."""
+    positionDragStarted = Signal()
+    positionDragFinished = Signal(int, int)
 
-    LINE_HEIGHT_FACTOR = 1.35
+    # Match the ASS export row spacing in app.video_processor.
+    LINE_HEIGHT_FACTOR = 1.40
+    # Space for glyph ascenders/descenders and the subtitle outline. The
+    # positioning code lets this invisible safety margin extend past the
+    # canvas edge, so visible text can still sit flush with the video.
+    VERTICAL_PADDING = 6
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        window_flags = Qt.Widget if parent is not None else (
+            Qt.FramelessWindowHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus
+        )
+        super().__init__(parent, window_flags)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setMouseTracking(False)
         self.current_text = ""
         self.current_lines: list[str] = []
+        self.render_text = True
         self.font_name = "Segoe UI"
         self.font_size = 20
         self.font_color = QColor(255, 255, 255)
         self.outline_width = 2
         self.outline_color = QColor(0, 0, 0, 220)
+        self.shadow_color = QColor(0, 0, 0, 180)
+        self.shadow_depth = 0.0
+        self.bold = True
+        self.highlight_color = QColor("#FFD400")
+        self.highlight_phrases: list[str] = []
+        self.karaoke_word_index = -1
+        self.auto_keyword_highlight = False
+        self.animation_style = "static"
+        self.animation_progress = 1.0
         self.alignment = "Bottom Center"
         self.background_box = False
         self.background_color = QColor(0, 0, 0, 170)
@@ -33,11 +56,89 @@ class _SubtitleOverlayWidget(QWidget):
         self.custom_position_enabled = False
         self.custom_x_percent = 50
         self.custom_y_percent = 86
-        self.W, self.H = 640, 96
+        self.W, self.H = 640, 48
+        self._drag_active = False
+        self._editable = False
+        self._drag_grab_offset = QPointF()
+        self._target_view = parent
+        self.setMouseTracking(True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setCursor(Qt.ArrowCursor)
         self.hide()
 
+    def attach_to_view(self, view: QWidget):
+        self._target_view = view
+
+    def set_editable(self, editable: bool):
+        """Allow moving this subtitle layer only for a selected TS segment."""
+        self._editable = bool(editable)
+        if not self._editable:
+            self._drag_active = False
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, not self._editable)
+        self.setCursor(Qt.OpenHandCursor if self._editable else Qt.ArrowCursor)
+
+    def is_top_level_overlay(self) -> bool:
+        return self.parentWidget() is None
+
+    def mousePressEvent(self, event):
+        if not self._editable or event.button() != Qt.LeftButton:
+            event.ignore()
+            return
+        self._drag_active = True
+        self._drag_grab_offset = QPointF(event.position())
+        self.setCursor(Qt.ClosedHandCursor)
+        self.positionDragStarted.emit()
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if not self._drag_active:
+            event.ignore()
+            return
+        view = self._target_view or self.parentWidget()
+        if view is None or not hasattr(view, "get_preview_canvas_rect"):
+            event.ignore()
+            return
+        canvas = view.get_preview_canvas_rect()
+        if canvas.width() <= 0 or canvas.height() <= 0:
+            event.ignore()
+            return
+        # The subtitle is a top-level overlay above MPV, not a child of the
+        # preview widget. Convert through global coordinates to avoid Qt's
+        # parent-hierarchy warning and get the correct canvas-relative point.
+        pointer = view.mapFromGlobal(self.mapToGlobal(event.position().toPoint()))
+        center_x = pointer.x() - self._drag_grab_offset.x() + self.width() / 2.0
+        center_y = pointer.y() - self._drag_grab_offset.y() + self.height() / 2.0
+        # Persist the clamped centre itself, rather than only clamping the
+        # visual widget later. Export receives the same normalized centre and
+        # therefore keeps the drag position instead of applying a different
+        # arbitrary edge rule.
+        half_w = self.width() / 2.0
+        half_h = self.height() / 2.0
+        center_x = max(canvas.left() + half_w, min(center_x, canvas.right() - half_w))
+        center_y = max(canvas.top() + half_h, min(center_y, canvas.bottom() - half_h))
+        x_percent = int(round(max(0.0, min(100.0, (center_x - canvas.left()) * 100.0 / canvas.width()))))
+        y_percent = int(round(max(0.0, min(100.0, (center_y - canvas.top()) * 100.0 / canvas.height()))))
+        self.custom_position_enabled = True
+        self.custom_x_percent = x_percent
+        self.custom_y_percent = y_percent
+        view.reposition_subtitle()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self._drag_active and event.button() == Qt.LeftButton:
+            self._drag_active = False
+            self.setCursor(Qt.OpenHandCursor)
+            self.positionDragFinished.emit(self.custom_x_percent, self.custom_y_percent)
+            event.accept()
+            return
+        event.ignore()
+
     def sync_to_view(self):
-        pass
+        if not self.is_top_level_overlay() or self._target_view is None:
+            return
+        # Position is set by MpvVideoView.reposition_subtitle(). This keeps
+        # a top-level overlay above MPV's native child window.
+        self.raise_()
 
     def set_text(self, text):
         new_lines = [text] if text else []
@@ -60,27 +161,135 @@ class _SubtitleOverlayWidget(QWidget):
             self.update()
 
     def _update_height(self):
-        line_count = max(1, len(self.current_lines))
-        line_height = max(24, int(self.font_size * self.LINE_HEIGHT_FACTOR))
-        new_h = max(96, int(self.font_size * 4) + max(0, line_count - 1) * line_height)
+        new_h = max(24, sum(self._line_layout_heights()) + self.VERTICAL_PADDING * 2)
         if new_h != self.H:
             self.H = new_h
             self.update()
 
-    def set_style(self, font_name, font_size, font_color, outline_width=2, outline_color=None, background_box=None, background_color=None, single_line=None):
+    def set_text_rendering(self, enabled: bool):
+        """Keep this widget as a draggable hit target without painting text."""
+        enabled = bool(enabled)
+        # Rendering updates happen continuously during playback. They must
+        # not change whether the layer captures input; that is controlled
+        # solely by the selected timeline segment.
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, not self._editable)
+        if self.render_text != enabled:
+            self.render_text = enabled
+            self.update()
+
+    def _line_layout_heights(self) -> list[int]:
+        """Return the rendered height of each subtitle entry after wrapping."""
+        font = QFont(self.font_name)
+        font.setPixelSize(max(1, int(self.font_size)))
+        font.setBold(self.bold)
+        metrics = QFontMetrics(font)
+        fallback = max(24, int(self.font_size * self.LINE_HEIGHT_FACTOR))
+        flags = int(Qt.AlignCenter | Qt.TextWordWrap)
+        width = max(1, int(self.W))
+        entries = self.current_lines or [""]
+        heights = []
+        for text in entries:
+            bounds = metrics.boundingRect(QRect(0, 0, width, 100000), flags, text)
+            heights.append(max(fallback, int(bounds.height())))
+        return heights
+
+    def set_style(self, font_name, font_size, font_color, outline_width=2, outline_color=None,
+                  background_box=None, background_color=None, single_line=None, bold=None,
+                  shadow_color=None, shadow_depth=None):
         self.font_name = font_name
         self.font_size = font_size
         self.font_color = font_color
         self.outline_width = max(0, float(outline_width))
         self.outline_color = outline_color or QColor(0, 0, 0, 220)
+        if bold is not None:
+            self.bold = bool(bold)
+        if shadow_color is not None:
+            self.shadow_color = QColor(shadow_color)
+        if shadow_depth is not None:
+            self.shadow_depth = max(0.0, float(shadow_depth))
         if background_box is not None:
             self.background_box = bool(background_box)
         if background_color is not None:
             self.background_color = background_color
         if single_line is not None:
             self.single_line = bool(single_line)
-        self.H = max(96, int(self.font_size * 4) + max(0, len(self.current_lines) - 1) * int(self.font_size * self.LINE_HEIGHT_FACTOR))
+        self.H = max(24, sum(self._line_layout_heights()) + self.VERTICAL_PADDING * 2)
         self.update()
+
+    def set_effects(self, *, highlight_color=None, highlight_phrases=None,
+                    karaoke_word_index=-1, auto_keyword_highlight=False,
+                    animation_style="Static", animation_progress=1.0):
+        """Apply cue-specific TikTok/highlight effects to the live layer."""
+        self.highlight_color = QColor(highlight_color or "#FFD400")
+        self.highlight_phrases = [str(value).strip() for value in (highlight_phrases or []) if str(value).strip()]
+        self.karaoke_word_index = int(karaoke_word_index)
+        self.auto_keyword_highlight = bool(auto_keyword_highlight)
+        self.animation_style = str(animation_style or "Static").strip().lower()
+        self.animation_progress = max(0.0, min(1.0, float(animation_progress)))
+        self.update()
+
+    def _visible_lines(self) -> list[str]:
+        if self.animation_style != "typewriter":
+            return self.current_lines
+        remaining = int(math.ceil(sum(len(line) for line in self.current_lines) * self.animation_progress))
+        visible = []
+        for line in self.current_lines:
+            visible.append(line[:max(0, remaining)])
+            remaining -= len(line)
+        return visible
+
+    def _highlight_spans(self, text: str) -> list[tuple[int, int]]:
+        spans: list[tuple[int, int]] = []
+        lowered = text.lower()
+        for phrase in self.highlight_phrases:
+            needle = phrase.lower()
+            start = 0
+            while needle:
+                index = lowered.find(needle, start)
+                if index < 0:
+                    break
+                spans.append((index, index + len(needle)))
+                start = index + len(needle)
+        words = list(re.finditer(r"\S+", text))
+        if self.karaoke_word_index >= 0 and words:
+            word = words[min(self.karaoke_word_index, len(words) - 1)]
+            spans.append((word.start(), word.end()))
+        elif self.auto_keyword_highlight and not spans and words:
+            for word in sorted(words, key=lambda match: len(match.group()), reverse=True)[:2]:
+                spans.append((word.start(), word.end()))
+        return spans
+
+    def _draw_colored_text(self, painter, text: str, line_rect: QRectF, spans):
+        """Draw wrapped tokens with TikTok keyword/karaoke colours."""
+        metrics = QFontMetrics(painter.font())
+        tokens = list(re.finditer(r"\S+\s*", text))
+        rows, row_widths = [[]], [0.0]
+        for token in tokens:
+            token_width = float(metrics.horizontalAdvance(token.group()))
+            if rows[-1] and row_widths[-1] + token_width > line_rect.width():
+                rows.append([])
+                row_widths.append(0.0)
+            rows[-1].append((token, token_width))
+            row_widths[-1] += token_width
+        line_height = max(metrics.height(), int(self.font_size * self.LINE_HEIGHT_FACTOR))
+        baseline = line_rect.y() + max(metrics.ascent(), (line_rect.height() - len(rows) * line_height) / 2.0 + metrics.ascent())
+        for row, row_width in zip(rows, row_widths):
+            x = line_rect.x() + (line_rect.width() - row_width) / 2.0
+            for token, token_width in row:
+                token_text = token.group()
+                highlighted = any(start < token.end() and end > token.start() for start, end in spans)
+                if self.shadow_depth > 0:
+                    painter.setPen(self.shadow_color)
+                    painter.drawText(QPointF(x + self.shadow_depth, baseline + self.shadow_depth), token_text)
+                if self.outline_width > 0:
+                    w = max(1.0, self.outline_width)
+                    painter.setPen(self.outline_color)
+                    for dx, dy in ((-w, 0), (w, 0), (0, -w), (0, w), (-w*.7, -w*.7), (w*.7, -w*.7), (-w*.7, w*.7), (w*.7, w*.7)):
+                        painter.drawText(QPointF(x + dx, baseline + dy), token_text)
+                painter.setPen(self.highlight_color if highlighted else self.font_color)
+                painter.drawText(QPointF(x, baseline), token_text)
+                x += token_width
+            baseline += line_height
 
     def set_alignment(self, alignment: str):
         self.alignment = alignment or "Bottom Center"
@@ -103,9 +312,18 @@ class _SubtitleOverlayWidget(QWidget):
         width = max(160, int(width))
         if width != self.W:
             self.W = width
+            self._update_height()
             self.update()
 
     def paintEvent(self, event):
+        if not self.render_text:
+            # A fully transparent layered window can become click-through on
+            # Windows. Paint an imperceptible alpha pixel across the target so
+            # the subtitle remains draggable above MPV's native surface.
+            painter = QPainter(self)
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 1))
+            painter.end()
+            return
         if not self.current_text and not self.current_lines and not self.isVisible():
             return
         painter = QPainter(self)
@@ -115,33 +333,63 @@ class _SubtitleOverlayWidget(QWidget):
         if not self.current_lines:
             return
 
+        visible_lines = self._visible_lines()
+        progress = self.animation_progress
+        if self.animation_style == "fade in":
+            painter.setOpacity(progress)
+        elif self.animation_style == "fade out":
+            painter.setOpacity(1.0 - progress)
+        elif self.animation_style == "pop in":
+            scale = 0.72 + 0.28 * progress
+            painter.translate(rect.center())
+            painter.scale(scale, scale)
+            painter.translate(-rect.center())
+        elif self.animation_style == "pulse":
+            scale = 1.0 + 0.08 * math.sin(progress * math.pi)
+            painter.translate(rect.center())
+            painter.scale(scale, scale)
+            painter.translate(-rect.center())
+        elif self.animation_style == "slide up":
+            painter.translate(0, (1.0 - progress) * max(8.0, self.font_size * 0.8))
+
         painter.setPen(self.font_color)
         font = QFont(self.font_name)
         font.setPixelSize(max(1, int(self.font_size)))
-        font.setBold(True)
+        font.setBold(self.bold)
         painter.setFont(font)
-        line_height = max(24, int(self.font_size * self.LINE_HEIGHT_FACTOR))
         wrap_flags = Qt.AlignCenter | Qt.TextWordWrap
+        line_heights = self._line_layout_heights()
+        has_colored_effects = any(self._highlight_spans(line) for line in visible_lines)
 
         line_rects: list[QRectF] = []
-        if len(self.current_lines) == 1:
-            line_rects = [rect]
+        if len(visible_lines) == 1:
+            line_rects = [QRectF(
+                rect.x(), self.VERTICAL_PADDING, rect.width(), line_heights[0],
+            )]
         else:
-            total_h = line_height * len(self.current_lines)
-            y0 = max(0.0, (rect.height() - total_h) / 2.0)
-            for i in range(len(self.current_lines)):
-                line_rects.append(QRectF(rect.x(), rect.y() + y0 + i * line_height, rect.width(), line_height))
+            y = float(self.VERTICAL_PADDING)
+            for line_height in line_heights:
+                line_rects.append(QRectF(rect.x(), y, rect.width(), line_height))
+                y += line_height
 
         if self.background_box:
             painter.setPen(Qt.NoPen)
-            painter.setBrush(self.background_color)
+            box_color = QColor(self.background_color)
+            if self.animation_style == "background appear":
+                box_color.setAlpha(int(round(box_color.alpha() * progress)))
+            painter.setBrush(box_color)
             metrics = painter.fontMetrics()
-            for line_text, line_rect in zip(self.current_lines, line_rects):
+            for line_text, line_rect in zip(visible_lines, line_rects):
                 text_rect = metrics.boundingRect(line_rect.toRect(), int(wrap_flags), line_text).adjusted(-18, -4, 18, 4)
                 text_rect = text_rect.intersected(line_rect.toRect().adjusted(4, 0, -4, 0))
                 painter.drawRoundedRect(QRectF(text_rect), 14, 14)
 
-        if self.outline_width > 0:
+        if self.shadow_depth > 0 and not has_colored_effects:
+            painter.setPen(self.shadow_color)
+            for line_text, line_rect in zip(visible_lines, line_rects):
+                painter.drawText(line_rect.translated(self.shadow_depth, self.shadow_depth), int(wrap_flags), line_text)
+
+        if self.outline_width > 0 and not has_colored_effects:
             w = max(1.0, self.outline_width)
             offsets = [
                 (-w, 0), (w, 0), (0, -w), (0, w),
@@ -149,13 +397,17 @@ class _SubtitleOverlayWidget(QWidget):
                 (-w*0.7, w*0.7), (w*0.7, w*0.7)
             ]
             painter.setPen(self.outline_color)
-            for line_text, line_rect in zip(self.current_lines, line_rects):
+            for line_text, line_rect in zip(visible_lines, line_rects):
                 for dx, dy in offsets:
                     painter.drawText(line_rect.translated(dx, dy), int(wrap_flags), line_text)
 
-        painter.setPen(self.font_color)
-        for line_text, line_rect in zip(self.current_lines, line_rects):
-            painter.drawText(line_rect, int(wrap_flags), line_text)
+        for line_text, line_rect in zip(visible_lines, line_rects):
+            spans = self._highlight_spans(line_text)
+            if spans:
+                self._draw_colored_text(painter, line_text, line_rect, spans)
+            else:
+                painter.setPen(self.font_color)
+                painter.drawText(line_rect, int(wrap_flags), line_text)
 
 
 
@@ -910,6 +1162,7 @@ class MpvVideoView(QWidget):
     blurRegionChanged = Signal()
     blurEditFinished = Signal()
     subtitlePositionChanged = Signal(int, int)  # x_percent, y_percent
+    subtitleDragStarted = Signal()
     framingChanged = Signal(float, float)
     logoMoved = Signal(float, float, float, float)  # x, y, w, h
     logoDeleted = Signal()
@@ -926,6 +1179,10 @@ class MpvVideoView(QWidget):
         self.setMinimumSize(320, 180)
         self.video_source_width = 0
         self.video_source_height = 0
+        # Subtitle layout follows the final export canvas, which can differ
+        # from the input media when an output quality or ratio is selected.
+        self.subtitle_render_width = 0
+        self.subtitle_render_height = 0
         self.preview_aspect_key = "source"
         self.preview_scale_mode = "fit"
         self.preview_fill_focus_x = 0.5
@@ -933,7 +1190,13 @@ class MpvVideoView(QWidget):
         self._framing_drag_active = False
         self._framing_drag_start = QPointF()
         self._framing_drag_focus = (0.5, 0.5)
-        self.subtitle_item = _SubtitleOverlayWidget(self)
+        self._subtitle_event_filter_installed = False
+        # A top-level overlay is required here: MPV renders into a native
+        # child window that can otherwise cover ordinary Qt child widgets.
+        self.subtitle_item = _SubtitleOverlayWidget()
+        self.subtitle_item.attach_to_view(self)
+        self.subtitle_item.positionDragStarted.connect(self.subtitleDragStarted.emit)
+        self.subtitle_item.positionDragFinished.connect(self.subtitlePositionChanged.emit)
         self.video_surface = QWidget(self)
         self.video_surface.setAttribute(Qt.WA_NativeWindow, True)
         self.video_surface.setAutoFillBackground(True)
@@ -997,6 +1260,7 @@ class MpvVideoView(QWidget):
 
     def moveEvent(self, event):
         super().moveEvent(event)
+        self.reposition_subtitle()
         self.blur_overlay.sync_to_view()
         self.mask_overlay.sync_to_view()
 
@@ -1007,14 +1271,43 @@ class MpvVideoView(QWidget):
             _win = self.window()
             if _win:
                 _win.installEventFilter(self.blur_overlay)
+        if not self._subtitle_event_filter_installed:
+            self._subtitle_event_filter_installed = True
+            _win = self.window()
+            if _win:
+                _win.installEventFilter(self)
         self.video_surface.show()
         self._sync_preview_stack()
         self._update_ratio_badge()
+        self.reposition_subtitle()
+        if self.subtitle_item.current_text:
+            self.subtitle_item.show()
         self.blur_overlay.sync_to_view()
         self.mask_overlay.sync_to_view()
 
+    def eventFilter(self, watched, event):
+        # The subtitle is a top-level Qt tool window so it can sit above
+        # MPV's native surface. Windows may hide that tool while the app is
+        # inactive; restore it when the main window becomes active again.
+        if watched is self.window() and event.type() == QEvent.WindowActivate:
+            QTimer.singleShot(0, self._restore_subtitle_overlay)
+        return super().eventFilter(watched, event)
+
+    def _restore_subtitle_overlay(self):
+        if not self.isVisible() or not self.subtitle_item.current_text:
+            return
+        self.reposition_subtitle()
+        self.subtitle_item.show()
+        self.subtitle_item.raise_()
+
+    def set_subtitle_render_dimensions(self, width: int, height: int):
+        self.subtitle_render_width = max(0, int(width or 0))
+        self.subtitle_render_height = max(0, int(height or 0))
+        self.reposition_subtitle()
+
     def hideEvent(self, event):
         super().hideEvent(event)
+        self.subtitle_item.hide()
         self.blur_overlay.hide()
         self.mask_overlay.hide()
 
@@ -1149,13 +1442,17 @@ class MpvVideoView(QWidget):
         if rect.width() <= 0 or rect.height() <= 0:
             return
 
-        source_w = max(1, int(rect.width()))
-        source_h = max(1, int(rect.height()))
+        # Match the ASS export safe area: its 60px left/right margins live in
+        # source-video coordinates, not in the much smaller preview widget.
+        # Treating preview pixels as source pixels made the live layer far too
+        # narrow on portrait previews and therefore wrapped extra lines.
+        source_w = max(1, int(self.subtitle_render_width or self.video_source_width or rect.width()))
+        source_h = max(1, int(self.subtitle_render_height or self.video_source_height or rect.height()))
         scale_x = rect.width() / source_w
         scale_y = rect.height() / source_h
         side_margin_px = 60 * scale_x
 
-        desired_width = min(int(rect.width() - 2 * side_margin_px), max(160, int((source_w - 120) * scale_x)))
+        desired_width = max(1, min(int(rect.width() - 2 * side_margin_px), int((source_w - 120) * scale_x)))
         item.set_layout_width(desired_width)
 
         item_w, item_h = item.W, item.H
@@ -1181,14 +1478,27 @@ class MpvVideoView(QWidget):
             else:
                 y_pos = rect.bottom() - item_h - (item.bottom_offset * scale_y)
 
-        x_pos = max(left_pad - item_w, min(x_pos, rect.right() + item_w))
-        y_min = rect.top() - item_h
-        y_max = rect.bottom()
-        y_pos = max(y_min, min(y_pos, y_max))
+        if item.custom_position_enabled:
+            # Keep the complete interactive subtitle layer inside the video
+            # canvas. This prevents a bottom-edge drag from showing text past
+            # the preview or producing an export position that libass clips.
+            x_pos = max(rect.left(), min(x_pos, rect.right() - item_w))
+            y_pos = max(rect.top(), min(y_pos, rect.bottom() - item_h))
+        else:
+            x_pos = max(left_pad - item_w, min(x_pos, rect.right() + item_w))
+            y_min = rect.top() - item_h
+            y_max = rect.bottom()
+            y_pos = max(y_min, min(y_pos, y_max))
 
-        # We must use move() because it's a QWidget, or setGeometry
-        item.move(int(x_pos), int(y_pos))
+        # The subtitle uses a top-level overlay so it stays above MPV's
+        # native surface. Convert the preview-local position to global
+        # screen coordinates before moving it.
+        if item.is_top_level_overlay():
+            item.move(self.mapToGlobal(QPoint(int(x_pos), int(y_pos))))
+        else:
+            item.move(int(x_pos), int(y_pos))
         item.setFixedSize(int(item_w), int(item_h))
+        item.sync_to_view()
         item.update()
 
     def _can_drag_framing(self) -> bool:
