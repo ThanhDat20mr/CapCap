@@ -595,6 +595,7 @@ def build_preview_panel(gui):
     gui.blur_add_btn.setText("Blur")
     gui.blur_add_btn.setToolTip("Add a blur region")
     gui.blur_add_btn.setFixedSize(50, 38)
+    gui.blur_add_btn.setEnabled(False)
     gui.blur_add_btn.setStyleSheet(
         "QPushButton { color: #ffc15e; font-weight: bold; font-size: 13px; padding: 0; }"
     )
@@ -626,6 +627,7 @@ def build_preview_panel(gui):
     # Dedicated Logo / Watermark button (beside the Blur button)
     gui.add_logo_btn = QPushButton("Logo")
     gui.add_logo_btn.setFixedSize(50, 38)
+    gui.add_logo_btn.setEnabled(False)
     gui.add_logo_btn.setStyleSheet(
         "QPushButton { color: #6ee7d6; font-weight: bold; font-size: 13px; padding: 0; }"
     )
@@ -637,6 +639,7 @@ def build_preview_panel(gui):
     # rectangular mask to the M1 track.
     gui.add_mask_btn = QPushButton("Mask")
     gui.add_mask_btn.setFixedSize(50, 38)
+    gui.add_mask_btn.setEnabled(False)
     gui.add_mask_btn.setStyleSheet(
         "QPushButton { color: #c98c5a; font-weight: bold; font-size: 13px; padding: 0; }"
     )
@@ -646,6 +649,7 @@ def build_preview_panel(gui):
     )
     gui.add_text_btn = QPushButton("Text")
     gui.add_text_btn.setFixedSize(50, 38)
+    gui.add_text_btn.setEnabled(False)
     gui.add_text_btn.setStyleSheet(
         "QPushButton { color: #c084fc; font-weight: bold; font-size: 13px; padding: 0; }"
     )
@@ -740,6 +744,23 @@ def build_preview_panel(gui):
     gui.timeline_redo_btn.clicked.connect(gui.redo_last_timeline_timing_edit)
     gui.timeline_split_btn.clicked.connect(gui.split_selected_timeline_segment)
     gui.timeline_delete_btn.clicked.connect(gui.delete_selected_timeline_segment)
+    gui.timeline_layers_btn = QPushButton("Layers")
+    gui.timeline_layers_btn.setFixedWidth(76)
+    gui.timeline_layers_btn.setToolTip("Show or hide layers on the timeline only")
+    gui.timeline_layers_menu = QMenu(gui.timeline_layers_btn)
+    gui.timeline_layers_menu.setStyleSheet(
+        "QMenu { background: #142030; color: #dbe5f3; border: 1px solid #2f4868; padding: 5px; }"
+        "QMenu::item { padding: 7px 24px 7px 10px; border-radius: 4px; }"
+        "QMenu::item:selected { background: #203a56; color: #ffffff; }"
+        "QMenu::item:disabled { color: #71839a; }"
+        "QMenu::indicator { width: 14px; height: 14px; }"
+        "QMenu::indicator:unchecked { border: 1px solid #61758e; background: #0d1220; }"
+        "QMenu::indicator:checked { border: 1px solid #6ee7d6; background: #1f8d83; }"
+    )
+    gui.timeline_layers_menu.aboutToShow.connect(
+        lambda: gui.populate_timeline_layers_menu() if hasattr(gui, "populate_timeline_layers_menu") else None
+    )
+    gui.timeline_layers_btn.setMenu(gui.timeline_layers_menu)
     gui.timeline_zoom_out_btn = QPushButton("-")
     gui.timeline_zoom_out_btn.setFixedWidth(34)
     gui.timeline_zoom_label = QLabel(f"{gui.timeline.zoom_percent()}%")
@@ -766,11 +787,12 @@ def build_preview_panel(gui):
     edit_group.addWidget(gui.timeline_redo_btn)
     edit_group.addWidget(gui.timeline_split_btn)
     edit_group.addWidget(gui.timeline_delete_btn)
+    edit_group.addWidget(gui.timeline_layers_btn)
 
     gui.add_layer_btn = QPushButton("+ Layer")
     gui.add_layer_btn.setFixedWidth(62)
     gui.add_layer_btn.setToolTip("Add a new layer")
-    gui.add_layer_btn.setEnabled(True)
+    gui.add_layer_btn.setEnabled(False)
     gui._layer_menu = QMenu(gui.add_layer_btn)
     gui._layer_menu.addAction("Subtitle", lambda: gui.on_add_timeline_layer("subtitle"))
     gui._layer_menu.addAction("Text", lambda: gui.on_add_timeline_layer("text"))
@@ -782,11 +804,6 @@ def build_preview_panel(gui):
 
     view_group = QHBoxLayout()
     view_group.setSpacing(4)
-    view_group.addWidget(gui.timeline_zoom_out_btn)
-    view_group.addWidget(gui.timeline_zoom_label)
-    view_group.addWidget(gui.timeline_zoom_in_btn)
-    view_group.addWidget(gui.timeline_zoom_reset_btn)
-    view_group.addWidget(_make_sep())
     view_group.addWidget(gui.voice_timing_sync_label)
     view_group.addWidget(gui.voice_timing_sync_combo)
 
@@ -809,10 +826,11 @@ def build_preview_panel(gui):
 
     def _sync_labels():
         if hasattr(gui, "timeline") and gui.timeline._timeline:
-            names = [t.name for t in gui.timeline._timeline.tracks]
-            heights = [gui.timeline._track_heights.get(t.id, 80) for t in gui.timeline._timeline.tracks]
-            locked = [t.locked for t in gui.timeline._timeline.tracks]
-            muted = [t.muted for t in gui.timeline._timeline.tracks]
+            tracks = [t for t in gui.timeline._timeline.tracks if gui.timeline.is_track_shown_on_timeline(t)]
+            names = [t.name for t in tracks]
+            heights = [gui.timeline._track_heights.get(t.id, 80) for t in tracks]
+            locked = [t.locked for t in tracks]
+            muted = [t.muted for t in tracks]
             gui.track_label_bar.set_tracks(names, heights, locked, muted)
     gui._sync_track_labels = _sync_labels
     _sync_labels()

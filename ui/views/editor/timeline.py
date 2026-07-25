@@ -63,6 +63,9 @@ class EditorTimeline(QGraphicsView):
         self._drag_state = None
         self._hover_layer_id: str = ""
         self._selected_layer_id: str = ""
+        # Presentation-only track hiding. Never write this to Track.visible:
+        # preview and export must continue using the real project visibility.
+        self._timeline_hidden_track_ids: set[str] = set()
         self._segment_indices: dict[str, int] = {}
         self._has_add_btn = False
         self._voice_sync_mode: str = "Smart"
@@ -90,6 +93,23 @@ class EditorTimeline(QGraphicsView):
         ]
         for t in self._timeline.tracks:
             self._track_heights[t.id] = t.height
+        self._redraw()
+
+    def is_track_shown_on_timeline(self, track) -> bool:
+        return bool(getattr(track, "visible", True) and track.id not in self._timeline_hidden_track_ids)
+
+    def set_track_shown_on_timeline(self, track_id: str, shown: bool) -> None:
+        track_id = str(track_id or "")
+        if not track_id:
+            return
+        if shown:
+            self._timeline_hidden_track_ids.discard(track_id)
+        else:
+            self._timeline_hidden_track_ids.add(track_id)
+            if self._selected_layer_id:
+                track, _layer = self._find_layer_by_id(self._selected_layer_id)
+                if track is not None and track.id == track_id:
+                    self._selected_layer_id = ""
         self._redraw()
 
     # ---- Legacy API (drop-in replacement for existing TimelineWidget) ----
@@ -368,7 +388,7 @@ class EditorTimeline(QGraphicsView):
         if not self._timeline:
             return
         tl = self._timeline
-        tracks = [t for t in tl.tracks if t.visible]
+        tracks = [t for t in tl.tracks if self.is_track_shown_on_timeline(t)]
         # Recompute each track's height based on its layer count so
         # tracks with more layers (e.g. multiple blur regions) expand.
         for t in tracks:
@@ -534,7 +554,7 @@ class EditorTimeline(QGraphicsView):
         painter = QPainter(self.viewport())
         painter.setRenderHint(QPainter.Antialiasing, True)
 
-        tracks = [t for t in self._timeline.tracks if t.visible]
+        tracks = [t for t in self._timeline.tracks if self.is_track_shown_on_timeline(t)]
         scroll_x = self.horizontalScrollBar().value()
         # Apply the vertical scroll offset so the tracks scroll within
         # the viewport while the ruler stays sticky at the top.
@@ -891,7 +911,7 @@ class EditorTimeline(QGraphicsView):
         y = self.RULER_HEIGHT
         margin = 4
         for track in self._timeline.tracks:
-            if not track.visible:
+            if not self.is_track_shown_on_timeline(track):
                 continue
             th = self._track_heights.get(track.id, self.TRACK_DEFAULT_H)
             if not (y <= click_y <= y + th):
@@ -927,7 +947,7 @@ class EditorTimeline(QGraphicsView):
                 row = max(0, min(int(rel_y / row_h), num_layers - 1))
                 layers_in_row = [visible_layers[row]]
             else:
-                layers_in_row = list(layers for layers in track.layers if layers.visible)
+                layers_in_row = [layer for layer in track.layers if layer.visible]
             for layer in layers_in_row:
                 lx = self.TRACK_HEADER_W + int(layer.start * self.pixels_per_second) - scroll_x
                 lw = max(int(layer.duration * self.pixels_per_second), 20)
@@ -1070,7 +1090,7 @@ class EditorTimeline(QGraphicsView):
         y = self.RULER_HEIGHT
         margin = 4
         for track in self._timeline.tracks:
-            if not track.visible:
+            if not self.is_track_shown_on_timeline(track):
                 continue
             th = self._track_heights.get(track.id, self.TRACK_DEFAULT_H)
             if not (y <= click_y <= y + th):

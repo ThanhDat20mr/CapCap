@@ -2922,6 +2922,39 @@ class VideoTranslatorGUI(QMainWindow):
         
         self.project_service.save_project(state)
 
+    def _cache_core_timeline_tracks_only(self):
+        """Keep only V1, A1, and TS1 when a video session is closed.
+
+        Optional editing tracks remain fully usable (and exportable) during
+        the active session. They are deliberately not retained in the
+        reopen cache, preventing Blur/Logo/Mask/Text tracks from following
+        a video into its next editing session.
+        """
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return
+        core_track_names = {"V1 Video", "A1 Audio", "TS1"}
+        timeline = self.timeline._timeline
+        removed = [track for track in timeline.tracks if track.name not in core_track_names]
+        if removed:
+            timeline.tracks = [track for track in timeline.tracks if track.name in core_track_names]
+            for track in removed:
+                self.timeline._track_heights.pop(track.id, None)
+            selected_id = str(getattr(self.timeline, "_selected_layer_id", "") or "")
+            retained_ids = {layer.id for track in timeline.tracks for layer in track.layers}
+            if selected_id not in retained_ids:
+                self.timeline._selected_layer_id = ""
+            self.timeline._redraw()
+            self.persist_current_timeline_project_data()
+        state = getattr(self, "current_project_state", None)
+        if state is not None:
+            # Blur and mask also have legacy settings fallbacks. Clear those
+            # cache entries so they cannot recreate optional tracks on load.
+            state.set_setting("blur_state", {"enabled": False, "regions": []})
+            state.set_setting("mask_state", {"enabled": False, "regions": []})
+            self.project_service.save_project(state)
+        if removed:
+            self.log(f"[Timeline Cache] Retained core tracks only; discarded {len(removed)} optional track(s).")
+
     def load_project_context(self, state):
         if not state:
             return
@@ -6193,17 +6226,17 @@ class VideoTranslatorGUI(QMainWindow):
                 self._apply_mask_to_preview()
             except Exception:
                 pass
-            # Re-show the mask overlay (if a layer is currently selected
-            # and the timeline has an M1 track).
+            # Re-show the mask overlay. A label click should restore M1 even
+            # when another layer is selected (or the selection was cleared).
             try:
-                if (hasattr(self, "timeline") and self.timeline._timeline
-                        and self.timeline._selected_layer_id):
-                    sid = self.timeline._selected_layer_id
+                if hasattr(self, "timeline") and self.timeline._timeline:
+                    sid = getattr(self.timeline, "_selected_layer_id", "")
                     for tr in self.timeline._timeline.tracks:
-                        for l in tr.layers:
-                            if l.id == sid and tr.name == "M1":
-                                self._show_mask_overlay(tr, l)
-                                return
+                        if tr.name != "M1" or not tr.layers:
+                            continue
+                        layer = next((item for item in tr.layers if item.id == sid), tr.layers[0])
+                        self._show_mask_overlay(tr, layer)
+                        return
             except Exception:
                 pass
         else:
@@ -6260,6 +6293,16 @@ class VideoTranslatorGUI(QMainWindow):
 
     def on_add_timeline_layer(self, layer_type: str = "subtitle"):
         if not hasattr(self, "timeline"):
+            return
+
+        if layer_type in {"blur", "logo", "mask", "text", "image", "sticker"} and not bool(
+            getattr(self, "_optional_layer_controls_ready", False)
+        ):
+            QMessageBox.information(
+                self,
+                "Generate Video First",
+                "Complete video generation before adding Blur, Logo, Mask, Text, or other overlay layers.",
+            )
             return
 
         tl = self.timeline._timeline
@@ -6791,6 +6834,35 @@ class VideoTranslatorGUI(QMainWindow):
         self.persist_current_timeline_project_data()
         self.schedule_live_subtitle_preview_refresh()
         self.refresh_ui_state()
+
+    def populate_timeline_layers_menu(self):
+        """Build the Layers menu without touching project/preview visibility."""
+        menu = getattr(self, "timeline_layers_menu", None)
+        timeline = getattr(self, "timeline", None)
+        if menu is None:
+            return
+        menu.clear()
+        if timeline is None or not timeline._timeline:
+            empty = menu.addAction("No layers")
+            empty.setEnabled(False)
+            return
+        has_tracks = False
+        for track in timeline._timeline.tracks:
+            # Do not show empty/default tracks. The menu reflects only
+            # tracks that currently contain project layers.
+            if not track.layers:
+                continue
+            has_tracks = True
+            action = menu.addAction(str(track.name or "Layer Track"))
+            action.setCheckable(True)
+            action.setChecked(timeline.is_track_shown_on_timeline(track))
+            action.setToolTip("Only changes whether this entire track is displayed on the timeline.")
+            action.toggled.connect(
+                lambda shown, track_id=track.id: timeline.set_track_shown_on_timeline(track_id, shown)
+            )
+        if not has_tracks:
+            empty = menu.addAction("No layer tracks")
+            empty.setEnabled(False)
 
     def delete_selected_timeline_segment(self):
         # If a layer is currently selected in the timeline, remove it
@@ -7571,7 +7643,12 @@ class VideoTranslatorGUI(QMainWindow):
             # toggle is OFF: pressing it should both enable the effect
             # AND add a region. Requiring the user to toggle first is
             # unnecessary friction.
-            blur_add_btn.setEnabled(has_video and not is_playing and not bool(getattr(self, "_filter_thumbnail_visible", False)))
+            blur_add_btn.setEnabled(
+                bool(getattr(self, "_optional_layer_controls_ready", False))
+                and has_video
+                and not is_playing
+                and not bool(getattr(self, "_filter_thumbnail_visible", False))
+            )
 
     def toggle_blur_effect_enabled(self, checked: bool):
         if not hasattr(self, "video_view") or not hasattr(self, "blur_area_btn"):
@@ -8983,9 +9060,20 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "stop_btn"):
             self.stop_btn.setEnabled(v_ok and not voice_running)
         if hasattr(self, "blur_area_btn"):
-            self.blur_area_btn.setEnabled(v_ok)
+            self.blur_area_btn.setEnabled(can_export)
+        # Overlay tracks are only meaningful once the generated output is
+        # ready. Keep their controls disabled before that point so users
+        # cannot create layers against an incomplete video workflow.
+        self._optional_layer_controls_ready = bool(can_export and not voice_running)
+        for button_name in ("blur_add_btn", "add_logo_btn", "add_mask_btn", "add_text_btn", "add_layer_btn"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(self._optional_layer_controls_ready)
         if hasattr(self, "blur_add_btn"):
-            self.blur_add_btn.setEnabled(v_ok and not bool(getattr(self, "_filter_thumbnail_visible", False)))
+            self.blur_add_btn.setEnabled(
+                self._optional_layer_controls_ready
+                and not bool(getattr(self, "_filter_thumbnail_visible", False))
+            )
         if hasattr(self, "ocr_region_btn"):
             self.ocr_region_btn.setEnabled(v_ok)
         self._sync_blur_controls()
@@ -10565,6 +10653,7 @@ class VideoTranslatorGUI(QMainWindow):
         self._return_to_launcher(project_removed_from_recent=True)
 
     def _return_to_launcher(self, project_removed_from_recent=True):
+        self._cache_core_timeline_tracks_only()
         video_path = getattr(self, "_current_video_path", "")
         if not video_path:
             video_path = os.path.normpath(self.video_path_edit.text().strip())
@@ -10651,6 +10740,7 @@ class VideoTranslatorGUI(QMainWindow):
                     self.persist_project_mask_state()
                 except Exception:
                     pass
+            self._cache_core_timeline_tracks_only()
             if hasattr(self, "video_view"):
                 self.video_view.clear_blur_region()
             if hasattr(self, "media_player") and hasattr(self.media_player, "clear_mask_region"):
