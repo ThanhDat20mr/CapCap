@@ -644,9 +644,19 @@ def build_preview_panel(gui):
     gui.add_mask_btn.clicked.connect(
         lambda: gui.on_add_timeline_layer("mask") if hasattr(gui, "on_add_timeline_layer") else None
     )
+    gui.add_text_btn = QPushButton("Text")
+    gui.add_text_btn.setFixedSize(50, 38)
+    gui.add_text_btn.setStyleSheet(
+        "QPushButton { color: #c084fc; font-weight: bold; font-size: 13px; padding: 0; }"
+    )
+    gui.add_text_btn.setToolTip("Add editable text to the video")
+    gui.add_text_btn.clicked.connect(
+        lambda: gui.on_add_timeline_layer("text") if hasattr(gui, "on_add_timeline_layer") else None
+    )
     blur_group.addWidget(gui.blur_add_btn)
     blur_group.addWidget(gui.add_logo_btn)
     blur_group.addWidget(gui.add_mask_btn)
+    blur_group.addWidget(gui.add_text_btn)
     blur_group.addWidget(gui.ocr_region_btn)
 
     speed_group = QHBoxLayout()
@@ -1259,6 +1269,50 @@ def build_preview_panel(gui):
     mask_layout.addWidget(gui.mask_inspector_tip_label)
     mask_layout.addStretch(1)
 
+    # --- Text Layer Inspector ---
+    text_inspector_card = QFrame()
+    text_inspector_card.setObjectName("statusCard")
+    text_inspector_card.setMinimumWidth(400)
+    text_inspector_card.setMaximumWidth(560)
+    gui.text_inspector_card = text_inspector_card
+    text_layout = QVBoxLayout(text_inspector_card)
+    text_layout.setContentsMargins(12, 10, 12, 10)
+    text_layout.setSpacing(8)
+    text_title = QLabel("Text Layer")
+    text_title.setObjectName("statusHeadline")
+    text_layout.addWidget(text_title)
+    gui.text_inspector_content = QTextEdit()
+    gui.text_inspector_content.setPlaceholderText("Enter text")
+    gui.text_inspector_content.setFixedHeight(82)
+    text_layout.addWidget(gui.text_inspector_content)
+    font_row = QHBoxLayout()
+    font_row.addWidget(QLabel("Font"))
+    gui.text_inspector_font_combo = QComboBox()
+    gui.text_inspector_font_combo.addItems(["Montserrat", "Roboto", "Inter", "Poppins", "Arial", "Segoe UI", "Tahoma", "Verdana", "Times New Roman"])
+    font_row.addWidget(gui.text_inspector_font_combo, 1)
+    text_layout.addLayout(font_row)
+    size_row = QHBoxLayout()
+    size_row.addWidget(QLabel("Font size"))
+    gui.text_inspector_size_combo = QComboBox()
+    for percent in (50, 75, 100, 125, 150):
+        gui.text_inspector_size_combo.addItem(f"{percent}%", percent)
+    gui.text_inspector_size_combo.setCurrentIndex(2)
+    gui.text_inspector_size_combo.setToolTip("Matches the subtitle font-size presets (60 px at 100%).")
+    size_row.addWidget(gui.text_inspector_size_combo, 1)
+    text_layout.addLayout(size_row)
+    color_row = QHBoxLayout()
+    color_row.addWidget(QLabel("Text color"))
+    gui.text_inspector_color_btn = QPushButton("#FFFFFF")
+    gui.text_inspector_color_btn.setFixedWidth(110)
+    color_row.addWidget(gui.text_inspector_color_btn)
+    color_row.addStretch(1)
+    text_layout.addLayout(color_row)
+    gui.text_inspector_summary_label = QLabel("Click or drag the selected text on the video preview to position it.")
+    gui.text_inspector_summary_label.setObjectName("helperLabel")
+    gui.text_inspector_summary_label.setWordWrap(True)
+    text_layout.addWidget(gui.text_inspector_summary_label)
+    text_layout.addStretch(1)
+
     # --- Default / empty inspector ---
     default_inspector_card = QFrame()
     default_inspector_card.setObjectName("statusCard")
@@ -1390,6 +1444,7 @@ def build_preview_panel(gui):
     gui.inspector_stack.addWidget(_wrap_in_scroll(default_inspector_card))  # 4: default
     gui.inspector_stack.addWidget(_wrap_in_scroll(logo_inspector_card))   # 5: logo (L1)
     gui.inspector_stack.addWidget(_wrap_in_scroll(mask_inspector_card))   # 6: mask (M1)
+    gui.inspector_stack.addWidget(_wrap_in_scroll(text_inspector_card))   # 7: text (T1)
     gui.subtitle_inspector_card = inspector_card
     gui.inspector_stack.setCurrentIndex(4)
 

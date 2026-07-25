@@ -1,5 +1,6 @@
 ﻿import os
 import time
+import re
 
 from services import EngineRuntime, ProjectService
 
@@ -152,17 +153,21 @@ class ExportWorkflow:
         video_filter_state=None,
         mask_regions=None,
         logo_layers=None,
+        text_ass_path="",
     ):
         print(f"[Export] _export_subtitle_video: mask_regions={mask_regions}, logo_layers={logo_layers}")
         print(f"[Export] ass_path={ass_path}, exists={os.path.exists(ass_path) if ass_path else False}")
-        if ass_path and os.path.exists(ass_path):
+        effective_ass_path = ass_path if ass_path and os.path.exists(ass_path) else text_ass_path
+        secondary_text_ass = text_ass_path if effective_ass_path != text_ass_path else ""
+        if effective_ass_path and os.path.exists(effective_ass_path):
             ok = self.engine_runtime.embed_ass_subtitles(
                 video_path,
-                ass_path,
+                effective_ass_path,
                 output_path,
                 blur_region=subtitle_style.get("blur_region"),
                 mask_regions=mask_regions,
                 logo_layers=logo_layers,
+                text_ass_path=secondary_text_ass,
                 target_width=target_width,
                 target_height=target_height,
                 output_scale_mode=output_scale_mode,
@@ -191,13 +196,14 @@ class ExportWorkflow:
             raise RuntimeError("Failed to burn subtitles into the output video.")
 
     def _extract_overlay_layers(self, state):
-        """Extract mask and logo layers from project state for export."""
+        """Extract mask, logo, and text layers from project state for export."""
         mask_regions = []
         logo_layers = []
+        text_layers = []
         
         if not state:
             print("[Export] No project state available, skipping overlay extraction")
-            return mask_regions, logo_layers
+            return mask_regions, logo_layers, text_layers
         
         try:
             # Extract logo layers from timeline
@@ -277,6 +283,36 @@ class ExportWorkflow:
                                 })
                                 print(f"[Export] Added logo layer: source={source}, x={x}, y={y}, w={w}, h={h}")
             
+                    # Extract ordinary text layers. Their transform x/y is
+                    # already normalized (unlike legacy logo percentages).
+                    if track_type == "text":
+                        for layer in layers:
+                            if not layer.get("visible", True):
+                                continue
+                            text = str(layer.get("text", "") or "").strip()
+                            if not text:
+                                continue
+                            transform = layer.get("transform", {}) or {}
+                            try:
+                                text_layers.append({
+                                    "text": text,
+                                    "font_name": str(layer.get("font_name", "Arial") or "Arial"),
+                                # Text preview uses the same Qt-to-libass
+                                # calibration as subtitles (0.85). Persist
+                                # the logical source value in the project,
+                                # then apply the calibration only to the ASS
+                                # export size so both views match visually.
+                                "font_size": max(1, int(round(float(layer.get("font_size", 60) or 60) * 0.85))),
+                                    "font_color": str(layer.get("font_color", "#FFFFFF") or "#FFFFFF"),
+                                    "font_bold": bool(layer.get("font_bold", False)),
+                                    "x": max(0.0, min(1.0, float(transform.get("x", 0.5)))),
+                                    "y": max(0.0, min(1.0, float(transform.get("y", 0.5)))),
+                                    "start": max(0.0, float(layer.get("start", 0.0))),
+                                    "end": max(0.0, float(layer.get("end", 0.0))),
+                                })
+                            except (TypeError, ValueError):
+                                continue
+
             # Fallback: extract mask regions from settings if not found in timeline
             if not mask_regions:
                 mask_state = state.settings.get("mask_state", {})
@@ -300,8 +336,100 @@ class ExportWorkflow:
             import traceback
             traceback.print_exc()
         
-        print(f"[Export] Final overlay extraction: {len(mask_regions)} mask(s), {len(logo_layers)} logo(s)")
-        return mask_regions, logo_layers
+        print(f"[Export] Final overlay extraction: {len(mask_regions)} mask(s), {len(logo_layers)} logo(s), {len(text_layers)} text layer(s)")
+        return mask_regions, logo_layers, text_layers
+
+    @staticmethod
+    def _ass_timestamp(seconds: float) -> str:
+        total = max(0, int(round(float(seconds) * 100)))
+        hours, total = divmod(total, 360000)
+        minutes, total = divmod(total, 6000)
+        whole, centis = divmod(total, 100)
+        return f"{hours}:{minutes:02d}:{whole:02d}.{centis:02d}"
+
+    @staticmethod
+    def _ass_color(value: str) -> str:
+        value = str(value or "#FFFFFF").strip().lstrip("#")
+        if not re.fullmatch(r"[0-9a-fA-F]{6}", value):
+            value = "FFFFFF"
+        return f"&H00{value[4:6]}{value[2:4]}{value[0:2]}"
+
+    def _build_text_layer_ass(self, ass_path: str, text_layers, temp_dir: str = "", width=None, height=None) -> str:
+        """Append editor TextLayer events to a disposable ASS file for export."""
+        if not text_layers:
+            return ass_path
+        try:
+            if ass_path and os.path.exists(ass_path):
+                with open(ass_path, "r", encoding="utf-8-sig") as handle:
+                    source = handle.read()
+                width = int(re.search(r"(?mi)^PlayResX:\s*(\d+)", source).group(1))
+                height = int(re.search(r"(?mi)^PlayResY:\s*(\d+)", source).group(1))
+            else:
+                width, height = max(1, int(width or 1920)), max(1, int(height or 1080))
+                source = (
+                    f"[Script Info]\nPlayResX: {width}\nPlayResY: {height}\n\n[V4+ Styles]\n"
+                    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+                    "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+                )
+        except Exception as exc:
+            print(f"[Export] Could not build TextLayer ASS overlay: {exc}")
+            return ass_path
+        styles, events = [], []
+        for index, layer in enumerate(text_layers):
+            style_name = f"CapCapText{index}"
+            styles.append(
+                f"Style: {style_name},{layer['font_name']},{layer['font_size']},{self._ass_color(layer['font_color'])},"
+                # Keep this field order exactly aligned with the ASS
+                # Format line (including StrikeOut). A shifted style record
+                # can make libass reject the whole subtitle style section.
+                f"&H000000FF,&H00000000,&H00000000,{ -1 if layer['font_bold'] else 0},0,0,0,100,100,0,0,1,0,0,5,0,0,0,0"
+            )
+            text = str(layer["text"]).replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\r\n", "\n").replace("\n", "\\N")
+            start, end = float(layer["start"]), float(layer["end"])
+            if end <= start:
+                end = start + 0.01
+            x = int(round(float(layer["x"]) * width))
+            y = int(round(float(layer["y"]) * height))
+            events.append(f"Dialogue: 10,{self._ass_timestamp(start)},{self._ass_timestamp(end)},{style_name},,0,0,0,,{{\\an5\\pos({x},{y})}}{text}")
+        output_dir = str(temp_dir or os.path.dirname(ass_path) or os.path.join(self.workspace_root, "temp"))
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"text_layers_{int(time.time() * 1000)}.ass")
+        source = source.replace("[Events]", "\n".join(styles) + "\n[Events]", 1)
+        with open(output_path, "w", encoding="utf-8") as handle:
+            handle.write(source.rstrip() + "\n" + "\n".join(events) + "\n")
+        print(f"[Export] Added {len(text_layers)} TextLayer event(s) to {output_path}")
+        return output_path
+
+    def _ensure_subtitle_ass(self, ass_path: str, srt_path: str, subtitle_style, video_path: str, target_width=None, target_height=None) -> str:
+        """Generate the styled subtitle ASS when the caller did not supply it."""
+        if ass_path and os.path.exists(ass_path):
+            return ass_path
+        if not srt_path or not os.path.exists(srt_path):
+            return ""
+        from video_processor import srt_to_ass
+        style = self._subtitle_options(subtitle_style)
+        source_w, source_h = self.engine_runtime.get_video_dimensions(video_path)
+        width = int(target_width or source_w or 1920)
+        height = int(target_height or source_h or 1080)
+        generated = srt_to_ass(
+            srt_path, width, height,
+            alignment=int(style["alignment"]), margin_v=int(style["margin_v"]),
+            font_name=str(style["font_name"]), font_size=int(style["font_size"]),
+            font_color=str(style["font_color"]), background_box=bool(style["background_box"]),
+            animation_style=str(style["animation"]), highlight_color=str(style["highlight_color"]),
+            outline_color=str(style["outline_color"]), outline_width=float(style["outline_width"]),
+            shadow_color=str(style["shadow_color"]), shadow_depth=float(style["shadow_depth"]),
+            background_color=str(style["background_color"]), background_alpha=float(style["background_alpha"]),
+            bold=bool(style["bold"]), preset_key=str(style["preset_key"]),
+            auto_keyword_highlight=bool(style["auto_keyword_highlight"]),
+            animation_duration=float(style["animation_duration"]), manual_highlights=style["manual_highlights"],
+            word_timings=style["word_timings"], karaoke_timing_mode=str(style["karaoke_timing_mode"]),
+            custom_position_enabled=bool(style["custom_position_enabled"]),
+            custom_position_x=float(style["custom_position_x"]), custom_position_y=float(style["custom_position_y"]),
+            single_line=bool(style["single_line"]), log_generation=True,
+        )
+        print(f"[Export] Generated missing subtitle ASS: {generated}")
+        return generated
 
     def run(
         self,
@@ -327,6 +455,7 @@ class ExportWorkflow:
         subtitle_style = subtitle_style or {}
         target_w, target_h = self._resolve_target_dimensions(video_path, output_quality, output_ratio)
         target_fps = self._resolve_target_fps(output_fps)
+        ass_path = self._ensure_subtitle_ass(ass_path, srt_path, subtitle_style, video_path, target_w, target_h)
 
         state = self._load_state(project_state_path)
         self._mark_started(state)
@@ -337,9 +466,11 @@ class ExportWorkflow:
             print(f"[Export] Project root: {state.project_root}")
             print(f"[Export] Artifacts: {list(state.artifacts.keys())}")
         
-        # Extract mask and logo layers from project state
-        mask_regions, logo_layers = self._extract_overlay_layers(state)
-        print(f"[Export] Extracted {len(mask_regions)} mask(s), {len(logo_layers)} logo(s)")
+        # Extract visual layers from project state and merge text into the
+        # ASS render pass so it shares libass font/layout rendering.
+        mask_regions, logo_layers, text_layers = self._extract_overlay_layers(state)
+        text_ass_path = self._build_text_layer_ass("", text_layers, project_temp_dir, target_w, target_h)
+        print(f"[Export] Extracted {len(mask_regions)} mask(s), {len(logo_layers)} logo(s), {len(text_layers)} text layer(s)")
 
         tmp_mux_path = ""
         try:
@@ -360,13 +491,21 @@ class ExportWorkflow:
                     video_filter_state=video_filter_state,
                     mask_regions=mask_regions,
                     logo_layers=logo_layers,
+                    text_ass_path=text_ass_path,
                 )
             elif mode == "voice":
                 self._emit_progress(on_progress, 25, "Muxing Vietnamese audio into the video...")
+                # Voice-only exports normally skip the ASS pass. Keep that
+                # fast path when there is no Text layer, but burn text after
+                # muxing when the editor contains text overlays.
+                voice_output = output_path
+                if text_layers and text_ass_path and os.path.exists(text_ass_path):
+                    tmp_mux_path = self._build_temp_mux_path(project_temp_dir)
+                    voice_output = tmp_mux_path
                 self.engine_runtime.mux_audio_for_preview(
                     video_path,
                     audio_path,
-                    output_path,
+                    voice_output,
                     target_width=target_w,
                     target_height=target_h,
                     output_scale_mode=output_scale_mode,
@@ -375,6 +514,24 @@ class ExportWorkflow:
                     output_fps=target_fps,
                     video_filter_state=video_filter_state,
                 )
+                if voice_output != output_path:
+                    self._export_subtitle_video(
+                        video_path=voice_output,
+                        srt_path=srt_path,
+                        ass_path=ass_path,
+                        output_path=output_path,
+                        subtitle_style=subtitle_style,
+                        target_width=target_w,
+                        target_height=target_h,
+                        output_scale_mode=output_scale_mode,
+                        output_fill_focus_x=output_fill_focus_x,
+                        output_fill_focus_y=output_fill_focus_y,
+                        output_fps=target_fps,
+                        video_filter_state=video_filter_state,
+                        mask_regions=mask_regions,
+                        logo_layers=logo_layers,
+                        text_ass_path=text_ass_path,
+                    )
             elif mode == "both":
                 tmp_mux_path = self._build_temp_mux_path(project_temp_dir)
                 self._emit_progress(on_progress, 18, "Muxing Vietnamese audio with the source video...")
@@ -404,6 +561,7 @@ class ExportWorkflow:
                     video_filter_state=video_filter_state,
                     mask_regions=mask_regions,
                     logo_layers=logo_layers,
+                    text_ass_path=text_ass_path,
                 )
             else:
                 raise ValueError(f"Unsupported export mode: {mode}")
@@ -419,6 +577,11 @@ class ExportWorkflow:
             if tmp_mux_path and os.path.exists(tmp_mux_path):
                 try:
                     os.remove(tmp_mux_path)
+                except OSError:
+                    pass
+            if text_ass_path and os.path.exists(text_ass_path):
+                try:
+                    os.remove(text_ass_path)
                 except OSError:
                     pass
 

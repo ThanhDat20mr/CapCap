@@ -428,7 +428,7 @@ class EditorTimeline(QGraphicsView):
     def _uses_layer_rows(cls, track) -> bool:
         """Whether every visible layer receives its own vertical row.
 
-        B1 has always worked this way. L1 and M1 layers commonly span the
+        B1 has always worked this way. L1, M1, and T1 layers commonly span the
         full video too, so without the same layout the last painted clip
         hides every earlier logo/mask layer and they cannot be selected.
         """
@@ -436,10 +436,10 @@ class EditorTimeline(QGraphicsView):
             return True
         name = (getattr(track, "name", "") or "").lower()
         prefix = name.split(" ")[0] if name else ""
-        if prefix in ("l1", "m1"):
+        if prefix in ("l1", "m1", "t1"):
             return True
         return any(
-            getattr(layer, "type", None) == LayerType.MASK
+            getattr(layer, "type", None) in (LayerType.MASK, LayerType.TEXT)
             for layer in getattr(track, "layers", [])
         )
 

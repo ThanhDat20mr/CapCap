@@ -1029,7 +1029,7 @@ def srt_to_ass(srt_path: str,
     return ass_path
 
 
-def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, fast=False):
+def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, fast=False):
     """Burn subtitles into video using an already-prepared ASS file."""
     print(f"[FFmpeg] embed_ass_subtitles called with mask_regions={mask_regions}, logo_layers={logo_layers}")
     ffmpeg = _ffmpeg_path(ffmpeg_path)
@@ -1065,7 +1065,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             ffmpeg, video_path, ass_path, output_path, logo_layers,
             blur_region, mask_regions, video_w, video_h,
             scale_chain, blur_chain, mask_chain,
-            output_fps, video_filter_state
+            output_fps, video_filter_state, text_ass_path
         )
     else:
         # Simple filter chain (no logos)
@@ -1097,7 +1097,14 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             filter_parts.append(f"{current_label}{blur_chain}[blurred]")
             current_label = "[blurred]"
         
-        filter_parts.append(f"{current_label}{_ass_filter_expression(ass_path)}[out]")
+        # Apply the subtitle ASS and the editor Text-layer ASS as separate
+        # libass passes. This preserves the original subtitle file intact
+        # and guarantees both sets of events render together.
+        filter_parts.append(f"{current_label}{_ass_filter_expression(ass_path)}[subbed]")
+        if text_ass_path and os.path.exists(text_ass_path):
+            filter_parts.append(f"[subbed]{_ass_filter_expression(text_ass_path)}[out]")
+        else:
+            filter_parts.append("[subbed]null[out]")
         filter_complex = ";".join(part for part in filter_parts if part)
         
         video_encoder_args = _preferred_h264_encoder_args(ffmpeg, fast=fast)
@@ -1172,7 +1179,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
 def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_layers,
                                  blur_region, mask_regions, video_w, video_h,
                                  scale_chain, blur_chain, mask_chain,
-                                 output_fps, video_filter_state):
+                                 output_fps, video_filter_state, text_ass_path=""):
     """Build FFmpeg command with logo overlay using filter_complex."""
     
     # Start building the command with video input
@@ -1272,7 +1279,11 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
         logo_input_idx += 1
     
     # 3. Burn subtitles
-    filter_parts.append(f"[{current_label}]{_ass_filter_expression(ass_path)}[final]")
+    filter_parts.append(f"[{current_label}]{_ass_filter_expression(ass_path)}[subbed]")
+    if text_ass_path and os.path.exists(text_ass_path):
+        filter_parts.append(f"[subbed]{_ass_filter_expression(text_ass_path)}[final]")
+    else:
+        filter_parts.append("[subbed]null[final]")
     
     # Join all filter parts
     filter_complex = ";".join(filter_parts)

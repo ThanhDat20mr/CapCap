@@ -819,6 +819,24 @@ class VideoTranslatorGUI(QMainWindow):
             if not getattr(self, "_subtitle_position_drag_signal_bound", False):
                 self.video_view.subtitlePositionChanged.connect(self.on_subtitle_position_dragged)
                 self._subtitle_position_drag_signal_bound = True
+        if hasattr(self, "video_view") and hasattr(self.video_view, "textLayerSelected"):
+            if not getattr(self, "_text_layer_signal_bound", False):
+                self.video_view.textLayerSelected.connect(self._on_text_layer_selected_from_preview)
+                self.video_view.textLayerMoved.connect(self._on_text_layer_moved)
+                self._text_layer_signal_bound = True
+
+    def _on_text_layer_selected_from_preview(self, layer_id):
+        if hasattr(self, "timeline"):
+            self.timeline._selected_layer_id = str(layer_id)
+            self.timeline._redraw()
+        self.on_timeline_layer_selected(str(layer_id))
+
+    def _on_text_layer_moved(self, layer_id, x, y):
+        layer = next((item for item in self._text_layers() if item.id == layer_id), None)
+        if layer is None:
+            return
+        layer.transform.x, layer.transform.y = float(x), float(y)
+        self.persist_current_timeline_project_data()
 
     def _configure_local_voice_mode_ui(self):
         if hasattr(self, "use_free_voice_radio"):
@@ -4656,8 +4674,11 @@ class VideoTranslatorGUI(QMainWindow):
         elif layer_type == "mask" or str(getattr(track, "name", "")) == "M1":
             self._show_mask_overlay(track, layer)
             self._show_mask_inspector_for_track(track, layer)
+        elif layer_type == "text":
+            self._show_text_inspector_for_track(track, layer)
+            self._refresh_text_layer_preview(layer.id)
         else:
-            # Text, image, sticker: show default with info
+            # Image, sticker: show default with info
             self._show_default_inspector_for_layer(track, layer)
             if hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
                 self.video_view.clear_logo()
@@ -5349,6 +5370,109 @@ class VideoTranslatorGUI(QMainWindow):
     def _show_default_inspector(self):
         self._switch_inspector("default")
 
+    def _text_layers(self):
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return []
+        return [layer for track in self.timeline._timeline.tracks for layer in track.layers
+                if str(getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))).lower() == "text"]
+
+    def _refresh_text_layer_preview(self, active_id=""):
+        if not hasattr(self, "video_view") or not hasattr(self.video_view, "set_text_layers"):
+            return
+        # Use the same source-to-preview calibration as the editable
+        # subtitle overlay. TextLayer.font_size is authored at source-video
+        # scale (60 px at 100%), while QFont draws in preview pixels.
+        render_h = max(1, int(getattr(self.video_view, "subtitle_render_height", 0) or 0))
+        if render_h <= 1:
+            _render_w, render_h = self._subtitle_render_dimensions()
+        preview_rect = self.video_view.get_preview_canvas_rect()
+        preview_scale = max(1.0, float(preview_rect.height() or self.video_view.height() or 1.0)) / max(1, render_h)
+        preview_text_scale = preview_scale * 0.85
+        items = []
+        for layer in self._text_layers():
+            if not getattr(layer, "visible", True):
+                continue
+            transform = getattr(layer, "transform", None)
+            items.append({
+                "id": layer.id, "text": getattr(layer, "text", ""),
+                "font_name": getattr(layer, "font_name", "Arial"),
+                "font_size": max(1, int(round(float(getattr(layer, "font_size", 60)) * preview_text_scale))),
+                "font_color": getattr(layer, "font_color", "#FFFFFF"),
+                "font_bold": getattr(layer, "font_bold", False),
+                "x": getattr(transform, "x", .5) if transform else .5,
+                "y": getattr(transform, "y", .5) if transform else .5,
+            })
+        self.video_view.set_text_layers(items, active_id or getattr(self.timeline, "_selected_layer_id", ""))
+
+    def _show_text_inspector_for_track(self, track, layer):
+        self._switch_inspector("text")
+        self._wire_text_inspector_controls()
+        self.text_inspector_content.blockSignals(True)
+        self.text_inspector_content.setPlainText(str(getattr(layer, "text", "")))
+        self.text_inspector_content.blockSignals(False)
+        self.text_inspector_font_combo.blockSignals(True)
+        font_name = str(getattr(layer, "font_name", "Arial"))
+        if self.text_inspector_font_combo.findText(font_name) < 0:
+            self.text_inspector_font_combo.addItem(font_name)
+        self.text_inspector_font_combo.setCurrentText(font_name)
+        self.text_inspector_font_combo.blockSignals(False)
+        size = int(getattr(layer, "font_size", 60))
+        choices = [int(self.text_inspector_size_combo.itemData(i)) for i in range(self.text_inspector_size_combo.count())]
+        nearest = min(choices, key=lambda percent: abs(60 * percent / 100.0 - size))
+        self.text_inspector_size_combo.blockSignals(True)
+        self.text_inspector_size_combo.setCurrentIndex(self.text_inspector_size_combo.findData(nearest))
+        self.text_inspector_size_combo.blockSignals(False)
+        color = str(getattr(layer, "font_color", "#FFFFFF"))
+        self.text_inspector_color_btn.setText(color)
+        self.text_inspector_color_btn.setStyleSheet(f"background-color: {color}; color: #fff;")
+        self.text_inspector_summary_label.setText(f"Selected: {getattr(track, 'name', 'T1 Text')} → {getattr(layer, 'name', 'Text')}. Drag it on the preview to move it.")
+
+    def _wire_text_inspector_controls(self):
+        if getattr(self, "_text_inspector_wired", False):
+            return
+        self._text_inspector_wired = True
+        def selected():
+            sid = getattr(self.timeline, "_selected_layer_id", "")
+            return next((layer for layer in self._text_layers() if layer.id == sid), None)
+        def changed():
+            layer = selected()
+            if layer:
+                self._refresh_text_layer_preview(layer.id)
+                self.persist_current_timeline_project_data()
+        def content_changed():
+            layer = selected()
+            if layer:
+                text = self.text_inspector_content.toPlainText()
+                if not text.strip():
+                    text = "Text"
+                    self.text_inspector_content.blockSignals(True)
+                    self.text_inspector_content.setPlainText(text)
+                    self.text_inspector_content.blockSignals(False)
+                layer.text = text
+                first_line = next((line.strip() for line in text.splitlines() if line.strip()), "Text")
+                layer.name = first_line[:24] or "Text"
+                self.timeline._redraw(); changed()
+        def size_changed(_index):
+            layer = selected()
+            if layer:
+                percent = int(self.text_inspector_size_combo.currentData() or 100)
+                layer.font_size = int(round(60 * percent / 100.0)); changed()
+        def font_changed(value):
+            layer = selected()
+            if layer: layer.font_name = str(value); changed()
+        def color_changed():
+            from PySide6.QtWidgets import QColorDialog
+            from PySide6.QtGui import QColor
+            layer = selected()
+            chosen = QColorDialog.getColor(QColor(getattr(layer, "font_color", "#FFFFFF")), self, "Pick text color")
+            if layer and chosen.isValid():
+                layer.font_color = chosen.name(); self.text_inspector_color_btn.setText(layer.font_color)
+                self.text_inspector_color_btn.setStyleSheet(f"background-color: {layer.font_color}; color: #fff;"); changed()
+        self.text_inspector_content.textChanged.connect(content_changed)
+        self.text_inspector_size_combo.currentIndexChanged.connect(size_changed)
+        self.text_inspector_font_combo.currentTextChanged.connect(font_changed)
+        self.text_inspector_color_btn.clicked.connect(color_changed)
+
     def _show_logo_inspector_for_track(self, track, layer=None):
         """Show the Logo Track Inspector populated with the selected L1 layer."""
         self._switch_inspector("logo")
@@ -5724,6 +5848,7 @@ class VideoTranslatorGUI(QMainWindow):
             "default": 4,
             "logo": 5,
             "mask": 6,
+            "text": 7,
         }
         target = idx_map.get(kind, 4)
         if self.inspector_stack.currentIndex() != target:
@@ -5732,7 +5857,7 @@ class VideoTranslatorGUI(QMainWindow):
         # The handle/toggle UI was removed - the track inspector is
         # always expanded. No need to show/hide a handle.
         # Clicking a track layer opens the inspector (auto-expand shell).
-        if kind in ("subtitle", "audio", "blur", "video", "logo", "mask"):
+        if kind in ("subtitle", "audio", "blur", "video", "logo", "mask", "text"):
             self.set_inspector_collapsed(False)
 
     def _current_audio_track_for_inspector(self):
@@ -6182,11 +6307,23 @@ class VideoTranslatorGUI(QMainWindow):
                 name=f"Text {idx + 1}",
                 text="New text layer",
                 start=0.0,
-                end=min(tl.duration, 10.0) if tl.duration > 0 else 10.0,
+                end=tl.duration if tl.duration > 0 else 10.0,
             )
+            layer.font_size = 60
+            # Match the subtitle defaults so identical Text/Subtitles size
+            # values use the same family and weight out of the box.
+            layer.font_name = "Segoe UI"
+            layer.font_bold = True
+            layer.transform.x = 0.5
+            layer.transform.y = 0.5
             layer.z_index = idx
             text_track.layers.append(layer)
+            if hasattr(self.timeline, "_track_heights"):
+                self.timeline._track_heights[text_track.id] = text_track.height or 80
             self.timeline._redraw()
+            self.timeline._selected_layer_id = layer.id
+            self._show_text_inspector_for_track(text_track, layer)
+            self._refresh_text_layer_preview(layer.id)
 
         elif layer_type == "image":
             from app.layers.image import ImageLayer
@@ -6672,8 +6809,21 @@ class VideoTranslatorGUI(QMainWindow):
                             break
                     if layer is None:
                         continue
+                    layer_type = str(
+                        getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))
+                    ).lower()
+                    # Use the layer-specific removal paths where they own
+                    # preview state.  The Delete timeline button therefore
+                    # removes the selected layer rather than merely deleting
+                    # a timeline bar and leaving a stale overlay behind.
+                    if layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo":
+                        self._delete_logo_layer(layer)
+                        return
+                    if layer_type == "mask" or str(getattr(track, "name", "")) == "M1":
+                        self._delete_mask_layer(layer)
+                        return
                     # Blur: pop the corresponding overlay region first
-                    if track.type.value == "blur":
+                    if layer_type == "blur":
                         try:
                             overlay = getattr(self.video_view, "blur_overlay", None)
                             if overlay is not None and 0 <= layer_idx < len(overlay._regions):
@@ -6701,7 +6851,7 @@ class VideoTranslatorGUI(QMainWindow):
                         if hasattr(self.timeline, "_track_heights") and track.id in self.timeline._track_heights:
                             del self.timeline._track_heights[track.id]
                     # Sync blur overlay if needed
-                    if track.type.value == "blur":
+                    if layer_type == "blur":
                         try:
                             regions = self._current_blur_regions_payload() if hasattr(self, "_current_blur_regions_payload") else []
                             if hasattr(self.timeline, "sync_blur_regions"):
@@ -6751,6 +6901,15 @@ class VideoTranslatorGUI(QMainWindow):
                                 self.persist_project_mask_state()
                         except Exception:
                             pass
+                    if layer_type == "text":
+                        # The preview overlay owns a list of all text layers;
+                        # refresh it after deletion so only the selected
+                        # layer is removed and surviving text stays visible.
+                        self._refresh_text_layer_preview("")
+                    try:
+                        self.persist_current_timeline_project_data()
+                    except Exception:
+                        pass
                     return
         segments = list(self.get_active_segments() or [])
         if not segments:
@@ -9566,13 +9725,18 @@ class VideoTranslatorGUI(QMainWindow):
         # The subtitle is a top-level overlay above MPV's native surface.
         # Hide it for this modal dialog so it cannot paint over Settings.
         subtitle_item = getattr(getattr(self, "video_view", None), "subtitle_item", None)
+        text_overlay = getattr(getattr(self, "video_view", None), "text_overlay", None)
         subtitle_was_visible = bool(subtitle_item is not None and subtitle_item.isVisible())
         if subtitle_item is not None:
             subtitle_item.set_suppressed(True)
+        if text_overlay is not None:
+            text_overlay.set_suppressed(True)
         dialog_result = dialog.exec()
         if dialog_result != QDialog.Accepted:
             if subtitle_item is not None:
                 subtitle_item.set_suppressed(False)
+            if text_overlay is not None:
+                text_overlay.set_suppressed(False)
             if subtitle_was_visible and not getattr(self, "_preview_video_has_burned_subtitles", False):
                 QTimer.singleShot(0, self.sync_live_subtitle_preview)
             return
@@ -9684,6 +9848,8 @@ class VideoTranslatorGUI(QMainWindow):
         QMessageBox.information(self, "Success", "Settings saved and updated!")
         if subtitle_item is not None:
             subtitle_item.set_suppressed(False)
+        if text_overlay is not None:
+            text_overlay.set_suppressed(False)
         if subtitle_was_visible and not getattr(self, "_preview_video_has_burned_subtitles", False):
             QTimer.singleShot(0, self.sync_live_subtitle_preview)
 

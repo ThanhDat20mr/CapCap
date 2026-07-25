@@ -5,7 +5,7 @@ import re
 import math
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap, QRegion
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 
@@ -1169,6 +1169,98 @@ class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
         super().mousePressEvent(event)
 
 
+class _TextLayerOverlayWindow(QWidget):
+    """Top-level, editable overlay for ordinary text layers."""
+    layerSelected = Signal(str)
+    layerMoved = Signal(str, float, float)
+
+    def __init__(self):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self._target_view, self._items, self._active_id = None, [], ""
+        self._drag_id, self._drag_offset, self._suppressed = "", QPointF(), False
+        self.hide()
+
+    def attach_to_view(self, view): self._target_view = view
+    def set_suppressed(self, suppressed):
+        self._suppressed = bool(suppressed)
+        if self._suppressed:
+            super().hide()
+        elif self._items and self._target_view and self._target_view.isVisible():
+            self.sync_to_view(); super().show(); self.raise_()
+    def set_items(self, items, active_id=""):
+        self._items, self._active_id = list(items or []), str(active_id or "")
+        self.sync_to_view(); self._update_input_mask(); self.update()
+        if self._items and not self._suppressed and self._target_view and self._target_view.isVisible(): self.show(); self.raise_()
+        elif not self._items: self.hide()
+    def sync_to_view(self):
+        if not self._target_view: return
+        canvas = self._target_view.get_preview_canvas_rect()
+        if canvas.width() > 0 and canvas.height() > 0:
+            canvas_rect = canvas.toRect() if hasattr(canvas, "toRect") else canvas
+            self.setGeometry(QRect(self._target_view.mapToGlobal(canvas_rect.topLeft()), canvas_rect.size()))
+            self._update_input_mask()
+
+    def _update_input_mask(self):
+        """Let clicks pass through unused parts of this full-canvas tool window."""
+        region = QRegion()
+        for item in self._items:
+            rect, *_ = self._rect_for(item)
+            region |= QRegion(rect.adjusted(-4, -4, 4, 4).toAlignedRect())
+        self.setMask(region)
+    def _rect_for(self, item):
+        # Match subtitle rendering: its size is a pixel size on the scaled
+        # preview canvas, not a Qt point size (which is DPI-dependent and
+        # visibly larger for the same numeric value).
+        font = QFont(str(item.get("font_name", "Arial")))
+        font.setPixelSize(max(1, int(item.get("font_size", 60))))
+        font.setBold(bool(item.get("font_bold", False)))
+        metrics = QFontMetrics(font); lines = str(item.get("text", " ")).splitlines() or [" "]
+        width, height = max(metrics.horizontalAdvance(line) for line in lines) + 12, metrics.height() * len(lines) + 10
+        return QRectF(float(item.get("x", .5)) * self.width() - width / 2, float(item.get("y", .5)) * self.height() - height / 2, width, height), font, metrics, lines
+    def paintEvent(self, event):
+        painter = QPainter(self); painter.setRenderHint(QPainter.TextAntialiasing)
+        for item in self._items:
+            rect, font, metrics, lines = self._rect_for(item); painter.setFont(font)
+            color = QColor(str(item.get("font_color", "#FFFFFF"))); painter.setPen(color if color.isValid() else QColor("#FFFFFF"))
+            baseline = rect.top() + 5 + metrics.ascent()
+            for line in lines: painter.drawText(QPointF(rect.left() + 6, baseline), line); baseline += metrics.height()
+            if str(item.get("id", "")) == self._active_id:
+                painter.setPen(QPen(QColor("#6ee7d6"), 1, Qt.DashLine)); painter.setBrush(Qt.NoBrush); painter.drawRect(rect)
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            pos = QPointF(event.position())
+            for item in reversed(self._items):
+                rect, *_ = self._rect_for(item)
+                if rect.contains(pos):
+                    self._active_id = self._drag_id = str(item.get("id", "")); self._drag_offset = pos - rect.center()
+                    # Selection refreshes the inspector and preview
+                    # synchronously. Emit it first, then install the full
+                    # canvas mask so that refresh cannot replace it with the
+                    # text-sized click mask mid-drag.
+                    self.layerSelected.emit(self._active_id)
+                    # The normal input mask is limited to text bounds so other
+                    # preview tools remain clickable. Once a drag starts it
+                    # must cover the full canvas, otherwise Qt stops sending
+                    # move events as soon as the pointer leaves the text.
+                    self.setMask(QRegion(self.rect()))
+                    self.setCursor(Qt.ClosedHandCursor); self.update(); event.accept(); return
+        event.ignore()
+    def mouseMoveEvent(self, event):
+        if not self._drag_id or self.width() <= 0 or self.height() <= 0: return
+        point = QPointF(event.position()) - self._drag_offset; x, y = max(0., min(1., point.x() / self.width())), max(0., min(1., point.y() / self.height()))
+        for item in self._items:
+            if str(item.get("id", "")) == self._drag_id: item["x"], item["y"] = x, y; break
+        self.layerMoved.emit(self._drag_id, x, y); self.update(); event.accept()
+    def mouseReleaseEvent(self, event):
+        if self._drag_id:
+            self._drag_id = ""
+            self._update_input_mask()
+            self.setCursor(Qt.OpenHandCursor)
+            event.accept()
+
+
 class MpvVideoView(QWidget):
     """Hosts an MPV video surface and overlays."""
     blurRegionChanged = Signal()
@@ -1183,6 +1275,8 @@ class MpvVideoView(QWidget):
     maskMoved = Signal(float, float, float, float)  # x, y, w, h
     maskDeleted = Signal()
     maskEditFinished = Signal()
+    textLayerSelected = Signal(str)
+    textLayerMoved = Signal(str, float, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1209,6 +1303,10 @@ class MpvVideoView(QWidget):
         self.subtitle_item.attach_to_view(self)
         self.subtitle_item.positionDragStarted.connect(self.subtitleDragStarted.emit)
         self.subtitle_item.positionDragFinished.connect(self.subtitlePositionChanged.emit)
+        # Create the additional top-level overlay only when the project has
+        # a text layer. This keeps ordinary video opening identical to the
+        # established preview path.
+        self.text_overlay = None
         self.video_surface = QWidget(self)
         self.video_surface.setAttribute(Qt.WA_NativeWindow, True)
         self.video_surface.setAutoFillBackground(True)
@@ -1249,7 +1347,18 @@ class MpvVideoView(QWidget):
     def _sync_preview_stack(self):
         self.video_surface.lower()
         self.subtitle_item.raise_()
+        if self.text_overlay is not None:
+            self.text_overlay.raise_()
         self.ratio_badge.raise_()
+
+    def set_text_layers(self, layers, active_id=""):
+        """Update every ordinary text layer visible above the MPV surface."""
+        if self.text_overlay is None:
+            self.text_overlay = _TextLayerOverlayWindow()
+            self.text_overlay.attach_to_view(self)
+            self.text_overlay.layerSelected.connect(self.textLayerSelected.emit)
+            self.text_overlay.layerMoved.connect(self.textLayerMoved.emit)
+        self.text_overlay.set_items(layers, active_id)
 
     def set_video_dimensions(self, width: int, height: int):
         self.video_source_width = max(0, int(width or 0))
@@ -1268,6 +1377,8 @@ class MpvVideoView(QWidget):
         self._update_ratio_badge()
         self.blur_overlay.sync_to_view()
         self.mask_overlay.sync_to_view()
+        if self.text_overlay is not None:
+            self.text_overlay.sync_to_view()
         self.update()
 
     def moveEvent(self, event):
@@ -1294,6 +1405,10 @@ class MpvVideoView(QWidget):
         self.reposition_subtitle()
         if self.subtitle_item.current_text:
             self.subtitle_item.show()
+        if self.text_overlay is not None and self.text_overlay._items:
+            self.text_overlay.sync_to_view()
+            self.text_overlay.show()
+            self.text_overlay.raise_()
         self.blur_overlay.sync_to_view()
         self.mask_overlay.sync_to_view()
 
@@ -1306,11 +1421,16 @@ class MpvVideoView(QWidget):
         return super().eventFilter(watched, event)
 
     def _restore_subtitle_overlay(self):
-        if not self.isVisible() or not self.subtitle_item.current_text:
+        if not self.isVisible():
             return
-        self.reposition_subtitle()
-        self.subtitle_item.show()
-        self.subtitle_item.raise_()
+        if self.subtitle_item.current_text:
+            self.reposition_subtitle()
+            self.subtitle_item.show()
+            self.subtitle_item.raise_()
+        if self.text_overlay is not None and self.text_overlay._items:
+            self.text_overlay.sync_to_view()
+            self.text_overlay.show()
+            self.text_overlay.raise_()
 
     def set_subtitle_render_dimensions(self, width: int, height: int):
         self.subtitle_render_width = max(0, int(width or 0))
@@ -1322,6 +1442,8 @@ class MpvVideoView(QWidget):
         self.subtitle_item.hide()
         self.blur_overlay.hide()
         self.mask_overlay.hide()
+        if self.text_overlay is not None:
+            self.text_overlay.hide()
 
     def set_preview_aspect_ratio(self, aspect_key: str):
         self.preview_aspect_key = str(aspect_key or "source").strip().lower() or "source"
