@@ -52,19 +52,28 @@ class ResourceDownloadService:
 
     def _voice_local_paths(self, voice_entry: dict) -> tuple[str, str]:
         provider_voice = str(voice_entry.get("provider_voice", "")).strip().replace("/", os.sep)
-        model_name = os.path.basename(provider_voice)
-        config_name = f"{model_name}.json"
+        normalized = os.path.normpath(provider_voice)
+        if normalized.startswith(f"models{os.sep}"):
+            model_path = join_root(normalized)
+        else:
+            model_path = models_path("piper", os.path.basename(normalized))
+        config_path = f"{model_path}.json"
         return (
-            models_path("piper", model_name),
-            models_path("piper", config_name),
+            model_path,
+            config_path,
         )
 
     def _voice_remote_paths(self, voice_entry: dict) -> tuple[str, str]:
         provider_voice = str(voice_entry.get("provider_voice", "")).strip().replace("\\", "/")
         model_name = os.path.basename(provider_voice)
+        remote_model = provider_voice
+        if remote_model.startswith("models/"):
+            remote_model = remote_model[len("models/"):]
+        if not remote_model:
+            remote_model = f"piper/{model_name}"
         return (
-            f"piper/{model_name}",
-            f"piper/{model_name}.json",
+            remote_model,
+            f"{remote_model}.json",
         )
 
     def _finalize_voice_download(self, downloaded_path: str, voice_entry: dict, *, is_config: bool) -> str:
@@ -168,9 +177,10 @@ class ResourceDownloadService:
                 break
             break
 
-    def _piper_voice_entries(self) -> list[dict]:
+    def _piper_voice_entries(self, language: str = "") -> list[dict]:
         payload = self._read_catalog()
         items: list[dict] = []
+        language = str(language or "").strip().lower()
         for voice in payload.get("voices", []) or []:
             if not isinstance(voice, dict):
                 continue
@@ -179,11 +189,14 @@ class ResourceDownloadService:
             voice_id = str(voice.get("id", "")).strip()
             if not voice_id:
                 continue
+            voice_language = str(voice.get("language", "")).strip().lower().split("-", 1)[0]
+            if language and voice_language != language:
+                continue
             items.append(voice)
         return items
 
-    def _voice_pack_status(self) -> str:
-        entries = self._piper_voice_entries()
+    def _voice_pack_status(self, language: str = "") -> str:
+        entries = self._piper_voice_entries(language)
         if not entries:
             return "missing"
         installed = sum(1 for entry in entries if self.is_resource_installed(f"voice:{str(entry.get('id', '')).strip()}"))
@@ -321,10 +334,7 @@ class ResourceDownloadService:
                 "download_url": self._hf_blob_url(self.NORMAL_AI_FILENAME),
                 "expected_filename": self.NORMAL_AI_FILENAME,
                 "auto_download_supported": False,
-                "description": (
-                    "Default local GGUF model. Faster and lighter. "
-                    "Uses the normal-quality prompt. Manual download only."
-                ),
+                "description": "Local AI model used to translate and refine subtitles.",
             },
             {
                 "id": self.HIGH_AI_RESOURCE_ID,
@@ -335,10 +345,7 @@ class ResourceDownloadService:
                 "download_url": self._hf_blob_url(self.HIGH_AI_FILENAME),
                 "expected_filename": self.HIGH_AI_FILENAME,
                 "auto_download_supported": False,
-                "description": (
-                    "Higher quality local GGUF model. Needs a better GPU or will run slower on CPU. "
-                    "Uses the high-quality prompt. Manual download only."
-                ),
+                "description": "Higher-quality local AI model used to translate and refine subtitles.",
             },
             {
                 "id": "whisper:medium",
@@ -349,12 +356,7 @@ class ResourceDownloadService:
                 "download_url": self._hf_blob_url("zipResource/models--Systran--faster-whisper-medium.zip"),
                 "expected_filename": "models--Systran--faster-whisper-medium.zip",
                 "auto_download_supported": True,
-                "description": (
-                    "Higher accuracy, larger download size. "
-                    "Click 'Auto Download' to fetch from Hugging Face, or open the URL to download the zip manually "
-                    "and extract into models/faster_whisper/medium/. "
-                    "faster-whisper will also auto-download on first use if the folder is empty."
-                ),
+                "description": "Speech-recognition model used to create the original transcript.",
             },
             {
                 "id": "cuda:whisper",
@@ -365,11 +367,7 @@ class ResourceDownloadService:
                 "download_url": self._hf_blob_url("zipResource/cuda12_fw.zip"),
                 "expected_filename": "cuda12_fw.zip",
                 "auto_download_supported": True,
-                "description": (
-                    "CUDA 12 runtime + ONNX GPU provider. "
-                    "Required for GPU acceleration on Whisper, OCR, and local AI. "
-                    "Click 'Auto Download' to fetch from Hugging Face, or open the URL to download the zip manually."
-                ),
+                "description": "GPU runtime used to accelerate supported local processing.",
             },
             {
                 "id": "sensevoice:model",
@@ -380,32 +378,38 @@ class ResourceDownloadService:
                 "download_url": self._hf_blob_url("zipResource/sensevoice.zip"),
                 "expected_filename": "sensevoice.zip",
                 "auto_download_supported": True,
-                "description": (
-                    "Multilingual SenseVoice model for CPU-based speech recognition. "
-                    "Click 'Auto Download' to fetch from Hugging Face, or open the URL to download the zip manually "
-                    "and extract model.int8.onnx + tokens.txt into models/sensevoice/."
-                ),
+                "description": "Multilingual speech-recognition model used for transcription.",
             },
         ]
 
-        piper_entries = self._piper_voice_entries()
-        if piper_entries:
+        vietnamese_entries = self._piper_voice_entries("vi")
+        if vietnamese_entries:
             resources.append(
                 {
                     "id": "voice:pack",
                     "name": "Local Vietnamese Voices (Piper)",
                     "kind": "voice",
-                    "status": self._voice_pack_status(),
+                    "status": self._voice_pack_status("vi"),
                     "target_dir": models_path("piper"),
                     "download_url": self._hf_blob_url("zipResource/piper.zip"),
                     "expected_filename": "piper.zip",
                     "auto_download_supported": True,
-                    "description": (
-                        f"Local Piper TTS voices. The catalog lists {len(piper_entries)} Vietnamese voice(s). "
-                        "Click 'Auto Download' to fetch every voice from Hugging Face, "
-                        "or open the URL to download the zip manually "
-                        "and extract each .onnx + .onnx.json pair into models/piper/."
-                    ),
+                    "description": "Offline Vietnamese voices used for text-to-speech dubbing.",
+                }
+            )
+        english_entries = self._piper_voice_entries("en")
+        if english_entries:
+            resources.append(
+                {
+                    "id": "voice:pack-en",
+                    "name": "English Voices (Piper)",
+                    "kind": "voice",
+                    "status": self._voice_pack_status("en"),
+                    "target_dir": models_path("piper-en"),
+                    "download_url": self._hf_blob_url("zipResource/piper-en.zip"),
+                    "expected_filename": "piper-en.zip",
+                    "auto_download_supported": True,
+                    "description": "Offline English voices used for text-to-speech dubbing.",
                 }
             )
         return resources
@@ -432,7 +436,9 @@ class ResourceDownloadService:
                     continue
             return False
         if resource_id == "voice:pack":
-            return self._voice_pack_status() == "installed"
+            return self._voice_pack_status("vi") == "installed"
+        if resource_id == "voice:pack-en":
+            return self._voice_pack_status("en") == "installed"
         if resource_id.startswith("voice:"):
             voice_id = resource_id.split(":", 1)[1].strip()
             voice_entry = self._find_voice_entry(voice_id)
@@ -574,6 +580,11 @@ class ResourceDownloadService:
             if resource_id == "voice:pack":
                 zip_url = self._hf_blob_url("zipResource/piper.zip")
                 target_dir = models_path("piper")
+                self._download_and_extract_zip(zip_url, target_dir, progress_cb)
+                return
+            if resource_id == "voice:pack-en":
+                zip_url = self._hf_blob_url("zipResource/piper-en.zip")
+                target_dir = models_path("piper-en")
                 self._download_and_extract_zip(zip_url, target_dir, progress_cb)
                 return
 

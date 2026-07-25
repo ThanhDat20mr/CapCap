@@ -418,6 +418,7 @@ class PrepareWorkflowWorker(QThread):
         mode,
         audio_handling_mode,
         source_language,
+        target_language,
         translator_ai,
         optimize_subtitles,
         translator_style,
@@ -436,6 +437,7 @@ class PrepareWorkflowWorker(QThread):
         self.mode = mode
         self.audio_handling_mode = audio_handling_mode
         self.source_language = source_language
+        self.target_language = str(target_language or "vi").strip().lower()
         self.translator_ai = translator_ai
         self.optimize_subtitles = False
         self.translator_style = translator_style
@@ -466,7 +468,7 @@ class PrepareWorkflowWorker(QThread):
                             "workspace_root": self.workspace_root,
                             "video_path": self.video_path,
                             "source_language": self.source_language,
-                            "target_language": "vi",
+                            "target_language": self.target_language,
                             "mode": self.mode,
                             "audio_handling_mode": self.audio_handling_mode,
                             "translator_ai": self.translator_ai,
@@ -497,7 +499,7 @@ class PrepareWorkflowWorker(QThread):
                 project_state = workflow.run(
                     video_path=self.video_path,
                     source_language=self.source_language,
-                    target_language="vi",
+                    target_language=self.target_language,
                     mode=self.mode,
                     audio_handling_mode=self.audio_handling_mode,
                     translator_ai=self.translator_ai,

@@ -10,6 +10,7 @@ class RemoteTranslatorAdapter:
         *,
         model_path=None,
         src_lang: str = "auto",
+        target_lang: str = "vi",
         enable_polish: bool = True,
         optimize_subtitles: bool = False,
         style_instruction: str = "",
@@ -19,6 +20,7 @@ class RemoteTranslatorAdapter:
             {
                 "srt_text": srt_text,
                 "src_lang": src_lang,
+                "target_lang": target_lang,
                 "enable_polish": bool(enable_polish),
                 "optimize_subtitles": bool(optimize_subtitles),
                 "style_instruction": style_instruction,
@@ -32,6 +34,7 @@ class RemoteTranslatorAdapter:
         *,
         model_path=None,
         src_lang: str = "auto",
+        target_lang: str = "vi",
         enable_polish: bool = True,
         optimize_subtitles: bool = False,
         style_instruction: str = "",
@@ -42,6 +45,7 @@ class RemoteTranslatorAdapter:
             {
                 "segments": list(segments or []),
                 "src_lang": src_lang,
+                "target_lang": target_lang,
                 "enable_polish": bool(enable_polish),
                 "optimize_subtitles": bool(optimize_subtitles),
                 "style_instruction": style_instruction,

@@ -307,7 +307,7 @@ class LocalPolisherProvider:
             lines = [f"{i + 1}. {s}" for i, s in enumerate(source_texts)]
             header = (
                 f"Translate these subtitle lines from {src_lang} to {target_lang}.{style_part}\n"
-                "Target: natural Vietnamese for short-form video voiceover/subtitles.\n"
+                f"Target: natural {target_lang} for short-form video voiceover/subtitles.\n"
                 "Format: Number. Text"
             )
         else:
@@ -315,13 +315,13 @@ class LocalPolisherProvider:
             if dubbing_mode:
                 header = (
                     f"Rewrite these dubbing drafts from {src_lang} to {target_lang}.{style_part}\n"
-                    "Target: short spoken Vietnamese for TTS timing rescue.\n"
+                    f"Target: short spoken {target_lang} for TTS timing rescue.\n"
                     "Format: Number. Source ||| Draft"
                 )
             else:
                 header = (
                     f"Rewrite these subtitle translations from {src_lang} to {target_lang}.{style_part}\n"
-                    "Target: natural Vietnamese for short-form video voiceover/subtitles.\n"
+                    f"Target: natural {target_lang} for short-form video voiceover/subtitles.\n"
                     "Format: Number. Source ||| Draft"
                 )
         rules = (

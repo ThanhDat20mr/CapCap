@@ -198,6 +198,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
         result = translate_segments(
             segments,
             src_lang=str(payload.get("src_lang", "auto") or "auto"),
+            target_lang=str(payload.get("target_lang", "vi") or "vi"),
             enable_polish=bool(payload.get("enable_polish", True)),
             optimize_subtitles=False,
             style_instruction=str(payload.get("style_instruction", "") or ""),
@@ -209,6 +210,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
         result = translate_segments_to_srt(
             srt_text,
             src_lang=str(payload.get("src_lang", "auto") or "auto"),
+            target_lang=str(payload.get("target_lang", "vi") or "vi"),
             enable_polish=bool(payload.get("enable_polish", True)),
             optimize_subtitles=False,
             style_instruction=str(payload.get("style_instruction", "") or ""),

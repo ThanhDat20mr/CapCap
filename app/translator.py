@@ -11,14 +11,14 @@ env_path = os.path.join(base_dir, ".env")
 load_dotenv(env_path)
 
 
-def translate_segments_to_srt(srt_text, model_path=None, src_lang="auto", enable_polish=True, optimize_subtitles=False, style_instruction=""):
+def translate_segments_to_srt(srt_text, model_path=None, src_lang="auto", target_lang="vi", enable_polish=True, optimize_subtitles=False, style_instruction=""):
     from translation import TranslationOrchestrator
 
     orchestrator = TranslationOrchestrator()
     result = orchestrator.translate_srt(
         srt_text,
         src_lang=src_lang,
-        target_lang="vi",
+        target_lang=target_lang,
         enable_polish=enable_polish,
         optimize_subtitles=optimize_subtitles,
         style_instruction=style_instruction,
@@ -32,6 +32,7 @@ def translate_segments(
     segments,
     model_path=None,
     src_lang="auto",
+    target_lang="vi",
     enable_polish=True,
     optimize_subtitles=False,
     style_instruction="",
@@ -43,7 +44,7 @@ def translate_segments(
     result = orchestrator.translate_segments(
         segments=segments,
         src_lang=src_lang,
-        target_lang="vi",
+        target_lang=target_lang,
         enable_polish=enable_polish,
         optimize_subtitles=optimize_subtitles,
         style_instruction=style_instruction,
@@ -54,7 +55,7 @@ def translate_segments(
     return result.segments
 
 
-def rewrite_translated_segments(source_segments, translated_segments, model_path=None, src_lang="auto", style_instruction=""):
+def rewrite_translated_segments(source_segments, translated_segments, model_path=None, src_lang="auto", target_lang="vi", style_instruction=""):
     from translation import TranslationOrchestrator
 
     orchestrator = TranslationOrchestrator()
@@ -62,7 +63,7 @@ def rewrite_translated_segments(source_segments, translated_segments, model_path
         source_segments,
         translated_segments,
         src_lang=src_lang,
-        target_lang="vi",
+        target_lang=target_lang,
         style_instruction=style_instruction,
     )
     if not result.success:
@@ -70,12 +71,13 @@ def rewrite_translated_segments(source_segments, translated_segments, model_path
     return result.segments
 
 
-def rewrite_translated_segments_to_srt(source_segments, translated_segments, model_path=None, src_lang="auto", style_instruction=""):
+def rewrite_translated_segments_to_srt(source_segments, translated_segments, model_path=None, src_lang="auto", target_lang="vi", style_instruction=""):
     segments = rewrite_translated_segments(
         source_segments,
         translated_segments,
         model_path=model_path,
         src_lang=src_lang,
+        target_lang=target_lang,
         style_instruction=style_instruction,
     )
     return to_srt(segments)

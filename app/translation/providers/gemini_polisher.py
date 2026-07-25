@@ -109,9 +109,9 @@ class GeminiPolisherProvider:
             "No greetings, no analysis, no markdown, no prefix like 'Assistant:' or 'Translation:'. "
             "Return EXACTLY numbered lines, one per input item. Nothing else.\n"
             "Format: N. translated text\n"
-            "Quality: Natural, spoken Vietnamese. Short sentences. "
+            f"Quality: Natural, spoken {target_lang}. Short sentences. "
             "Preserve names, numbers, brands, products exactly. "
-            "Adapt idioms naturally to Vietnamese, not literal. "
+            f"Adapt idioms naturally to {target_lang}, not literal. "
             "Keep each line readable as a single subtitle cue."
         )
         if dubbing_mode:
@@ -120,7 +120,7 @@ class GeminiPolisherProvider:
                 "No greetings, no analysis, no markdown, no prefix. "
                 "Return EXACTLY numbered lines, one per input item. Nothing else.\n"
                 "Format: N. short spoken line\n"
-                "Quality: Natural spoken Vietnamese. Very concise. "
+                f"Quality: Natural spoken {target_lang}. Very concise. "
                 "Fit the timing constraints strictly. "
                 "Preserve names, numbers, brands, products exactly. "
                 "Each line must be speakable within the given duration."

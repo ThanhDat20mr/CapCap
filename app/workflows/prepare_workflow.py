@@ -427,6 +427,7 @@ class PrepareWorkflow:
                                 self.engine_runtime.translate_segments,
                                 list(batch_segments),
                                 src_lang=source_language,
+                                target_lang=target_language,
                                 enable_polish=translator_ai,
                                 optimize_subtitles=optimize_subtitles,
                                 style_instruction=project_state.translator_style,
@@ -528,7 +529,7 @@ class PrepareWorkflow:
             project_state.set_step_status("refine_translation", "skipped")
             self.project_service.save_project(project_state)
         else:
-            print("\n--- Step 4: Translating to Vietnamese ---")
+            print(f"\n--- Step 4: Translating to {target_language} ---")
 
             if step_callback: step_callback("translation")
             translate_started = time.perf_counter()
@@ -631,6 +632,7 @@ class PrepareWorkflow:
                         translated_segments = streamed_translated_segments or self.engine_runtime.translate_segments(
                             raw_segments,
                             src_lang=source_language,
+                            target_lang=target_language,
                             enable_polish=translator_ai,
                             optimize_subtitles=optimize_subtitles,
                             style_instruction=project_state.translator_style,
@@ -647,6 +649,7 @@ class PrepareWorkflow:
                     translated_segments = streamed_translated_segments or self.engine_runtime.translate_segments(
                         raw_segments,
                         src_lang=source_language,
+                        target_lang=target_language,
                         enable_polish=translator_ai,
                         optimize_subtitles=optimize_subtitles,
                         style_instruction=project_state.translator_style,

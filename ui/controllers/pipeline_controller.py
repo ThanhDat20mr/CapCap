@@ -335,6 +335,7 @@ class PipelineController:
             output_mode,
             self.gui.get_audio_handling_mode(),
             self.gui.get_source_language_code(),
+            self.gui.get_target_language_code(),
             self.gui.is_ai_polish_enabled(),
             False,
             self.gui.get_ai_style_instruction(),
