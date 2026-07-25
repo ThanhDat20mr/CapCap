@@ -942,9 +942,10 @@ class VideoTranslatorGUI(QMainWindow):
             return free_value
         if free_value and free_value in getattr(self, "voice_catalog_map", {}):
             return free_value
-        if "ngochuyen" in getattr(self, "voice_catalog_map", {}):
+        target_language = self.get_target_language_code()
+        if target_language == "vi" and "ngochuyen" in getattr(self, "voice_catalog_map", {}):
             return "ngochuyen"
-        if "vi_VN-vais1000-medium" in getattr(self, "voice_catalog_map", {}):
+        if target_language == "vi" and "vi_VN-vais1000-medium" in getattr(self, "voice_catalog_map", {}):
             return "vi_VN-vais1000-medium"
         if hasattr(self, "free_voice_combo") and self.free_voice_combo.count() > 0:
             fallback_value = str(self.free_voice_combo.itemData(0) or "").strip()
@@ -953,7 +954,7 @@ class VideoTranslatorGUI(QMainWindow):
             fallback_entry_id = str(self.free_voice_combo.itemData(0, self.VOICE_ENTRY_ID_ROLE) or "").strip()
             if fallback_entry_id:
                 return fallback_entry_id
-        return "ngochuyen"
+        return ""
 
     def on_voice_engine_changed(self):
         self._voiceover_force_refresh = True
@@ -1029,8 +1030,11 @@ class VideoTranslatorGUI(QMainWindow):
                 entry["gender"] = self._normalize_gender_value(meta.get("gender", ""))
 
     def _auto_sync_piper_voices_to_catalog(self):
-        models_dir = models_path("piper")
-        if not os.path.isdir(models_dir):
+        model_directories = (
+            (models_path("piper"), "models/piper"),
+            (models_path("piper-en"), "models/piper-en"),
+        )
+        if not any(os.path.isdir(path) for path, _relative_path in model_directories):
             return
         catalog_path = app_path("voice_preview_catalog.json")
         os.makedirs(os.path.dirname(catalog_path), exist_ok=True)
@@ -1071,8 +1075,8 @@ class VideoTranslatorGUI(QMainWindow):
                 return ""
             return re.split(r"[-_]", voice, 1)[0].strip().lower()
 
-        def provider_voice_for_model(model_path: str) -> str:
-            return f"models/piper/{os.path.basename(model_path)}"
+        def provider_voice_for_model(model_path: str, relative_dir: str) -> str:
+            return f"{relative_dir}/{os.path.basename(model_path)}"
 
         try:
             if os.path.exists(catalog_path):
@@ -1094,10 +1098,16 @@ class VideoTranslatorGUI(QMainWindow):
             if isinstance(entry, dict) and entry.get("id"):
                 by_id[str(entry.get("id")).strip()] = entry
 
-        model_paths = sorted(
-            [os.path.join(models_dir, name) for name in os.listdir(models_dir) if name.lower().endswith(".onnx")],
-            key=lambda p: os.path.basename(p).lower(),
-        )
+        model_paths = []
+        for models_dir, relative_dir in model_directories:
+            if not os.path.isdir(models_dir):
+                continue
+            model_paths.extend(
+                (os.path.join(models_dir, name), relative_dir)
+                for name in os.listdir(models_dir)
+                if name.lower().endswith(".onnx")
+            )
+        model_paths.sort(key=lambda item: (item[1], os.path.basename(item[0]).lower()))
         changed = False
         model_ids = set()
         if not model_paths:
@@ -1125,10 +1135,10 @@ class VideoTranslatorGUI(QMainWindow):
                     pass
             return
 
-        for model_path in model_paths:
+        for model_path, relative_dir in model_paths:
             voice_id = os.path.splitext(os.path.basename(model_path))[0]
             model_ids.add(voice_id)
-            pv = provider_voice_for_model(model_path)
+            pv = provider_voice_for_model(model_path, relative_dir)
             lang = language_from_piper_config(model_path) or "vi"
 
             existing = by_id.get(voice_id)
@@ -1207,6 +1217,7 @@ class VideoTranslatorGUI(QMainWindow):
 
     def refresh_voice_catalog_combos(self):
         self.voice_catalog_entries = []
+        target_language = self.get_target_language_code()
         for entry in (self.voice_catalog_entries_all or []):
             if not entry or not isinstance(entry, dict):
                 continue
@@ -1214,6 +1225,9 @@ class VideoTranslatorGUI(QMainWindow):
                 continue
             provider = str(entry.get("provider", "")).strip().lower()
             if provider not in {"piper", "edge"}:
+                continue
+            entry_language = str(entry.get("language", "")).strip().lower().split("-", 1)[0]
+            if entry_language and entry_language != target_language:
                 continue
             self.voice_catalog_entries.append(entry)
         self.voice_catalog_entries.sort(key=self._voice_entry_sort_key)
@@ -1240,9 +1254,9 @@ class VideoTranslatorGUI(QMainWindow):
             self.free_voice_combo.setCurrentIndex(0)
         if previous_free:
             self.set_voice_combo_value(self.free_voice_combo, previous_free)
-        elif "ngochuyen" in self.voice_catalog_map:
+        elif target_language == "vi" and "ngochuyen" in self.voice_catalog_map:
             self.set_voice_combo_value(self.free_voice_combo, "ngochuyen")
-        elif "vi_VN-vais1000-medium" in self.voice_catalog_map:
+        elif target_language == "vi" and "vi_VN-vais1000-medium" in self.voice_catalog_map:
             self.set_voice_combo_value(self.free_voice_combo, "vi_VN-vais1000-medium")
         if not self._voice_signals_bound:
             self._voice_signals_bound = True
@@ -1251,6 +1265,12 @@ class VideoTranslatorGUI(QMainWindow):
 
     def on_voice_gender_changed(self):
         self.refresh_voice_catalog_combos()
+
+    def on_target_language_changed(self, _index: int = -1):
+        """Show and select only local voices that match the output language."""
+        self._voiceover_force_refresh = True
+        if getattr(self, "voice_catalog_entries_all", None):
+            self.refresh_voice_catalog_combos()
 
     def on_selected_voice_changed(self):
         self._update_voice_preview_meta()

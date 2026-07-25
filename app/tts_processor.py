@@ -119,11 +119,15 @@ def _speed_to_float(speed) -> float:
         return 1.0
 
 
-def normalize_text_for_tts(text: str, *, provider: str = "piper") -> str:
+def normalize_text_for_tts(text: str, *, provider: str = "piper", language: str = "vi") -> str:
     value = " ".join(str(text or "").replace("\n", " ").split()).strip()
     if not value:
         return ""
     if str(provider or "").strip().lower() != "piper":
+        return value
+    # vietnormalizer is deliberately Vietnamese-specific. English Piper
+    # voices should receive the translated text unchanged.
+    if not str(language or "vi").strip().lower().startswith("vi"):
         return value
 
     global _VIETNAMESE_NORMALIZER, _VIETNAMESE_NORMALIZER_DATA_DIR
@@ -242,6 +246,7 @@ def piper_tts_to_wav_16k_mono(
     text: str,
     wav_path: str,
     model_path: str,
+    language: str = "vi",
     speed: float = 1.0,
     tmp_dir: str | None = None,
     on_progress: callable = None,
@@ -258,7 +263,7 @@ def piper_tts_to_wav_16k_mono(
     os.makedirs(tmp_dir, exist_ok=True)
 
     # Normalize text
-    normalized_text = normalize_text_for_tts(text, provider="piper")
+    normalized_text = normalize_text_for_tts(text, provider="piper", language=language)
 
     # Load Piper voice
     voice = _get_cached_piper_voice(model_path=model_path, on_progress=on_progress)
@@ -441,6 +446,7 @@ def synthesize_text_to_wav_16k_mono(
             text=text,
             wav_path=wav_path,
             model_path=model_path,
+            language=str(voice_entry.get("language", "vi") or "vi"),
             speed=speed,
             tmp_dir=tmp_dir,
             on_progress=on_progress,

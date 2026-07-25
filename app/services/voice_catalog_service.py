@@ -11,7 +11,7 @@ class VoiceCatalogService:
     def __init__(self, workspace_root: str):
         self.workspace_root = workspace_root
         self.catalog_path = app_path("voice_preview_catalog.json")
-        self.piper_models_dir = models_path("piper")
+        self.piper_models_dirs = (models_path("piper"), models_path("piper-en"))
 
     def _read_payload(self) -> dict:
         if not os.path.exists(self.catalog_path):
@@ -41,16 +41,19 @@ class VoiceCatalogService:
         return normalized
 
     def _iter_piper_model_ids(self) -> set[str]:
-        if not os.path.isdir(self.piper_models_dir):
-            return set()
-        try:
-            return {
-                os.path.splitext(name)[0]
-                for name in os.listdir(self.piper_models_dir)
-                if name.lower().endswith(".onnx")
-            }
-        except Exception:
-            return set()
+        model_ids: set[str] = set()
+        for models_dir in self.piper_models_dirs:
+            if not os.path.isdir(models_dir):
+                continue
+            try:
+                model_ids.update(
+                    os.path.splitext(name)[0]
+                    for name in os.listdir(models_dir)
+                    if name.lower().endswith(".onnx")
+                )
+            except Exception:
+                continue
+        return model_ids
 
     def load_catalog(self) -> list[dict]:
         try:

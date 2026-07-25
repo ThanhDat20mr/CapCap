@@ -429,6 +429,7 @@ def build_start_group(gui, left_layout):
     gui.lang_whisper_combo.addItem("English", "en")
     gui.lang_target_combo = QComboBox()
     gui.lang_target_combo.addItem("Vietnamese", "vi")
+    gui.lang_target_combo.addItem("English", "en")
     gui.lang_target_combo.setCurrentIndex(0)
     language_pair_card, language_pair_layout = _section_card()
     language_pair_title = QLabel("Language Pair")
@@ -452,6 +453,7 @@ def build_start_group(gui, left_layout):
         gui.lang_target_combo.setEnabled(not checked)
 
     gui.skip_translation_cb.toggled.connect(toggle_translation_fields)
+    gui.lang_target_combo.currentIndexChanged.connect(gui.on_target_language_changed)
 
     language_page.layout().addWidget(language_card)
 
