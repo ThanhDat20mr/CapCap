@@ -9563,7 +9563,18 @@ class VideoTranslatorGUI(QMainWindow):
         cancel_btn.clicked.connect(dialog.reject)
         save_btn.clicked.connect(dialog.accept)
 
-        if dialog.exec() != QDialog.Accepted:
+        # The subtitle is a top-level overlay above MPV's native surface.
+        # Hide it for this modal dialog so it cannot paint over Settings.
+        subtitle_item = getattr(getattr(self, "video_view", None), "subtitle_item", None)
+        subtitle_was_visible = bool(subtitle_item is not None and subtitle_item.isVisible())
+        if subtitle_item is not None:
+            subtitle_item.set_suppressed(True)
+        dialog_result = dialog.exec()
+        if dialog_result != QDialog.Accepted:
+            if subtitle_item is not None:
+                subtitle_item.set_suppressed(False)
+            if subtitle_was_visible and not getattr(self, "_preview_video_has_burned_subtitles", False):
+                QTimer.singleShot(0, self.sync_live_subtitle_preview)
             return
 
         # Save Logic
@@ -9671,6 +9682,10 @@ class VideoTranslatorGUI(QMainWindow):
         self.save_user_settings()
         self._update_ocr_overlay()
         QMessageBox.information(self, "Success", "Settings saved and updated!")
+        if subtitle_item is not None:
+            subtitle_item.set_suppressed(False)
+        if subtitle_was_visible and not getattr(self, "_preview_video_has_burned_subtitles", False):
+            QTimer.singleShot(0, self.sync_live_subtitle_preview)
 
     def apply_edited_translation(self, show_message=True, force_apply=True):
         result = self.subtitle_controller.apply_edited_translation(show_message=show_message, force_apply=force_apply)

@@ -262,7 +262,14 @@
       "gender": "female",
       "tier": "free",
       "enabled": true,
-      "tags": ["local", "piper"]
+      "tags": [
+        "local",
+        "piper"
+      ],
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "preview_video_url": "",
+      "preview_video_path": ""
     },
     {
       "id": "en_US-arctic-medium",
@@ -273,7 +280,14 @@
       "gender": "male",
       "tier": "free",
       "enabled": true,
-      "tags": ["local", "piper"]
+      "tags": [
+        "local",
+        "piper"
+      ],
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "preview_video_url": "",
+      "preview_video_path": ""
     }
   ]
 }

@@ -59,6 +59,7 @@ class _SubtitleOverlayWidget(QWidget):
         self.W, self.H = 640, 48
         self._drag_active = False
         self._editable = False
+        self._suppressed = False
         self._drag_grab_offset = QPointF()
         self._target_view = parent
         self.setMouseTracking(True)
@@ -76,6 +77,17 @@ class _SubtitleOverlayWidget(QWidget):
             self._drag_active = False
         self.setAttribute(Qt.WA_TransparentForMouseEvents, not self._editable)
         self.setCursor(Qt.OpenHandCursor if self._editable else Qt.ArrowCursor)
+
+    def set_suppressed(self, suppressed: bool):
+        """Temporarily keep this top-level overlay below modal dialogs."""
+        self._suppressed = bool(suppressed)
+        if self._suppressed:
+            super().hide()
+
+    def show(self):
+        if self._suppressed:
+            return
+        super().show()
 
     def is_top_level_overlay(self) -> bool:
         return self.parentWidget() is None
