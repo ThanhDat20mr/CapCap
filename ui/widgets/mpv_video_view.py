@@ -85,7 +85,10 @@ class _SubtitleOverlayWidget(QWidget):
             super().hide()
 
     def show(self):
-        if self._suppressed:
+        # This is a top-level tool window so it can cover MPV's native
+        # surface. Never let it be shown above an active modal dialog.
+        modal = QApplication.activeModalWidget()
+        if self._suppressed or (modal is not None and modal.isVisible()):
             return
         super().show()
 
@@ -1416,12 +1419,26 @@ class MpvVideoView(QWidget):
         # The subtitle is a top-level Qt tool window so it can sit above
         # MPV's native surface. Windows may hide that tool while the app is
         # inactive; restore it when the main window becomes active again.
-        if watched is self.window() and event.type() == QEvent.WindowActivate:
-            QTimer.singleShot(0, self._restore_subtitle_overlay)
+        if watched is self.window():
+            event_type = event.type()
+            if event_type == QEvent.WindowActivate:
+                QTimer.singleShot(0, self._restore_subtitle_overlay)
+            else:
+                blocked_type = getattr(QEvent.Type, "WindowBlocked", None)
+                if event_type != QEvent.WindowDeactivate and event_type != blocked_type:
+                    return super().eventFilter(watched, event)
+                # Modal dialogs do not own this top-level overlay, so hide it
+                # explicitly while the parent window is blocked.
+                self.subtitle_item.hide()
+                if self.text_overlay is not None:
+                    self.text_overlay.hide()
         return super().eventFilter(watched, event)
 
     def _restore_subtitle_overlay(self):
         if not self.isVisible():
+            return
+        modal = QApplication.activeModalWidget()
+        if modal is not None and modal.isVisible():
             return
         if self.subtitle_item.current_text:
             self.reposition_subtitle()

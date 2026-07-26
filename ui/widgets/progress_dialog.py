@@ -265,6 +265,25 @@ class PipelineProgressDialog(QDialog):
         self.hide()
         event.ignore()
 
+    def _set_preview_overlays_suppressed(self, suppressed: bool):
+        """Keep top-level video overlays below this non-modal pipeline window."""
+        parent = self.parentWidget()
+        video_view = getattr(parent, "video_view", None)
+        if video_view is None:
+            return
+        subtitle = getattr(video_view, "subtitle_item", None)
+        text_overlay = getattr(video_view, "text_overlay", None)
+        if subtitle is not None:
+            subtitle.set_suppressed(suppressed)
+        if text_overlay is not None:
+            text_overlay.set_suppressed(suppressed)
+        if not suppressed:
+            QTimer.singleShot(0, video_view._restore_subtitle_overlay)
+
+    def showEvent(self, event):
+        self._set_preview_overlays_suppressed(True)
+        super().showEvent(event)
+
     def add_step(self, step_id, name):
         widget = StepWidget(name)
         self.steps[step_id] = widget
@@ -352,6 +371,7 @@ class PipelineProgressDialog(QDialog):
     def hideEvent(self, event):
         self._stop_total_timer()
         super().hideEvent(event)
+        self._set_preview_overlays_suppressed(False)
 
     # Drag support for frameless window
     def mousePressEvent(self, event):
