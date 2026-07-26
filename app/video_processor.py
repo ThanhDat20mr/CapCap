@@ -112,19 +112,25 @@ def _build_blur_filter_chain(blur_region, video_width, video_height):
         min_dimension = min(w, h)
         luma_radius = max(1, min(20, int(min_dimension // 2)))
         chroma_radius = max(0, min(20, int(min_dimension // 4)))
-        regions.append((x, y, w, h, luma_radius, chroma_radius))
+        try:
+            start = max(0.0, float(region.get("start", 0.0) or 0.0))
+            end = float(region.get("end", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            start, end = 0.0, 0.0
+        regions.append((x, y, w, h, luma_radius, chroma_radius, start, end))
     if not regions:
         return ""
 
     crop_parts = []
     overlay_parts = []
-    for index, (x, y, w, h, luma_radius, chroma_radius) in enumerate(regions):
+    for index, (x, y, w, h, luma_radius, chroma_radius, start, end) in enumerate(regions):
         crop_parts.append(
             f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},boxblur={luma_radius}:3:{chroma_radius}:3[blur{index}]"
         )
         base_label = "main" if index == 0 else f"b{index - 1}"
         output_label = "" if index == len(regions) - 1 else f"[b{index}]"
-        overlay_parts.append(f"[{base_label}][blur{index}]overlay={x}:{y}{output_label}")
+        timing = f":enable='between(t,{start:.3f},{end:.3f})'" if end > start else ""
+        overlay_parts.append(f"[{base_label}][blur{index}]overlay={x}:{y}{timing}{output_label}")
     split_outputs = "[main]" + "".join(f"[tmp{i}]" for i in range(len(regions)))
     return f"split={len(regions) + 1}{split_outputs};" + ";".join(crop_parts + overlay_parts)
 
@@ -180,7 +186,12 @@ def _build_mask_filter_chain(mask_regions, video_width, video_height):
         y = max(0, min(video_height - 2, int(round(y_norm * video_height))))
         w = max(2, min(video_width - x, int(round(w_norm * video_width))))
         h = max(2, min(video_height - y, int(round(h_norm * video_height))))
-        regions.append((x, y, w, h, mode, color, pixelate_size, blur_strength))
+        try:
+            start = max(0.0, float(region.get("start", 0.0) or 0.0))
+            end = float(region.get("end", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            start, end = 0.0, 0.0
+        regions.append((x, y, w, h, mode, color, pixelate_size, blur_strength, start, end))
     
     if not regions:
         return ""
@@ -188,8 +199,9 @@ def _build_mask_filter_chain(mask_regions, video_width, video_height):
     filter_statements = []
     current_input = "[0:v]"
 
-    for index, (x, y, w, h, mode, color, pixelate_size, blur_strength) in enumerate(regions):
+    for index, (x, y, w, h, mode, color, pixelate_size, blur_strength, start, end) in enumerate(regions):
         output_label = f"[m{index}]"
+        timing = f":enable='between(t,{start:.3f},{end:.3f})'" if end > start else ""
 
         if mode == "solid":
             color_clean = color.lstrip("#")
@@ -198,7 +210,7 @@ def _build_mask_filter_chain(mask_regions, video_width, video_height):
             filter_statements.append(
                 f"color=c=0x{color_clean}:s={w}x{h}:d=1[solid{index}]"
             )
-            filter_statements.append(f"{current_input}[solid{index}]overlay={x}:{y}{output_label}")
+            filter_statements.append(f"{current_input}[solid{index}]overlay={x}:{y}{timing}{output_label}")
 
         elif mode == "pixelate":
             pixel_size = max(1, min(50, pixelate_size))
@@ -209,7 +221,7 @@ def _build_mask_filter_chain(mask_regions, video_width, video_height):
                 f"{current_input}split=2[main{index}][tmp{index}];"
                 f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},"
                 f"scale={small_w}:{small_h},scale={w}:{h}[pix{index}];"
-                f"[main{index}][pix{index}]overlay={x}:{y}{output_label}"
+                f"[main{index}][pix{index}]overlay={x}:{y}{timing}{output_label}"
             )
 
         elif mode == "blur":
@@ -219,7 +231,7 @@ def _build_mask_filter_chain(mask_regions, video_width, video_height):
             filter_statements.append(
                 f"{current_input}split=2[main{index}][tmp{index}];"
                 f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},boxblur={luma_radius}:3:{chroma_radius}:3[blur{index}];"
-                f"[main{index}][blur{index}]overlay={x}:{y}{output_label}"
+                f"[main{index}][blur{index}]overlay={x}:{y}{timing}{output_label}"
             )
 
         current_input = output_label
@@ -1248,6 +1260,8 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
         height = float(logo.get('height', 0.2))
         opacity = float(logo.get('opacity', 1.0))
         rotation = float(logo.get('rotation', 0.0))
+        start = max(0.0, float(logo.get('start', 0.0) or 0.0))
+        end = float(logo.get('end', 0.0) or 0.0)
         
         # Calculate pixel dimensions
         logo_w = int(video_w * width)
@@ -1274,7 +1288,8 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
         
         # Overlay logo on video
         next_label = f"with_logo{i}"
-        filter_parts.append(f"[{current_label}][{logo_label}]overlay={logo_x}:{logo_y}[{next_label}]")
+        timing = f":enable='between(t,{start:.3f},{end:.3f})'" if end > start else ""
+        filter_parts.append(f"[{current_label}][{logo_label}]overlay={logo_x}:{logo_y}{timing}[{next_label}]")
         current_label = next_label
         logo_input_idx += 1
     

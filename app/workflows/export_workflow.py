@@ -153,6 +153,7 @@ class ExportWorkflow:
         video_filter_state=None,
         mask_regions=None,
         logo_layers=None,
+        blur_regions=None,
         text_ass_path="",
     ):
         print(f"[Export] _export_subtitle_video: mask_regions={mask_regions}, logo_layers={logo_layers}")
@@ -164,7 +165,7 @@ class ExportWorkflow:
                 video_path,
                 effective_ass_path,
                 output_path,
-                blur_region=subtitle_style.get("blur_region"),
+                blur_region=blur_regions if blur_regions else subtitle_style.get("blur_region"),
                 mask_regions=mask_regions,
                 logo_layers=logo_layers,
                 text_ass_path=secondary_text_ass,
@@ -196,14 +197,15 @@ class ExportWorkflow:
             raise RuntimeError("Failed to burn subtitles into the output video.")
 
     def _extract_overlay_layers(self, state):
-        """Extract mask, logo, and text layers from project state for export."""
+        """Extract timed visual layers from project state for export."""
         mask_regions = []
         logo_layers = []
         text_layers = []
+        blur_regions = []
         
         if not state:
             print("[Export] No project state available, skipping overlay extraction")
-            return mask_regions, logo_layers, text_layers
+            return mask_regions, logo_layers, text_layers, blur_regions
         
         try:
             # Extract logo layers from timeline
@@ -250,10 +252,30 @@ class ExportWorkflow:
                                     "opacity": float(layer.get("opacity", 1.0)),
                                     "pixelate_size": int(layer.get("pixelate_size", 12)),
                                     "blur_strength": int(layer.get("blur_strength", 20)),
+                                    "start": max(0.0, float(layer.get("start", 0.0))),
+                                    "end": max(0.0, float(layer.get("end", 0.0))),
                                 })
                             except (TypeError, ValueError):
                                 continue
                         print(f"[Export] Extracted {len(mask_regions)} mask region(s) from mask track")
+
+                    if track_type == "blur":
+                        for layer in layers:
+                            if not layer.get("visible", True):
+                                continue
+                            try:
+                                blur_regions.append({
+                                    "x": float(layer.get("position_x", 0.0)),
+                                    "y": float(layer.get("position_y", 0.0)),
+                                    "width": float(layer.get("width", 0.0)),
+                                    "height": float(layer.get("height", 0.0)),
+                                    "blur_strength": float(layer.get("blur_strength", 20.0)),
+                                    "blur_opacity": float(layer.get("blur_opacity", 1.0)),
+                                    "start": max(0.0, float(layer.get("start", 0.0))),
+                                    "end": max(0.0, float(layer.get("end", 0.0))),
+                                })
+                            except (TypeError, ValueError):
+                                continue
                     
                     # Extract logo/image layers from image track (type="image")
                     if track_type == "image":
@@ -280,6 +302,8 @@ class ExportWorkflow:
                                     "height": h,
                                     "opacity": float(layer.get("opacity", 1.0)),
                                     "rotation": float(transform.get("rotation", 0.0)),
+                                    "start": max(0.0, float(layer.get("start", 0.0))),
+                                    "end": max(0.0, float(layer.get("end", 0.0))),
                                 })
                                 print(f"[Export] Added logo layer: source={source}, x={x}, y={y}, w={w}, h={h}")
             
@@ -336,8 +360,8 @@ class ExportWorkflow:
             import traceback
             traceback.print_exc()
         
-        print(f"[Export] Final overlay extraction: {len(mask_regions)} mask(s), {len(logo_layers)} logo(s), {len(text_layers)} text layer(s)")
-        return mask_regions, logo_layers, text_layers
+        print(f"[Export] Final overlay extraction: {len(mask_regions)} mask(s), {len(logo_layers)} logo(s), {len(text_layers)} text layer(s), {len(blur_regions)} blur(s)")
+        return mask_regions, logo_layers, text_layers, blur_regions
 
     @staticmethod
     def _ass_timestamp(seconds: float) -> str:
@@ -468,9 +492,9 @@ class ExportWorkflow:
         
         # Extract visual layers from project state and merge text into the
         # ASS render pass so it shares libass font/layout rendering.
-        mask_regions, logo_layers, text_layers = self._extract_overlay_layers(state)
+        mask_regions, logo_layers, text_layers, blur_regions = self._extract_overlay_layers(state)
         text_ass_path = self._build_text_layer_ass("", text_layers, project_temp_dir, target_w, target_h)
-        print(f"[Export] Extracted {len(mask_regions)} mask(s), {len(logo_layers)} logo(s), {len(text_layers)} text layer(s)")
+        print(f"[Export] Extracted {len(mask_regions)} mask(s), {len(logo_layers)} logo(s), {len(text_layers)} text layer(s), {len(blur_regions)} blur(s)")
 
         tmp_mux_path = ""
         try:
@@ -491,6 +515,7 @@ class ExportWorkflow:
                     video_filter_state=video_filter_state,
                     mask_regions=mask_regions,
                     logo_layers=logo_layers,
+                    blur_regions=blur_regions,
                     text_ass_path=text_ass_path,
                 )
             elif mode == "voice":
@@ -530,6 +555,7 @@ class ExportWorkflow:
                         video_filter_state=video_filter_state,
                         mask_regions=mask_regions,
                         logo_layers=logo_layers,
+                        blur_regions=blur_regions,
                         text_ass_path=text_ass_path,
                     )
             elif mode == "both":
@@ -561,6 +587,7 @@ class ExportWorkflow:
                     video_filter_state=video_filter_state,
                     mask_regions=mask_regions,
                     logo_layers=logo_layers,
+                    blur_regions=blur_regions,
                     text_ass_path=text_ass_path,
                 )
             else:

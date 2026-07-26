@@ -550,6 +550,7 @@ def build_preview_panel(gui):
     gui.timeline.segmentSelected.connect(gui.on_timeline_segment_selected)
     gui.timeline.segmentTimingEditStarted.connect(gui.on_timeline_segment_timing_edit_started)
     gui.timeline.segmentTimingChanged.connect(gui.on_timeline_segment_timing_changed)
+    gui.timeline.layerTimingChanged.connect(gui.on_timeline_layer_timing_changed)
     gui.timeline.zoomChanged.connect(lambda value: gui.timeline_zoom_label.setText(f"{value}%"))
     gui.timeline.layerSelected.connect(gui.on_timeline_layer_selected)
     gui.timeline.layoutChanged.connect(lambda: getattr(gui, '_sync_track_labels', lambda: None)())
@@ -1023,6 +1024,30 @@ def build_preview_panel(gui):
     audio_layout.addWidget(gui.audio_inspector_dub_section)
     audio_layout.addStretch(1)
 
+    def _add_layer_timing_controls(layout, prefix):
+        """Add common start/end controls for timeline-backed overlay layers."""
+        timing_row = QHBoxLayout()
+        timing_row.setSpacing(6)
+        timing_row.addWidget(QLabel("Start"))
+        start_spin = QDoubleSpinBox()
+        start_spin.setRange(0.0, 86400.0)
+        start_spin.setDecimals(2)
+        start_spin.setSingleStep(0.1)
+        start_spin.setSuffix(" s")
+        start_spin.setMinimumWidth(104)
+        setattr(gui, f"{prefix}_inspector_start_spin", start_spin)
+        timing_row.addWidget(start_spin, 1)
+        timing_row.addWidget(QLabel("End"))
+        end_spin = QDoubleSpinBox()
+        end_spin.setRange(0.1, 86400.0)
+        end_spin.setDecimals(2)
+        end_spin.setSingleStep(0.1)
+        end_spin.setSuffix(" s")
+        end_spin.setMinimumWidth(104)
+        setattr(gui, f"{prefix}_inspector_end_spin", end_spin)
+        timing_row.addWidget(end_spin, 1)
+        layout.addLayout(timing_row)
+
     # --- Blur Track Inspector ---
     blur_inspector_card = QFrame()
     blur_inspector_card.setObjectName("statusCard")
@@ -1051,6 +1076,7 @@ def build_preview_panel(gui):
     gui.blur_inspector_summary_label.setObjectName("helperLabel")
     gui.blur_inspector_summary_label.setWordWrap(True)
     blur_layout.addWidget(gui.blur_inspector_summary_label)
+    _add_layer_timing_controls(blur_layout, "blur")
 
     # Show on preview toggle
     show_row = QHBoxLayout()
@@ -1168,6 +1194,7 @@ def build_preview_panel(gui):
     gui.logo_inspector_summary_label.setObjectName("helperLabel")
     gui.logo_inspector_summary_label.setWordWrap(True)
     logo_layout.addWidget(gui.logo_inspector_summary_label)
+    _add_layer_timing_controls(logo_layout, "logo")
 
     # --- Opacity ---
     opacity_row = QHBoxLayout()
@@ -1242,6 +1269,7 @@ def build_preview_panel(gui):
     gui.mask_inspector_summary_label.setObjectName("helperLabel")
     gui.mask_inspector_summary_label.setWordWrap(True)
     mask_layout.addWidget(gui.mask_inspector_summary_label)
+    _add_layer_timing_controls(mask_layout, "mask")
 
     # --- Colour ---
     color_row = QHBoxLayout()
@@ -1299,6 +1327,7 @@ def build_preview_panel(gui):
     text_title = QLabel("Text Layer")
     text_title.setObjectName("statusHeadline")
     text_layout.addWidget(text_title)
+    _add_layer_timing_controls(text_layout, "text")
     gui.text_inspector_content = QTextEdit()
     gui.text_inspector_content.setPlaceholderText("Enter text")
     gui.text_inspector_content.setFixedHeight(82)

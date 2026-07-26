@@ -6,6 +6,7 @@ import copy
 import hashlib
 import shutil
 import threading
+from uuid import uuid4
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QLineEdit,
@@ -4664,6 +4665,156 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "timeline"):
             self.timeline.set_active_segment_index(index)
 
+    def _set_layer_timing_controls(self, prefix: str, layer) -> None:
+        """Populate an overlay inspector's Start/End controls without edits."""
+        for suffix, value in (("start", float(layer.start)), ("end", float(layer.end))):
+            control = getattr(self, f"{prefix}_inspector_{suffix}_spin", None)
+            if control is None:
+                continue
+            control.blockSignals(True)
+            control.setValue(value)
+            control.blockSignals(False)
+
+    def _layer_is_active_at_preview_time(self, layer, time_seconds=None) -> bool:
+        """Return whether a layer should be visible at the current playhead."""
+        if not bool(getattr(layer, "visible", True)):
+            return False
+        if time_seconds is None:
+            try:
+                time_seconds = float(self.media_player.position()) / 1000.0
+            except Exception:
+                time_seconds = 0.0
+        start = max(0.0, float(getattr(layer, "start", 0.0) or 0.0))
+        end = float(getattr(layer, "end", 0.0) or 0.0)
+        # Legacy layers without a valid duration continue to be visible.
+        return end <= start or (start <= float(time_seconds) < end)
+
+    def refresh_timed_layer_preview(self, position_ms=None) -> None:
+        """Show only overlay layers whose timeline interval contains the playhead."""
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return
+        time_seconds = float(position_ms if position_ms is not None else self.media_player.position()) / 1000.0
+        tracked = []
+        for track in self.timeline._timeline.tracks:
+            for layer in track.layers:
+                layer_type = str(getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))).lower()
+                is_logo = layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo"
+                if layer_type in {"blur", "mask", "text"} or is_logo:
+                    tracked.append((layer.id, self._layer_is_active_at_preview_time(layer, time_seconds)))
+        signature = tuple(tracked)
+        if signature == getattr(self, "_timed_layer_preview_signature", None):
+            return
+        self._timed_layer_preview_signature = signature
+        selected_id = str(getattr(self.timeline, "_selected_layer_id", "") or "")
+
+        # Text layers are rendered independently, so filtering their payload
+        # makes them disappear/reappear without changing their saved state.
+        self._refresh_text_layer_preview(selected_id)
+
+        for track in self.timeline._timeline.tracks:
+            if str(getattr(track, "name", "")) == "L1 Logo":
+                active = [l for l in track.layers if self._layer_is_active_at_preview_time(l, time_seconds)]
+                if active:
+                    target = next((l for l in active if l.id == selected_id), active[0])
+                    self._show_logo_overlay(track, target)
+                elif hasattr(self.video_view, "clear_logo"):
+                    self.video_view.clear_logo()
+            elif str(getattr(track, "name", "")) == "M1":
+                active_layers = [l for l in track.layers if self._layer_is_active_at_preview_time(l, time_seconds)]
+                regions = self._current_mask_regions_payload(time_seconds=time_seconds)
+                if hasattr(self.video_view, "set_mask_regions"):
+                    active_index = next((i for i, l in enumerate(active_layers) if l.id == selected_id), 0)
+                    self.video_view.set_mask_regions(regions, active_index=active_index, editable=bool(active_layers and selected_id in {l.id for l in active_layers}))
+            elif str(getattr(track, "name", "")) == "B1":
+                regions = []
+                active_layers = [l for l in track.layers if self._layer_is_active_at_preview_time(l, time_seconds)]
+                for layer in active_layers:
+                    regions.append({
+                        "x": float(getattr(layer, "position_x", 0.0)), "y": float(getattr(layer, "position_y", 0.0)),
+                        "width": float(getattr(layer, "width", 0.0)), "height": float(getattr(layer, "height", 0.0)),
+                        "blur_strength": float(getattr(layer, "blur_strength", 20.0)),
+                        "blur_opacity": float(getattr(layer, "blur_opacity", 1.0)),
+                        "pixelate": bool(getattr(layer, "pixelate", False)),
+                        "pixelate_size": int(getattr(layer, "pixelate_size", 12)),
+                    })
+                if hasattr(self.video_view, "set_blur_regions_normalized"):
+                    self.video_view.set_blur_regions_normalized(regions)
+                # Blur has a separate MPV filter in addition to its editable
+                # outline. Update that filter with the same time-filtered
+                # regions; otherwise a filter applied at playback start
+                # continues blurring after the outline has disappeared.
+                self.apply_preview_blur_region(regions=regions)
+
+    def _wire_layer_timing_controls(self, prefix: str) -> None:
+        """Wire one inspector's common Start/End controls once."""
+        wired_name = f"_{prefix}_layer_timing_wired"
+        if getattr(self, wired_name, False):
+            return
+        setattr(self, wired_name, True)
+        start_control = getattr(self, f"{prefix}_inspector_start_spin", None)
+        end_control = getattr(self, f"{prefix}_inspector_end_spin", None)
+        if start_control is None or end_control is None:
+            return
+
+        def _selected_layer():
+            selected_id = str(getattr(self.timeline, "_selected_layer_id", "") or "")
+            for track in getattr(getattr(self.timeline, "_timeline", None), "tracks", []):
+                for layer in track.layers:
+                    if layer.id == selected_id:
+                        return track, layer
+            return None, None
+
+        def _apply_timing(_value=None):
+            track, layer = _selected_layer()
+            if layer is None:
+                return
+            start = max(0.0, float(start_control.value()))
+            end = max(start + float(getattr(self.timeline, "MIN_DUR", 0.1)), float(end_control.value()))
+            duration = float(getattr(self.timeline, "_duration", 0.0) or 0.0)
+            if duration > 0:
+                start = min(start, max(0.0, duration - float(getattr(self.timeline, "MIN_DUR", 0.1))))
+                end = min(end, duration)
+                end = max(end, start + float(getattr(self.timeline, "MIN_DUR", 0.1)))
+            layer.start, layer.end = start, end
+            self._set_layer_timing_controls(prefix, layer)
+            self.timeline._redraw()
+            self.persist_current_timeline_project_data()
+            self._timed_layer_preview_signature = None
+            self.refresh_timed_layer_preview()
+            if prefix == "mask":
+                self._apply_mask_to_preview(
+                    regions=self._current_mask_regions_payload(include_inactive=True)
+                )
+
+        start_control.valueChanged.connect(_apply_timing)
+        end_control.valueChanged.connect(_apply_timing)
+
+    def on_timeline_layer_timing_changed(self, layer_id: str, start: float, end: float):
+        """Persist timeline-handle duration edits for all non-subtitle layers."""
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return
+        for track in self.timeline._timeline.tracks:
+            for layer in track.layers:
+                if layer.id != layer_id:
+                    continue
+                layer_type = str(getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))).lower()
+                is_logo = layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo"
+                if layer_type not in {"blur", "mask", "text"} and not is_logo:
+                    return
+                layer.start = max(0.0, float(start))
+                layer.end = max(layer.start + float(getattr(self.timeline, "MIN_DUR", 0.1)), float(end))
+                self.persist_current_timeline_project_data()
+                self._timed_layer_preview_signature = None
+                self.refresh_timed_layer_preview()
+                if layer_type == "mask":
+                    self._apply_mask_to_preview(
+                        regions=self._current_mask_regions_payload(include_inactive=True)
+                    )
+                # Refresh the visible inspector values while keeping its
+                # layer-specific visual controls and preview selection intact.
+                self.on_timeline_layer_selected(layer_id)
+                return
+
     def on_timeline_layer_selected(self, layer_id: str):
         if not hasattr(self, "timeline") or not self.timeline._timeline:
             return
@@ -4689,7 +4840,16 @@ class VideoTranslatorGUI(QMainWindow):
             if hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
                 self.video_view.clear_logo()
             return
+        # A selection must respect timing immediately, including before the
+        # next playback positionChanged signal is emitted.
+        self._timed_layer_preview_signature = None
+        self.refresh_timed_layer_preview()
         layer_type = str(getattr(layer.type, "value", layer.type)).lower()
+        if hasattr(self, "timeline_split_btn"):
+            self.timeline_split_btn.setEnabled(
+                layer_type in {"subtitle", "dub_subtitle", "blur", "mask", "text"}
+                or (layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo")
+            )
         if layer_type == "subtitle":
             self._show_subtitle_inspector_for_layer(layer_id)
         elif layer_type == "dub_subtitle":
@@ -4775,6 +4935,8 @@ class VideoTranslatorGUI(QMainWindow):
         logos = []
         active_index = 0
         for index, candidate in enumerate(track.layers):
+            if not self._layer_is_active_at_preview_time(candidate):
+                continue
             source = str(getattr(candidate, "source", "") or "")
             candidate_transform = getattr(candidate, "transform", None)
             if candidate_transform is not None and hasattr(candidate_transform, "x"):
@@ -4792,7 +4954,11 @@ class VideoTranslatorGUI(QMainWindow):
                 "rotation": logo_rotation,
             })
             if candidate is layer:
-                active_index = index
+                active_index = len(logos) - 1
+        if not logos:
+            if hasattr(self.video_view, "clear_logo"):
+                self.video_view.clear_logo()
+            return
         self.video_view.set_logos(logos, active_index=active_index)
 
         # Push opacity + rotation from the layer to the overlay. We
@@ -5168,11 +5334,13 @@ class VideoTranslatorGUI(QMainWindow):
         """Show the Blur Track Inspector populated with the selected track."""
         self._switch_inspector("blur")
         self._wire_blur_inspector_controls()
+        self._wire_layer_timing_controls("blur")
         if track is None:
             return
         # B1 mirrors M1 interaction: all regions remain visible in the
         # preview, but only the layer selected in the timeline is editable.
         if layer is not None:
+            self._set_layer_timing_controls("blur", layer)
             try:
                 active_index = list(track.layers).index(layer)
                 self.video_view.set_blur_active_index(active_index)
@@ -5423,7 +5591,7 @@ class VideoTranslatorGUI(QMainWindow):
         preview_text_scale = preview_scale * 0.85
         items = []
         for layer in self._text_layers():
-            if not getattr(layer, "visible", True):
+            if not self._layer_is_active_at_preview_time(layer):
                 continue
             transform = getattr(layer, "transform", None)
             items.append({
@@ -5440,6 +5608,8 @@ class VideoTranslatorGUI(QMainWindow):
     def _show_text_inspector_for_track(self, track, layer):
         self._switch_inspector("text")
         self._wire_text_inspector_controls()
+        self._wire_layer_timing_controls("text")
+        self._set_layer_timing_controls("text", layer)
         self.text_inspector_content.blockSignals(True)
         self.text_inspector_content.setPlainText(str(getattr(layer, "text", "")))
         self.text_inspector_content.blockSignals(False)
@@ -5510,8 +5680,10 @@ class VideoTranslatorGUI(QMainWindow):
         """Show the Logo Track Inspector populated with the selected L1 layer."""
         self._switch_inspector("logo")
         self._wire_logo_inspector_controls()
+        self._wire_layer_timing_controls("logo")
         if layer is None:
             return
+        self._set_layer_timing_controls("logo", layer)
         # Read current opacity/rotation from the layer and apply to the
         # inspector controls.
         opacity = float(getattr(layer, "opacity", 1.0) or 1.0)
@@ -6771,6 +6943,11 @@ class VideoTranslatorGUI(QMainWindow):
         self.refresh_ui_state()
 
     def split_selected_timeline_segment(self):
+        # Overlay layers use the same Split action as subtitle/audio blocks.
+        # Copying the layer preserves its style, transform and visibility;
+        # only its identity and timing are changed.
+        if self._split_selected_overlay_layer():
+            return
         segments = list(self.get_active_segments() or [])
         if not segments:
             return
@@ -6834,6 +7011,54 @@ class VideoTranslatorGUI(QMainWindow):
         self.persist_current_timeline_project_data()
         self.schedule_live_subtitle_preview_refresh()
         self.refresh_ui_state()
+
+    def _split_selected_overlay_layer(self) -> bool:
+        """Split a selected Blur, Logo, Mask, or Text layer at the playhead."""
+        timeline = getattr(self, "timeline", None)
+        if timeline is None or not getattr(timeline, "_timeline", None):
+            return False
+        selected_id = str(getattr(timeline, "_selected_layer_id", "") or "")
+        if not selected_id:
+            return False
+        selected_track = selected_layer = None
+        for track in timeline._timeline.tracks:
+            for layer in track.layers:
+                if layer.id == selected_id:
+                    selected_track, selected_layer = track, layer
+                    break
+            if selected_layer is not None:
+                break
+        if selected_layer is None:
+            return False
+        layer_type = str(getattr(getattr(selected_layer, "type", ""), "value", getattr(selected_layer, "type", ""))).lower()
+        is_logo = layer_type == "image" and str(getattr(selected_track, "name", "")) == "L1 Logo"
+        if layer_type not in {"blur", "mask", "text"} and not is_logo:
+            return False
+        split_time = float(self.media_player.position()) / 1000.0
+        start, end = float(selected_layer.start), float(selected_layer.end)
+        min_duration = max(0.1, float(getattr(timeline, "MIN_DUR", 0.1)))
+        if not (start + min_duration < split_time < end - min_duration):
+            QMessageBox.information(
+                self,
+                "Split Layer",
+                "Move the playhead inside the selected layer before splitting.",
+            )
+            return True
+        new_layer = copy.deepcopy(selected_layer)
+        new_layer.id = uuid4().hex[:12]
+        new_layer.name = f"{str(getattr(selected_layer, 'name', 'Layer')).strip() or 'Layer'} 2"
+        new_layer.start = split_time
+        new_layer.end = end
+        new_layer.z_index = int(getattr(selected_layer, "z_index", 0)) + 1
+        selected_layer.end = split_time
+        index = selected_track.layers.index(selected_layer)
+        selected_track.layers.insert(index + 1, new_layer)
+        timeline._selected_layer_id = new_layer.id
+        timeline._redraw()
+        self.persist_current_timeline_project_data()
+        self.on_timeline_layer_selected(new_layer.id)
+        self.refresh_ui_state()
+        return True
 
     def populate_timeline_layers_menu(self):
         """Build the Layers menu without touching project/preview visibility."""
@@ -7861,7 +8086,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.media_player.clear_blur_region()
 
     # ---- Mask layer (M1) ----
-    def _current_mask_regions_payload(self):
+    def _current_mask_regions_payload(self, *, time_seconds=None, include_inactive=False):
         """Build the mask payload from the M1 track's MaskLayers.
 
         Visibility is NOT checked here — the play-state gate in
@@ -7877,6 +8102,8 @@ class VideoTranslatorGUI(QMainWindow):
             if tr.name != "M1":
                 continue
             for layer in tr.layers:
+                if not include_inactive and not self._layer_is_active_at_preview_time(layer, time_seconds):
+                    continue
                 try:
                     items.append({
                         "x": float(getattr(layer, "position_x", 0.3)),
@@ -7888,6 +8115,8 @@ class VideoTranslatorGUI(QMainWindow):
                         "opacity": float(getattr(layer, "opacity", 1.0)),
                         "pixelate_size": int(getattr(layer, "pixelate_size", 12)),
                         "blur_strength": int(getattr(layer, "blur_strength", 20)),
+                        "start": float(getattr(layer, "start", 0.0) or 0.0),
+                        "end": float(getattr(layer, "end", 0.0) or 0.0),
                     })
                 except (TypeError, ValueError):
                     continue
@@ -7909,7 +8138,7 @@ class VideoTranslatorGUI(QMainWindow):
         if not hasattr(self, "media_player"):
             return
         if regions is None:
-            regions = self._current_mask_regions_payload()
+            regions = self._current_mask_regions_payload(include_inactive=True)
         if force:
             if regions:
                 self.media_player.set_mask_region(regions)
@@ -8060,8 +8289,10 @@ class VideoTranslatorGUI(QMainWindow):
         """
         self._switch_inspector("mask")
         self._wire_mask_inspector_controls()
+        self._wire_layer_timing_controls("mask")
         if layer is None:
             return
+        self._set_layer_timing_controls("mask", layer)
         color = str(getattr(layer, "color", "#000000"))
         if hasattr(self, "mask_inspector_color_btn"):
             self.mask_inspector_color_btn.blockSignals(True)
@@ -9094,8 +9325,22 @@ class VideoTranslatorGUI(QMainWindow):
             self.preview_voice_btn.setVisible(mode in ("voice", "both"))
             self.preview_voice_btn.setEnabled(bool(self.voice_catalog_entries_all))
         has_timeline_segments = bool(self.get_active_segments())
+        selected_overlay_is_splittable = False
+        selected_layer_id = str(getattr(getattr(self, "timeline", None), "_selected_layer_id", "") or "")
+        if selected_layer_id and getattr(getattr(self, "timeline", None), "_timeline", None):
+            for track in self.timeline._timeline.tracks:
+                for layer in track.layers:
+                    if layer.id != selected_layer_id:
+                        continue
+                    layer_type = str(getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))).lower()
+                    selected_overlay_is_splittable = layer_type in {"blur", "mask", "text"} or (
+                        layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo"
+                    )
+                    break
+                if selected_overlay_is_splittable:
+                    break
         if hasattr(self, "timeline_split_btn"):
-            self.timeline_split_btn.setEnabled(has_timeline_segments)
+            self.timeline_split_btn.setEnabled(has_timeline_segments or selected_overlay_is_splittable)
         if hasattr(self, "timeline_delete_btn"):
             self.timeline_delete_btn.setEnabled(has_timeline_segments)
 

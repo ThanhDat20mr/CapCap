@@ -155,6 +155,11 @@ def position_changed(gui, position):
     gui.timeline.set_position(position)
     update_duration_label(gui, position, gui.media_player.duration())
     try:
+        gui.refresh_timed_layer_preview(position)
+    except Exception as exc:
+        if hasattr(gui, "log"):
+            gui.log(f"[Preview] timed layer refresh error: {exc}")
+    try:
         gui.update_playback_subtitle_highlight(position)
     except Exception as exc:
         if hasattr(gui, "log"):

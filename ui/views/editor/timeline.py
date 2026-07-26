@@ -19,6 +19,10 @@ class EditorTimeline(QGraphicsView):
     playheadMoved = Signal(float)
     segmentSelected = Signal(int)
     segmentTimingChanged = Signal(int, float, float)
+    # Emitted for every layer after its left/right timeline handle is dragged.
+    # Subtitle segments keep their index-based signal above for the existing
+    # transcript editor, while overlay layers are addressed by their id.
+    layerTimingChanged = Signal(str, float, float)
     segmentTimingEditStarted = Signal(int, float, float)
     zoomChanged = Signal(int)
     layoutChanged = Signal()
@@ -1025,6 +1029,7 @@ class EditorTimeline(QGraphicsView):
             if layer:
                 start = float(layer.start)
                 end = float(self._get_effective_layer_end(layer))
+                self.layerTimingChanged.emit(lid, start, end)
                 idx = self._segment_indices.get(lid, -1)
                 if idx >= 0:
                     self.segmentTimingChanged.emit(idx, start, end)

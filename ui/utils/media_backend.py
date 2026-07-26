@@ -744,7 +744,12 @@ class MpvMediaPlayerBackend(QObject):
             except (TypeError, ValueError):
                 opacity = 1.0
             opacity = max(0.0, min(1.0, opacity))
-            items.append((x, y, w, h, color, opacity))
+            try:
+                start = max(0.0, float(mask.get("start", 0.0) or 0.0))
+                end = float(mask.get("end", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                start, end = 0.0, 0.0
+            items.append((x, y, w, h, color, opacity, start, end))
         if not items:
             return ""
 
@@ -755,7 +760,7 @@ class MpvMediaPlayerBackend(QObject):
         base_label = input_label or "main_in"
 
         chain_parts: list[str] = []
-        for i, (x, y, w, h, color, opacity) in enumerate(items):
+        for i, (x, y, w, h, color, opacity, start, end) in enumerate(items):
             hex_color = color.lstrip("#")
             if len(hex_color) == 3:
                 hex_color = "".join(c * 2 for c in hex_color)
@@ -771,8 +776,15 @@ class MpvMediaPlayerBackend(QObject):
             chain_parts.append(f"{synth}[rect{i}]")
             current_label = base_label if i == 0 else f"b{i - 1}"
             out_label = "" if i == len(items) - 1 else f"[b{i}]"
+            # Keep the graph loaded for the whole playback session and let
+            # FFmpeg enable this overlay at its own timeline interval. This
+            # avoids clearing/recreating the MPV filter at a mask boundary,
+            # which caused a visible flicker when the mask first appeared.
+            timing = ""
+            if end > start:
+                timing = f":enable='between(t,{start:.3f},{end:.3f})'"
             chain_parts.append(
-                f"[{current_label}][rect{i}]overlay={x}:{y}{out_label}"
+                f"[{current_label}][rect{i}]overlay={x}:{y}{timing}{out_label}"
             )
         return ";".join(chain_parts)
 
