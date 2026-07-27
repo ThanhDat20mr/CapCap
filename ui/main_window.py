@@ -2661,8 +2661,11 @@ class VideoTranslatorGUI(QMainWindow):
             "animation_time": float(self.subtitle_animation_time_spin.value()),
             "karaoke_timing_mode": str(self.subtitle_karaoke_timing_combo.currentData() or "vietnamese"),
             "background": bool(self.subtitle_background_cb.isChecked()),
+            "background_width": str(self.subtitle_background_width_combo.currentData() if hasattr(self, "subtitle_background_width_combo") else "fit_text"),
+            "background_shape": str(self.subtitle_background_shape_combo.currentData() if hasattr(self, "subtitle_background_shape_combo") else "rectangle"),
             "outline": bool(getattr(self, "subtitle_outline_cb", None) and self.subtitle_outline_cb.isChecked()),
             "background_alpha": float(self.subtitle_bg_alpha_spin.value()) if hasattr(self, "subtitle_bg_alpha_spin") else 0.6,
+            "background_padding": int(self.subtitle_background_padding_spin.value()) if hasattr(self, "subtitle_background_padding_spin") else 6,
             "bold": bool(self.subtitle_bold_cb.isChecked()),
             "auto_keyword_highlight": bool(self.subtitle_keyword_highlight_cb.isChecked()),
             "highlight_color": self.subtitle_highlight_color_combo.currentText().strip(),
@@ -2679,8 +2682,11 @@ class VideoTranslatorGUI(QMainWindow):
             "animation_time": float(self.subtitle_animation_time_spin.value()),
             "karaoke_timing_mode": str(self.subtitle_karaoke_timing_combo.currentData() or "vietnamese"),
             "background": bool(self.subtitle_background_cb.isChecked()),
+            "background_width": str(self.subtitle_background_width_combo.currentData() if hasattr(self, "subtitle_background_width_combo") else "fit_text"),
+            "background_shape": str(self.subtitle_background_shape_combo.currentData() if hasattr(self, "subtitle_background_shape_combo") else "rectangle"),
             "outline": bool(getattr(self, "subtitle_outline_cb", None) and self.subtitle_outline_cb.isChecked()),
             "background_alpha": float(self.subtitle_bg_alpha_spin.value()) if hasattr(self, "subtitle_bg_alpha_spin") else 0.6,
+            "background_padding": int(self.subtitle_background_padding_spin.value()) if hasattr(self, "subtitle_background_padding_spin") else 6,
             "bold": bool(self.subtitle_bold_cb.isChecked()),
             "auto_keyword_highlight": bool(self.subtitle_keyword_highlight_cb.isChecked()),
             "highlight_color": self.subtitle_highlight_color_combo.currentText().strip(),
@@ -2707,6 +2713,12 @@ class VideoTranslatorGUI(QMainWindow):
         if karaoke_index >= 0:
             self.subtitle_karaoke_timing_combo.setCurrentIndex(karaoke_index)
         self.subtitle_background_cb.setChecked(bool(state.get("background", self.subtitle_background_cb.isChecked())))
+        if hasattr(self, "subtitle_background_width_combo"):
+            index = self.subtitle_background_width_combo.findData(str(state.get("background_width", "fit_text")))
+            self.subtitle_background_width_combo.setCurrentIndex(max(0, index))
+            shape_index = self.subtitle_background_shape_combo.findData(str(state.get("background_shape", "rectangle")))
+            self.subtitle_background_shape_combo.setCurrentIndex(max(0, shape_index))
+            self.on_subtitle_background_width_changed()
         if hasattr(self, "subtitle_outline_cb"):
             self.subtitle_outline_cb.setChecked(bool(state.get("outline", self.subtitle_outline_cb.isChecked())))
         if hasattr(self, "subtitle_bg_alpha_spin"):
@@ -4054,6 +4066,17 @@ class VideoTranslatorGUI(QMainWindow):
         self.on_subtitle_style_control_edited()
         self.update_subtitle_preview_style()
 
+    def on_subtitle_background_width_changed(self, *_args):
+        is_full_area = bool(
+            hasattr(self, "subtitle_background_width_combo")
+            and self.subtitle_background_width_combo.currentData() == "full_area"
+        )
+        for name in ("subtitle_background_shape_label", "subtitle_background_shape_combo"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.setVisible(is_full_area)
+        self.update_subtitle_preview_style()
+
     def on_subtitle_font_scale_changed(self, _index: int = -1):
         """Translate the friendly percentage picker into the stored font size."""
         combo = getattr(self, "subtitle_font_scale_combo", None)
@@ -4244,7 +4267,8 @@ class VideoTranslatorGUI(QMainWindow):
         if not polisher or not polisher.is_configured():
             polisher = None
         split = orchestrator._split_segments_for_single_line(
-            source, polisher=polisher, provider_type=provider_type, target_lang=self.get_target_language_code()
+            source, polisher=polisher, provider_type=provider_type, target_lang=self.get_target_language_code(),
+            words_per_segment=int(self.subtitle_words_per_segment_spin.value()) if hasattr(self, "subtitle_words_per_segment_spin") else 4,
         )
         if split and split != source:
             self._single_line_split_cache = split
@@ -4287,6 +4311,9 @@ class VideoTranslatorGUI(QMainWindow):
                 getattr(self, "subtitle_background_color_hex", preset.get("background_color", "#000000"))
             ),
             "background_alpha": float(self.subtitle_bg_alpha_spin.value()) if hasattr(self, "subtitle_bg_alpha_spin") else float(preset.get("background_alpha", 0.0)),
+            "background_padding": int(self.subtitle_background_padding_spin.value()) if hasattr(self, "subtitle_background_padding_spin") else 6,
+            "background_width": str(self.subtitle_background_width_combo.currentData() if hasattr(self, "subtitle_background_width_combo") else "fit_text"),
+            "background_shape": str(self.subtitle_background_shape_combo.currentData() if hasattr(self, "subtitle_background_shape_combo") else "rectangle"),
             "animation": self.subtitle_animation_combo.currentText().strip() or preset.get("animation", "Static"),
             "animation_duration": float(self.subtitle_animation_time_spin.value()),
             "karaoke_timing_mode": str(self.subtitle_karaoke_timing_combo.currentData() or "vietnamese"),
@@ -4381,6 +4408,7 @@ class VideoTranslatorGUI(QMainWindow):
                 f"{preset.get('label', 'Preset')}: {preset.get('summary', '')}"
             )
         self._update_animation_time_visibility()
+        self.on_subtitle_background_width_changed()
         if selected == "custom":
             self._capture_subtitle_custom_style_state()
         self.on_subtitle_position_mode_changed()
@@ -9099,6 +9127,9 @@ class VideoTranslatorGUI(QMainWindow):
             shadow_depth=subtitle_style.get("shadow_depth", 1.0),
             background_color=subtitle_style.get("background_color", "&H80000000"),
             background_alpha=subtitle_style.get("background_alpha", 0.5),
+            background_width=subtitle_style.get("background_width", "fit_text"),
+            background_shape=subtitle_style.get("background_shape", "rectangle"),
+            background_padding=subtitle_style.get("background_padding", 6),
             bold=subtitle_style.get("bold", False),
             preset_key=subtitle_style.get("preset_key", ""),
             auto_keyword_highlight=subtitle_style.get("auto_keyword_highlight", False),
@@ -9108,7 +9139,9 @@ class VideoTranslatorGUI(QMainWindow):
             custom_position_enabled=subtitle_style.get("custom_position_enabled", False),
             custom_position_x=subtitle_style.get("custom_position_x", 50),
             custom_position_y=subtitle_style.get("custom_position_y", 86),
+            custom_position_bottom_y=subtitle_style.get("custom_position_bottom_y"),
             single_line=subtitle_style.get("single_line", False),
+            font_scale=subtitle_style.get("font_scale", 1.0),
             log_generation=False,
         )
         self._live_preview_signature = preview_signature
@@ -9274,17 +9307,43 @@ class VideoTranslatorGUI(QMainWindow):
         self.video_view.reposition_subtitle()
 
     def sync_live_subtitle_preview(self):
-        """Use the fast editable Qt subtitle layer for live preview."""
+        """Synchronize the live subtitle renderer and draggable Qt target."""
         if not hasattr(self, "media_player"):
             return
-        self.media_player.clear_subtitle()
-        if hasattr(self, "video_view"):
-            self.video_view.subtitle_item.set_text_rendering(True)
         if getattr(self, "_preview_video_has_burned_subtitles", False):
+            self.media_player.clear_subtitle()
             if hasattr(self, "video_view"):
                 self.video_view.subtitle_item.set_text("")
                 self.video_view.subtitle_item.hide()
             return
+        can_render_libass = bool(
+            getattr(self, "_use_libass_live_preview", False)
+            and hasattr(self.media_player, "set_subtitle_file")
+            and hasattr(self.media_player, "_sub_track_id")
+        )
+        if can_render_libass:
+            segments, editor_name = self._resolve_live_preview_segments()
+            if segments:
+                self.live_preview_segments = list(segments)
+                self.live_preview_editor_name = editor_name
+                _srt_path, ass_path = self._write_live_preview_assets(segments)
+                if ass_path and os.path.exists(ass_path):
+                    self.media_player.set_subtitle_file(ass_path)
+                    if hasattr(self, "video_view"):
+                        # The Qt item remains present for dragging but MPV's
+                        # libass renderer supplies the visible subtitle.
+                        self.video_view.subtitle_item.set_text_rendering(False)
+                    position = int(self.media_player.position() or 0)
+                    self.update_playback_subtitle_highlight(position)
+                    return
+            self.media_player.clear_subtitle()
+            if hasattr(self, "video_view"):
+                self.video_view.subtitle_item.set_text("")
+                self.video_view.subtitle_item.hide()
+            return
+        self.media_player.clear_subtitle()
+        if hasattr(self, "video_view"):
+            self.video_view.subtitle_item.set_text_rendering(True)
         position = 0
         try:
             position = int(self.media_player.position())

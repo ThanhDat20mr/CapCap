@@ -255,6 +255,8 @@ def _connect_ui_signals(gui):
     gui.use_generated_audio_radio.toggled.connect(gui.on_audio_source_mode_changed)
     if hasattr(gui, "subtitle_single_line_cb"):
         gui.subtitle_single_line_cb.toggled.connect(gui.on_single_line_toggled)
+    if hasattr(gui, "subtitle_words_per_segment_spin"):
+        gui.subtitle_words_per_segment_spin.valueChanged.connect(lambda _value: gui.on_single_line_toggled(gui.subtitle_single_line_cb.isChecked()))
     gui.use_existing_audio_radio.toggled.connect(gui.on_audio_source_mode_changed)
     gui.blur_area_btn.toggled.connect(gui.toggle_blur_effect_enabled)
     gui.blur_add_btn.clicked.connect(gui.add_blur_region)
@@ -295,6 +297,11 @@ def _connect_ui_signals(gui):
         gui.subtitle_outline_cb.toggled.connect(gui.update_subtitle_preview_style)
     if hasattr(gui, "subtitle_bg_alpha_spin"):
         gui.subtitle_bg_alpha_spin.valueChanged.connect(gui.update_subtitle_preview_style)
+    if hasattr(gui, "subtitle_background_padding_spin"):
+        gui.subtitle_background_padding_spin.valueChanged.connect(gui.update_subtitle_preview_style)
+    if hasattr(gui, "subtitle_background_width_combo"):
+        gui.subtitle_background_width_combo.currentIndexChanged.connect(gui.on_subtitle_background_width_changed)
+        gui.subtitle_background_shape_combo.currentIndexChanged.connect(gui.update_subtitle_preview_style)
 
     gui.subtitle_font_combo.currentTextChanged.connect(gui.on_subtitle_style_control_edited)
     gui.subtitle_font_size_spin.valueChanged.connect(gui.on_subtitle_style_control_edited)
@@ -310,6 +317,11 @@ def _connect_ui_signals(gui):
         gui.subtitle_outline_cb.toggled.connect(gui.on_subtitle_style_control_edited)
     if hasattr(gui, "subtitle_bg_alpha_spin"):
         gui.subtitle_bg_alpha_spin.valueChanged.connect(gui.on_subtitle_style_control_edited)
+    if hasattr(gui, "subtitle_background_padding_spin"):
+        gui.subtitle_background_padding_spin.valueChanged.connect(gui.on_subtitle_style_control_edited)
+    if hasattr(gui, "subtitle_background_width_combo"):
+        gui.subtitle_background_width_combo.currentIndexChanged.connect(gui.on_subtitle_style_control_edited)
+        gui.subtitle_background_shape_combo.currentIndexChanged.connect(gui.on_subtitle_style_control_edited)
     if hasattr(gui, "subtitle_single_line_cb"):
         gui.subtitle_single_line_cb.toggled.connect(gui.on_subtitle_style_control_edited)
 
@@ -359,6 +371,9 @@ def _initialize_ui_state(gui):
     gui.last_exact_preview_5s_path = ""
     gui.last_exact_preview_frame_path = ""
     gui._preview_video_has_burned_subtitles = False
+    # Regular preview uses MPV/libass just like Fast Preview and export. The
+    # Qt subtitle widget remains as an invisible drag target only.
+    gui._use_libass_live_preview = True
     gui._preview_audio_track_mode = "both"
     gui._mute_original = False
     gui._mute_dubbed = False

@@ -156,7 +156,9 @@ class _SubtitleOverlayWidget(QWidget):
         self.raise_()
 
     def set_text(self, text):
-        new_lines = [text] if text else []
+        # Keep explicit subtitle line breaks as individual rows. ASS renders
+        # each row independently, including its background box.
+        new_lines = [line for line in str(text or "").splitlines() if line] or ([] if not text else [str(text)])
         if self.current_lines != new_lines or self.current_text != text:
             self.current_text = text
             self.current_lines = new_lines
@@ -394,10 +396,22 @@ class _SubtitleOverlayWidget(QWidget):
                 box_color.setAlpha(int(round(box_color.alpha() * progress)))
             painter.setBrush(box_color)
             metrics = painter.fontMetrics()
-            for line_text, line_rect in zip(visible_lines, line_rects):
-                text_rect = metrics.boundingRect(line_rect.toRect(), int(wrap_flags), line_text).adjusted(-18, -4, 18, 4)
-                text_rect = text_rect.intersected(line_rect.toRect().adjusted(4, 0, -4, 0))
-                painter.drawRoundedRect(QRectF(text_rect), 14, 14)
+            # libass uses the BorderStyle=3 outline size as the box padding.
+            # The old fixed 18px padding made the live box much wider than
+            # the exported result.
+            box_pad_x = max(2, int(round(max(2.0, self.outline_width))))
+            box_pad_y = max(1, int(round(max(1.0, self.outline_width * 0.5))))
+            max_width = max((metrics.boundingRect(line).width() for line in visible_lines), default=0)
+            if max_width and line_rects:
+                block_top = line_rects[0].top()
+                block_bottom = line_rects[-1].bottom()
+                text_rect = QRect(
+                    int(round(rect.center().x() - max_width / 2.0)),
+                    int(round(block_top)),
+                    max_width,
+                    max(1, int(round(block_bottom - block_top))),
+                ).adjusted(-box_pad_x, -box_pad_y, box_pad_x, box_pad_y)
+                painter.drawRect(QRectF(text_rect))
 
         if self.shadow_depth > 0 and not has_colored_effects:
             painter.setPen(self.shadow_color)

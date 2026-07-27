@@ -425,11 +425,14 @@ class ExportWorkflow:
         return output_path
 
     def _ensure_subtitle_ass(self, ass_path: str, srt_path: str, subtitle_style, video_path: str, target_width=None, target_height=None) -> str:
-        """Generate the styled subtitle ASS when the caller did not supply it."""
-        if ass_path and os.path.exists(ass_path):
-            return ass_path
+        """Build ASS from the active SRT and current style controls.
+
+        A project may already contain an ASS file from an earlier preview or
+        export.  Reusing that file would silently ignore changes made in the
+        subtitle style UI (notably background box, color, and opacity).
+        """
         if not srt_path or not os.path.exists(srt_path):
-            return ""
+            return ass_path if ass_path and os.path.exists(ass_path) else ""
         from video_processor import srt_to_ass
         style = self._subtitle_options(subtitle_style)
         source_w, source_h = self.engine_runtime.get_video_dimensions(video_path)
@@ -444,13 +447,17 @@ class ExportWorkflow:
             outline_color=str(style["outline_color"]), outline_width=float(style["outline_width"]),
             shadow_color=str(style["shadow_color"]), shadow_depth=float(style["shadow_depth"]),
             background_color=str(style["background_color"]), background_alpha=float(style["background_alpha"]),
+            background_width=str(style.get("background_width", "fit_text")), background_shape=str(style.get("background_shape", "rectangle")),
+            background_padding=float(style.get("background_padding", 6)),
             bold=bool(style["bold"]), preset_key=str(style["preset_key"]),
             auto_keyword_highlight=bool(style["auto_keyword_highlight"]),
             animation_duration=float(style["animation_duration"]), manual_highlights=style["manual_highlights"],
             word_timings=style["word_timings"], karaoke_timing_mode=str(style["karaoke_timing_mode"]),
             custom_position_enabled=bool(style["custom_position_enabled"]),
             custom_position_x=float(style["custom_position_x"]), custom_position_y=float(style["custom_position_y"]),
+            custom_position_bottom_y=style.get("custom_position_bottom_y"),
             single_line=bool(style["single_line"]), log_generation=True,
+            font_scale=float(style.get("font_scale", 1.0)),
         )
         print(f"[Export] Generated missing subtitle ASS: {generated}")
         return generated

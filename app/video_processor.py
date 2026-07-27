@@ -874,6 +874,9 @@ def srt_to_ass(srt_path: str,
                shadow_depth: float = 1.0,
                background_color: str = "&H80000000",
                background_alpha: float = 0.5,
+               background_width: str = "fit_text",
+               background_shape: str = "rectangle",
+               background_padding: float = 6.0,
                bold: bool = False,
                preset_key: str = "",
                auto_keyword_highlight: bool = False,
@@ -905,12 +908,13 @@ def srt_to_ass(srt_path: str,
             return "&H" + f"{alpha:02X}" + ass_color[4:]
         return ass_color
 
-    border_style = 3 if background_box else 1
-    outline = max(3.0, float(outline_width)) if background_box else float(outline_width)
+    full_background = False
+    border_style = 3 if background_box and not full_background else 1
+    outline = max(0.0, float(background_padding), float(outline_width)) if background_box else float(outline_width)
     shadow = 0 if background_box else float(shadow_depth)
     box_color = _with_alpha(background_color, background_alpha) if background_box else None
-    style_outline_color = box_color if background_box else outline_color
-    back_color = box_color if background_box else _with_alpha(shadow_color, 0.7)
+    style_outline_color = box_color if background_box and not full_background else outline_color
+    back_color = box_color if background_box and not full_background else _with_alpha(shadow_color, 0.7)
     bold_flag = -1 if bold else 0
 
     wrap_style = 2 if single_line else 1
@@ -936,7 +940,34 @@ def srt_to_ass(srt_path: str,
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
-
+    def _full_background_event(start: str, end: str, text: str, event_margin: int) -> str:
+        source_lines = [line.strip() for line in str(text or "").splitlines() if line.strip()] or [""]
+        pad = max(3, int(round(max(3.0, float(outline_width)))))
+        width = max(1, int(video_width - 120))
+        # Estimate the same word wrapping used by ASS at the full-area width
+        # instead of reserving a fixed number of rows.
+        chars_per_row = max(1, int(width / max(1.0, float(font_size) * 0.52)))
+        rendered_rows = 0
+        for line in source_lines:
+            row_len = 0
+            for word in line.split() or [""]:
+                word_len = len(word) + (1 if row_len else 0)
+                if row_len and row_len + word_len > chars_per_row:
+                    rendered_rows += 1
+                    row_len = len(word)
+                else:
+                    row_len += word_len
+            rendered_rows += 1
+        height = max(int(font_size * 1.4 * max(1, rendered_rows)) + pad * 2, int(font_size * 1.5))
+        left = 60
+        top = max(0, int(video_height - event_margin - height))
+        rgb, alpha = str(box_color)[4:], str(box_color)[2:4]
+        if str(background_shape) == "oval":
+            cx, cy, rx, ry = width // 2, height // 2, width // 2, height // 2
+            path = f"m {cx-rx} {cy} b {cx-rx} {cy-ry} {cx+rx} {cy-ry} {cx+rx} {cy} b {cx+rx} {cy+ry} {cx-rx} {cy+ry} {cx-rx} {cy}"
+        else:
+            path = f"m 0 0 l {width} 0 {width} {height} 0 {height} 0 0"
+        return f"Dialogue: 0,{start},{end},Default,,0,0,0,,{{\\an7\\pos({left},{top})\\p1\\1c&H{rgb}&\\1a&H{alpha}&}}{path}"
     # Parse SRT entries
     with open(srt_path, 'r', encoding='utf-8-sig') as f:
         content = f.read()
@@ -982,8 +1013,13 @@ def srt_to_ass(srt_path: str,
         if row_index < len(row_last_end):
             row_last_end[row_index] = max(row_last_end[row_index], end_seconds)
         row_margin_v = row_index * line_height
+        # Dialogue MarginV overrides the style MarginV rather than adding to
+        # it. Preserve the configured subtitle padding for every row.
+        event_margin_v = int(max(0, margin_v + row_margin_v))
 
         if style_key == "word highlight karaoke":
+            if full_background:
+                events.append(_full_background_event(start, end, raw_text, event_margin_v))
             events.extend(
                 _build_karaoke_dialogue_events(
                     start_seconds=start_seconds,
@@ -1000,7 +1036,7 @@ def srt_to_ass(srt_path: str,
                     custom_position_x=custom_position_x,
                     custom_position_y=custom_position_y,
                     custom_position_bottom_y=custom_position_bottom_y,
-                    margin_v=row_margin_v,
+                    margin_v=event_margin_v,
                 )
             )
             continue
@@ -1027,8 +1063,12 @@ def srt_to_ass(srt_path: str,
             custom_position_x=custom_position_x,
             custom_position_y=custom_position_y,
             custom_position_bottom_y=custom_position_bottom_y,
-    )
-        events.append(f"Dialogue: 0,{start},{end},Default,,0,0,{row_margin_v},,{text}")
+        )
+        dialogue = f"Dialogue: 0,{start},{end},Default,,0,0,{event_margin_v},,{text}"
+        if full_background:
+            events.append(_full_background_event(start, end, raw_text, event_margin_v))
+            dialogue = dialogue.replace("Dialogue: 0,", "Dialogue: 1,", 1)
+        events.append(dialogue)
 
     with open(ass_path, 'w', encoding='utf-8-sig') as f:
         f.write(header)

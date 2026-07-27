@@ -708,6 +708,7 @@ class TranslationOrchestrator:
         polisher=None,
         provider_type: str = "",
         target_lang: str = "vi",
+        words_per_segment: int | None = None,
     ) -> list[dict]:
         split_segments: list[dict] = []
         for seg in segments or []:
@@ -725,6 +726,7 @@ class TranslationOrchestrator:
                 polisher=polisher,
                 provider_type=provider_type,
                 target_lang=target_lang,
+                words_per_segment=words_per_segment,
             )
             if len(chunks) <= 1:
                 updated = dict(seg)
@@ -809,10 +811,16 @@ class TranslationOrchestrator:
         polisher=None,
         provider_type: str = "",
         target_lang: str = "vi",
+        words_per_segment: int | None = None,
     ) -> list[str]:
         compact = ' '.join(str(text or '').replace('\n', ' ').split()).strip()
         if not compact:
             return []
+
+        if words_per_segment is not None:
+            limit = max(1, int(words_per_segment))
+            words = compact.split()
+            return [" ".join(words[index:index + limit]) for index in range(0, len(words), limit)]
 
         max_chars = max(18, self._target_max_chars(duration, single_line=True))
         if len(compact) <= max_chars or len(compact.split()) <= 4:

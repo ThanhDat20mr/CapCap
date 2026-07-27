@@ -388,10 +388,24 @@ class PreviewController:
 
     def _prepare_current_export_srt(self) -> str:
         segments = list(self.gui.get_active_segments() or [])
+        saved_candidates = [
+            str(getattr(self.gui, "last_translated_srt_path", "") or "").strip(),
+            str(getattr(self.gui, "processed_artifacts", {}).get("srt_translated", "") or "").strip(),
+        ]
+        project_state = getattr(self.gui, "current_project_state", None)
+        if project_state is not None:
+            artifacts = getattr(project_state, "artifacts", {}) or {}
+            saved_candidates.extend(
+                [
+                    str(artifacts.get("subtitle_translated_srt", "") or "").strip(),
+                    str(artifacts.get("srt_translated", "") or "").strip(),
+                ]
+            )
+        existing_path = next((path for path in saved_candidates if path and os.path.exists(path)), "")
         if not segments:
-            return str(self.gui.last_translated_srt_path or "").strip()
+            return existing_path
 
-        out_path = str(self.gui.last_translated_srt_path or "").strip()
+        out_path = existing_path or str(self.gui.last_translated_srt_path or "").strip()
         if not out_path:
             video_path = self.gui.video_path_edit.text().strip()
             video_name = os.path.splitext(os.path.basename(video_path or "subtitle"))[0]
@@ -481,7 +495,7 @@ class PreviewController:
             translated_ass_path = ""
 
         if mode in ("subtitle", "both") and (not translated_srt_path or not os.path.exists(translated_srt_path)):
-            QMessageBox.warning(self.gui, "Error", "Vietnamese subtitle file not found. Please run translation first.")
+            QMessageBox.warning(self.gui, "Error", "Translated subtitle file not found. Translate or import an SRT first.")
             return
 
         if mode in ("voice", "both") and (not chosen_audio or not os.path.exists(chosen_audio)):
@@ -595,8 +609,10 @@ class PreviewController:
         else:
             chosen_audio = self.gui.resolve_selected_audio_path()
 
+        if mode in ("subtitle", "both"):
+            translated_srt_path = self._prepare_current_export_srt()
         if mode in ("subtitle", "both") and (not translated_srt_path or not os.path.exists(translated_srt_path)):
-            QMessageBox.warning(self.gui, "Error", "Vietnamese subtitle file not found. Please run translation first.")
+            QMessageBox.warning(self.gui, "Error", "Translated subtitle file not found. Translate or import an SRT first.")
             return
 
         if mode in ("voice", "both") and (not chosen_audio or not os.path.exists(chosen_audio)):
