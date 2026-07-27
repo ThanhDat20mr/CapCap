@@ -63,66 +63,86 @@ def build_advanced_group(gui, left_layout):
     group_layout.setContentsMargins(0, 0, 0, 0)
 
     _build_hidden_runtime_widgets(gui)
-    _build_audio_mix_controls(gui, group_layout)
+    subtitle_card, subtitle_layout = _advanced_block("Subtitle")
+    subtitle_layout.addWidget(gui.import_original_srt_btn)
+    subtitle_card.hide()
+    group_layout.addWidget(subtitle_card)
+
+    source_card = _build_audio_source_controls(gui)
+    audio_layout = getattr(gui, "workflow_audio_layout", None)
+    if audio_layout is not None:
+        # Place source selection before mix controls, where users naturally
+        # choose what audio they are going to edit.
+        audio_layout.insertWidget(0, source_card)
+    else:
+        group_layout.addWidget(source_card)
     target_layout = getattr(gui, "workflow_advanced_layout", None) or left_layout
     target_layout.addWidget(gui.advanced_section, 1)
 
 
-def _build_audio_mix_controls(gui, advanced_layout):
-    ai_card, ai_layout = _advanced_block("AI")
-    gui.keep_timeline_cb.setText("Keep subtitle timings when editing text")
-    ai_layout.addWidget(gui.keep_timeline_cb)
-    advanced_layout.addWidget(ai_card)
-
-    subtitle_card, subtitle_layout = _advanced_block("Subtitle")
-    subtitle_layout.addWidget(gui.import_original_srt_btn)
-    subtitle_card.hide()
-    advanced_layout.addWidget(subtitle_card)
-
+def _build_audio_source_controls(gui):
     source_card, source_layout = _advanced_block("Audio Source")
+    source_intro = gui.make_helper_label("Choose the audio used for preview and export.")
+    source_layout.addWidget(source_intro)
+
     source_mode_row = QHBoxLayout()
+    source_mode_row.setSpacing(16)
+    gui.use_generated_audio_radio.setText("Generate voice")
+    gui.use_existing_audio_radio.setText("Use finished audio")
+    gui.use_generated_audio_radio.setToolTip("Create a voice track from the translated subtitles.")
+    gui.use_existing_audio_radio.setToolTip("Use an audio file you have already prepared.")
     source_mode_row.addWidget(gui.use_generated_audio_radio)
     source_mode_row.addWidget(gui.use_existing_audio_radio)
+    source_mode_row.addStretch(1)
     source_layout.addLayout(source_mode_row)
+    source_layout.addWidget(gui.audio_source_hint_label)
 
-    gui.generated_audio_section_label = QLabel("Generate a new Vietnamese voice track")
-    source_layout.addWidget(gui.generated_audio_section_label)
-
-    bg_label = QLabel("Background music / ambient audio")
+    gui.generated_audio_source_panel = QFrame()
+    gui.generated_audio_source_panel.setObjectName("audioSourcePanel")
+    generated_layout = QVBoxLayout(gui.generated_audio_source_panel)
+    generated_layout.setContentsMargins(10, 10, 10, 10)
+    generated_layout.setSpacing(6)
+    gui.generated_audio_section_label = QLabel("Voice generated from subtitles")
+    gui.generated_audio_section_label.setObjectName("audioSourceTitle")
+    generated_layout.addWidget(gui.generated_audio_section_label)
+    gui.generated_audio_section_hint = gui.make_helper_label(
+        "Optionally add background music or ambient audio to the generated voice."
+    )
+    generated_layout.addWidget(gui.generated_audio_section_hint)
+    bg_label = QLabel("Background audio (optional)")
     gui.bg_music_label = bg_label
-    source_layout.addWidget(gui.bg_music_label)
+    generated_layout.addWidget(bg_label)
     bg_row = QHBoxLayout()
     bg_row.addWidget(gui.bg_music_edit, 1)
-    gui.browse_bg_music_btn = QPushButton("Browse")
+    gui.browse_bg_music_btn = QPushButton("Choose file")
     gui.browse_bg_music_btn.clicked.connect(gui.browse_background_audio)
     bg_row.addWidget(gui.browse_bg_music_btn)
-    source_layout.addLayout(bg_row)
+    generated_layout.addLayout(bg_row)
+    source_layout.addWidget(gui.generated_audio_source_panel)
 
-    gui.existing_audio_section_label = QLabel("Use your own finished audio")
-    source_layout.addWidget(gui.existing_audio_section_label)
-
-    existing_label = QLabel("Finished audio file")
+    gui.existing_audio_source_panel = QFrame()
+    gui.existing_audio_source_panel.setObjectName("audioSourcePanel")
+    existing_layout = QVBoxLayout(gui.existing_audio_source_panel)
+    existing_layout.setContentsMargins(10, 10, 10, 10)
+    existing_layout.setSpacing(6)
+    gui.existing_audio_section_label = QLabel("Finished audio file")
+    gui.existing_audio_section_label.setObjectName("audioSourceTitle")
+    existing_layout.addWidget(gui.existing_audio_section_label)
+    gui.existing_audio_section_hint = gui.make_helper_label(
+        "Use a completed voice or mixed audio file instead of generating TTS."
+    )
+    existing_layout.addWidget(gui.existing_audio_section_hint)
+    existing_label = QLabel("Audio file")
     gui.mixed_audio_label = existing_label
-    source_layout.addWidget(gui.mixed_audio_label)
+    existing_layout.addWidget(existing_label)
     existing_row = QHBoxLayout()
     existing_row.addWidget(gui.mixed_audio_edit, 1)
-    gui.browse_mixed_audio_btn = QPushButton("Browse")
+    gui.browse_mixed_audio_btn = QPushButton("Choose file")
     gui.browse_mixed_audio_btn.clicked.connect(gui.browse_existing_mixed_audio)
     existing_row.addWidget(gui.browse_mixed_audio_btn)
-    source_layout.addLayout(existing_row)
-    advanced_layout.addWidget(source_card)
-
-    voice_card, voice_layout = _advanced_block("Voice Tuning")
-    speed_row = QHBoxLayout()
-    speed_row.addWidget(QLabel("Voice speed"))
-    speed_row.addWidget(gui.voice_speed_spin, 1)
-    voice_layout.addLayout(speed_row)
-
-    voice_layout.addWidget(gui.ai_dubbing_rewrite_cb)
-    if hasattr(gui, "ai_dubbing_rewrite_hint_label"):
-        voice_layout.addWidget(gui.ai_dubbing_rewrite_hint_label)
-    advanced_layout.addWidget(voice_card)
-
+    existing_layout.addLayout(existing_row)
+    source_layout.addWidget(gui.existing_audio_source_panel)
+    return source_card
 
 def _build_hidden_runtime_widgets(gui):
     gui.audio_folder_edit = QLineEdit(os.path.join(gui.workspace_root, "temp"), gui)
@@ -150,8 +170,11 @@ def _build_hidden_runtime_widgets(gui):
     gui.audio_source_hint_label.hide()
     gui.voice_output_folder_edit = QLineEdit(os.path.join(gui.workspace_root, "output"), gui)
 
-    gui.keep_timeline_cb = QCheckBox("Keep the current timeline when editing Vietnamese text", gui)
+    # Subtitle timing is always preserved. Keep this hidden compatibility
+    # control for existing editing code, but do not expose it as a setting.
+    gui.keep_timeline_cb = QCheckBox(gui)
     gui.keep_timeline_cb.setChecked(True)
+    gui.keep_timeline_cb.hide()
     gui.apply_translated_btn = QPushButton("Apply Edited Subtitle To Preview", gui)
     gui.apply_translated_btn.clicked.connect(gui.apply_edited_translation)
     gui.apply_translated_btn.hide()

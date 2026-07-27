@@ -829,6 +829,7 @@ class PreviewController:
             self.gui.update_project_artifact("final_video", output_path)
             self.gui.update_project_step("export", "done")
             self.gui.sync_preview_audio_track_to_output(apply_to_player=False)
+            self.gui.update_workflow_stage_badges()
             self.gui.log(f"[Export] Final video exported successfully: {output_path}")
             self.gui.log("[Export] Kept current preview/subtitle state so you can continue editing after export.")
 

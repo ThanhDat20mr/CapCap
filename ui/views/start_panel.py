@@ -231,6 +231,28 @@ def build_start_group(gui, left_layout):
     workflow_title.setObjectName("statusHeadline")
     workflow_shell_layout.addWidget(workflow_title)
 
+    # Generation milestones remain visible while users work through the
+    # configuration pages below.
+    gui.workflow_stage_badges = {}
+    stage_box = QFrame()
+    stage_box.setObjectName("statusCard")
+    stage_layout = QVBoxLayout(stage_box)
+    stage_layout.setContentsMargins(10, 8, 10, 8)
+    stage_layout.setSpacing(4)
+    for key, title in (("prepare", "Prepare"), ("transcript", "Transcript"),
+                       ("translate", "Translate"), ("tts", "Generate Voice / TTS"),
+                       ("export", "Export")):
+        row = QHBoxLayout()
+        label = QLabel(title)
+        status = QLabel("Not started")
+        status.setObjectName("helperLabel")
+        row.addWidget(label)
+        row.addStretch(1)
+        row.addWidget(status)
+        stage_layout.addLayout(row)
+        gui.workflow_stage_badges[key] = status
+    workflow_shell_layout.addWidget(stage_box)
+
     gui.device_mode_label = QLabel()
     gui.device_mode_label.setObjectName("helperLabel")
     _update_device_label(gui)
@@ -277,6 +299,9 @@ def build_start_group(gui, left_layout):
     pages = []
     media_page, media_layout = _make_page("media")
     audio_page, audio_layout = _make_page("audio")
+    # Advanced controls that belong to the Audio workflow are attached here
+    # after their shared runtime widgets have been created.
+    gui.workflow_audio_layout = audio_layout
     language_page, language_layout = _make_page("language")
     voice_page, voice_layout = _make_page("voice")
     style_page, style_layout = _make_page("style")
@@ -322,41 +347,12 @@ def build_start_group(gui, left_layout):
     upload_card.hide()
 
     output_card, output_layout = _build_collapsible_section("Output")
-    output_mode_card, output_mode_layout = _section_card()
-    output_mode_title = QLabel("Create")
-    output_mode_title.setObjectName("sectionTitle")
-    output_mode_layout.addWidget(output_mode_title)
-    gui.output_mode_combo = QComboBox()
-    gui.output_mode_combo.addItems(
-        [
-            "Vietnamese subtitles only",
-            "Vietnamese voice only",
-            "Vietnamese subtitles + voice",
-        ]
-    )
+    # Output is always subtitles + voice. Keep the hidden compatibility
+    # control because older settings/project helpers still read it.
+    gui.output_mode_combo = QComboBox(gui)
+    gui.output_mode_combo.addItem("Vietnamese subtitles + voice")
     gui.output_mode_combo.setCurrentText("Vietnamese subtitles + voice")
     gui.output_mode_combo.hide()
-    gui.output_subtitle_radio = QRadioButton("Subtitles only")
-    gui.output_voice_radio = QRadioButton("Voice only")
-    gui.output_both_radio = QRadioButton("Subtitles + voice")
-    gui.output_both_radio.setChecked(True)
-    gui.output_mode_group = QButtonGroup(gui)
-    gui.output_mode_group.addButton(gui.output_subtitle_radio)
-    gui.output_mode_group.addButton(gui.output_voice_radio)
-    gui.output_mode_group.addButton(gui.output_both_radio)
-    gui.output_subtitle_radio.toggled.connect(
-        lambda checked: checked and gui.output_mode_combo.setCurrentText("Vietnamese subtitles only")
-    )
-    gui.output_voice_radio.toggled.connect(
-        lambda checked: checked and gui.output_mode_combo.setCurrentText("Vietnamese voice only")
-    )
-    gui.output_both_radio.toggled.connect(
-        lambda checked: checked and gui.output_mode_combo.setCurrentText("Vietnamese subtitles + voice")
-    )
-    output_mode_layout.addWidget(gui.output_subtitle_radio)
-    output_mode_layout.addWidget(gui.output_voice_radio)
-    output_mode_layout.addWidget(gui.output_both_radio)
-    output_layout.addWidget(output_mode_card)
 
     output_quality_card, output_quality_layout = _section_card()
     output_quality_title = QLabel("Quality")
@@ -444,15 +440,7 @@ def build_start_group(gui, left_layout):
     language_pair_layout.addLayout(source_row)
     language_pair_layout.addLayout(target_row)
 
-    gui.skip_translation_cb = QCheckBox("Keep original text (skip translation)")
-    gui.skip_translation_cb.setChecked(False)
-    language_pair_layout.addWidget(gui.skip_translation_cb)
     language_layout.addWidget(language_pair_card)
-
-    def toggle_translation_fields(checked):
-        gui.lang_target_combo.setEnabled(not checked)
-
-    gui.skip_translation_cb.toggled.connect(toggle_translation_fields)
     gui.lang_target_combo.currentIndexChanged.connect(gui.on_target_language_changed)
 
     language_page.layout().addWidget(language_card)
@@ -465,10 +453,11 @@ def build_start_group(gui, left_layout):
     gui.voice_gender_combo = QComboBox()
     gui.voice_gender_combo.addItems(["Any", "Male", "Female"])
     gui.voice_gender_combo.currentTextChanged.connect(gui.on_voice_gender_changed)
-    gui.voice_speed_spin = QComboBox()
+    gui.voice_speed_spin = QComboBox(gui)
     gui.voice_speed_spin.setEditable(True)
     gui.voice_speed_spin.addItems(["0.8x", "0.9x", "1.0x", "1.1x", "1.2x", "1.3x", "1.4x", "1.5x", "1.6x", "1.8x", "2.0x"])
     gui.voice_speed_spin.setCurrentText("1.0x")
+    gui.voice_speed_spin.hide()
     gui.voice_timing_sync_combo = QComboBox()
     gui.voice_timing_sync_combo.addItems(["Off", "Smart", "Timeline Priority", "Force Fit"])
     gui.voice_timing_sync_combo.setCurrentText("Smart")
@@ -506,14 +495,19 @@ def build_start_group(gui, left_layout):
     fast_voice_layout.addWidget(QLabel("Voice type"))
     fast_voice_layout.addWidget(gui.voice_gender_combo)
     voice_setup_layout.addWidget(gui.fast_voice_panel)
-    gui.ai_dubbing_rewrite_cb = QCheckBox("Use AI Rewrite Dubbing for voice timing")
+    # These legacy tuning controls are retained for internal compatibility
+    # after removing the Voice Tuning panel, but must never become orphaned
+    # top-level widgets.
+    gui.ai_dubbing_rewrite_cb = QCheckBox("Use AI Rewrite Dubbing for voice timing", gui)
     gui.ai_dubbing_rewrite_cb.setChecked(False)
+    gui.ai_dubbing_rewrite_cb.hide()
     gui.ai_dubbing_rewrite_hint_label = QLabel(
         "Keeps subtitle text readable, but lets AI create a shorter spoken version for TTS when timing is tight.",
         gui,
     )
     gui.ai_dubbing_rewrite_hint_label.setObjectName("helperLabel")
     gui.ai_dubbing_rewrite_hint_label.setWordWrap(True)
+    gui.ai_dubbing_rewrite_hint_label.hide()
     voice_layout.addWidget(voice_setup_card)
 
     voice_preview_card, voice_preview_layout = _section_card()

@@ -102,9 +102,9 @@ def _build_header_bar(gui):
     more_menu = QMenu(gui.more_actions_btn)
     more_menu.setObjectName("headerMoreMenu")
 
-    gui.download_subtitle_action = more_menu.addAction("Subtitle")
+    gui.download_subtitle_action = more_menu.addAction("Export Translated SRT…")
     gui.download_subtitle_action.triggered.connect(gui.download_subtitle)
-    gui.download_original_action = more_menu.addAction("Original Script")
+    gui.download_original_action = more_menu.addAction("Export Source SRT…")
     gui.download_original_action.triggered.connect(gui.download_original_script)
     more_menu.addSeparator()
     gui.clean_project_action = more_menu.addAction("Clean")

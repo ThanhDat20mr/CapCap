@@ -205,7 +205,7 @@ class PipelineController:
             self.progress_dialog.stop_btn.setText("Stopped")
         if hasattr(self.gui, "run_all_btn"):
             self.gui.run_all_btn.setEnabled(True)
-            self.gui.run_all_btn.setText("Generate Full Video")
+            self.gui.run_all_btn.setText("Generate")
         self.gui.progress_bar.setRange(0, 100)
         self.gui.progress_bar.setValue(0)
         self.gui.refresh_ui_state()
@@ -283,7 +283,7 @@ class PipelineController:
         self.progress_dialog.add_step("preview", "Preparing Video Preview")
         self.progress_dialog.show()
 
-    def run_all_pipeline(self, video_path=None, requires_separation=None):
+    def run_all_pipeline(self, video_path=None, requires_separation=None, target_stage="full"):
         """Entry point for the full generation process."""
         if video_path is None:
             # Fallback to the UI field if not provided
@@ -306,6 +306,7 @@ class PipelineController:
         prepare_run_id = self.prepare_run_id
         self.gui._pipeline_active = True
         self.gui._pipeline_step = "prepare"
+        self.target_stage = str(target_stage or "full").strip().lower()
         
         # UI Feedback
         if hasattr(self.gui, "run_all_btn"):
@@ -327,7 +328,9 @@ class PipelineController:
         cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
         default_engine = "sensevoice" if cpu_mode else "whisper"
         transcription_engine = os.getenv("TRANSCRIPTION_ENGINE", default_engine)
-        skip_translation = self.gui.is_skip_translation()
+        # Transcript-only is a true stop point: PrepareWorkflow still
+        # extracts audio and transcribes, but does not call translation.
+        skip_translation = self.gui.is_skip_translation() or self.target_stage == "transcript"
         output_mode = self.gui.get_output_mode_key()
         self.gui.prepare_workflow_thread = PrepareWorkflowWorker(
             self.gui.workspace_root,
@@ -408,11 +411,15 @@ class PipelineController:
             self.gui.log(f"[Pipeline] Error reloading state: {e}")
 
         mode = self.gui.get_output_mode_key()
-        if mode == "subtitle":
+        if self.target_stage in {"transcript", "translate"} or mode == "subtitle":
             self.pipeline_done()
             if self.progress_dialog:
+                if self.target_stage == "transcript":
+                    self.progress_dialog.skip_step("voiceover")
+                elif self.target_stage == "translate":
+                    self.progress_dialog.skip_step("voiceover")
                 self.progress_dialog.set_completed()
-            self.gui.log("[Pipeline] Subtitles generated successfully.")
+            self.gui.log(f"[Pipeline] Reached requested stage: {self.target_stage}.")
         else:
             self.pipeline_advance("translation")
 
@@ -442,6 +449,12 @@ class PipelineController:
             self.gui.run_voiceover()
             
         elif completed_step == "voiceover":
+            if getattr(self, "target_stage", "full") == "tts":
+                self.pipeline_done()
+                if self.progress_dialog:
+                    self.progress_dialog.skip_step("preview")
+                    self.progress_dialog.set_completed()
+                return
             self.gui._pipeline_step = "preview"
             if self.progress_dialog and self.progress_dialog.isVisible():
                 self.progress_dialog.start_step("preview")
@@ -473,7 +486,7 @@ class PipelineController:
         # Restore UI
         if hasattr(self.gui, "run_all_btn"):
             self.gui.run_all_btn.setEnabled(True)
-            self.gui.run_all_btn.setText("Generate Full Video")
+            self.gui.run_all_btn.setText("Generate")
         
         self.gui.progress_bar.setRange(0, 100)
         self.gui.progress_bar.setValue(0)
@@ -488,7 +501,7 @@ class PipelineController:
         
         if hasattr(self.gui, "run_all_btn"):
             self.gui.run_all_btn.setEnabled(True)
-            self.gui.run_all_btn.setText("Generate Full Video")
+            self.gui.run_all_btn.setText("Generate")
             
         self.gui.progress_bar.setRange(0, 100)
         self.gui.progress_bar.setValue(100)

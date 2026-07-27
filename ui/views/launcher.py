@@ -2,6 +2,8 @@ import hashlib
 import os
 import json
 import time
+import hashlib
+import re
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
@@ -39,6 +41,30 @@ def _save_recent_projects(settings, projects):
     path = _recent_projects_path()
     with open(path, "w", encoding="utf-8") as f:
         json.dump(projects, f, ensure_ascii=False, indent=2)
+
+
+def _project_pipeline_status(video_path: str) -> tuple[str, str]:
+    """Read the persisted project stage without creating or modifying it."""
+    name = os.path.splitext(os.path.basename(video_path))[0] or "project"
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").lower() or "project"
+    digest = hashlib.sha1(os.path.abspath(video_path).encode("utf-8")).hexdigest()[:8]
+    state_path = os.path.join(os.path.dirname(__file__), "..", "..", "projects", f"{slug}_{digest}", "project.json")
+    try:
+        with open(os.path.normpath(state_path), "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return "Ready", "#8394aa"
+    artifacts = dict(state.get("artifacts") or {})
+    steps = dict(state.get("steps") or {})
+    if artifacts.get("final_video"):
+        return "Export complete", "#6ee7d6"
+    if artifacts.get("voice_vi") or artifacts.get("mixed_vi"):
+        return "TTS complete", "#6ee7d6"
+    if str(steps.get("translate_raw", "")).lower() == "done" or artifacts.get("translation_final"):
+        return "Translate complete", "#78b8ff"
+    if artifacts.get("transcript_segments"):
+        return "Transcript complete", "#f6c453"
+    return "Ready", "#8394aa"
 
 
 def _extract_thumbnail(video_path: str, output_path: str) -> str:
@@ -96,7 +122,7 @@ class ProjectCard(QFrame):
         self.video_path = video_path
         self._orig_pixmap = None
         self.setObjectName("statusCard")
-        self.setMinimumSize(180, 160)
+        self.setMinimumSize(180, 184)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet("ProjectCard:hover { border: 2px solid #4ecdc4; }")
@@ -118,6 +144,15 @@ class ProjectCard(QFrame):
         self.name_label.setMaximumHeight(36)
         self.name_label.setStyleSheet("color: #e0e0e0; font-size: 11px; font-weight: 600;")
         layout.addWidget(self.name_label)
+
+        stage_text, stage_color = _project_pipeline_status(video_path)
+        self.stage_badge = QLabel(stage_text)
+        self.stage_badge.setAlignment(Qt.AlignCenter)
+        self.stage_badge.setStyleSheet(
+            f"background-color: #142437; color: {stage_color}; border: 1px solid #2e4b68; "
+            "border-radius: 7px; padding: 3px 7px; font-size: 10px; font-weight: 700;"
+        )
+        layout.addWidget(self.stage_badge)
 
         self._load_thumb(thumbnail_cache_dir)
 

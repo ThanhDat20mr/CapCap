@@ -84,7 +84,9 @@ def save_user_settings(gui):
 
 def load_user_settings(gui):
     s = gui.settings
-    gui.output_mode_combo.setCurrentText(s.value("output_mode", gui.output_mode_combo.currentText()))
+    # Generation is always Subtitle + Voice; ignore legacy single-output
+    # preferences while preserving the hidden compatibility combo.
+    gui.output_mode_combo.setCurrentText("Vietnamese subtitles + voice")
     output_quality = str(s.value("output_quality", "source") or "source").strip().lower()
     if hasattr(gui, "output_quality_combo"):
         idx = gui.output_quality_combo.findData(output_quality)
@@ -138,7 +140,7 @@ def load_user_settings(gui):
     if hasattr(gui, "use_free_voice_radio"):
         gui.use_free_voice_radio.setChecked(True)
     gui.keep_audio_cb.setChecked(str(s.value("keep_audio", gui.keep_audio_cb.isChecked())).lower() == "true")
-    gui.keep_timeline_cb.setChecked(str(s.value("keep_timeline", gui.keep_timeline_cb.isChecked())).lower() == "true")
+    gui.keep_timeline_cb.setChecked(True)
     if hasattr(gui, "anchor_inspector_cb"):
         gui.anchor_inspector_cb.setChecked(
             str(s.value("anchor_inspector", gui.anchor_inspector_cb.isChecked())).lower() == "true"
