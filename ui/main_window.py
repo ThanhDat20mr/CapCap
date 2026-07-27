@@ -595,6 +595,7 @@ class VideoTranslatorGUI(QMainWindow):
         # Track generated/selected artifacts for quick inspection.
         # Keys are stable IDs, values are absolute file paths.
         self.processed_artifacts = {}
+        self._runtime_logs = []
         self.workspace_root = workspace_root()
         self._cleanup_temp_root()
         self.project_service = ProjectService(self.workspace_root)
@@ -1403,6 +1404,26 @@ class VideoTranslatorGUI(QMainWindow):
 
     def clear_log(self):
         clear_log_impl(self)
+
+    def export_runtime_logs(self):
+        default_name = f"capcap_logs_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        default_path = os.path.join(self.workspace_root, default_name)
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Runtime Logs",
+            default_path,
+            "Text Files (*.txt);;All Files (*)",
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, "w", encoding="utf-8") as handle:
+                entries = getattr(self, "_runtime_logs", [])
+                handle.write("\n".join(entries))
+                handle.write("\n" if entries else "")
+            self.log(f"[Logs] Exported runtime logs to {file_path}")
+        except OSError as exc:
+            QMessageBox.warning(self, "Export Logs", f"Could not export logs:\n{exc}")
 
     def _register_progress_dialog(self, dialog):
         if dialog is None:

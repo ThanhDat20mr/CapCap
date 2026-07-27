@@ -7,11 +7,28 @@ from PySide6.QtWidgets import QLabel, QMessageBox, QDialog, QScrollArea, QVBoxLa
 def log_message(gui, message: str):
     if not message:
         return
-    print(str(message))
+    from datetime import datetime
+
+    text = str(message)
+    print(text)
+    entries = getattr(gui, "_runtime_logs", None)
+    if entries is None:
+        entries = []
+        gui._runtime_logs = entries
+    entry = f"{datetime.now().strftime('%H:%M:%S')}  {text}"
+    entries.append(entry)
+    if len(entries) > 10000:
+        del entries[:-10000]
+    view = getattr(gui, "runtime_log_view", None)
+    if view is not None:
+        view.appendPlainText(entry)
 
 
 def clear_log(gui):
-    return None
+    gui._runtime_logs = []
+    view = getattr(gui, "runtime_log_view", None)
+    if view is not None:
+        view.clear()
 
 
 def show_error(gui, title: str, short_msg: str, details: str = ""):

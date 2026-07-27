@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QRadioButton,
     QToolButton,
@@ -67,6 +68,35 @@ def build_advanced_group(gui, left_layout):
     subtitle_layout.addWidget(gui.import_original_srt_btn)
     subtitle_card.hide()
     group_layout.addWidget(subtitle_card)
+
+    logs_card, logs_layout = _advanced_block("Logs")
+    logs_layout.addWidget(gui.make_helper_label(
+        "Runtime messages are kept here for troubleshooting and bug reports."
+    ))
+    gui.runtime_log_view = QPlainTextEdit()
+    gui.runtime_log_view.setObjectName("runtimeLogView")
+    gui.runtime_log_view.setReadOnly(True)
+    gui.runtime_log_view.setMaximumBlockCount(10000)
+    gui.runtime_log_view.setMinimumHeight(160)
+    gui.runtime_log_view.setPlaceholderText("Runtime logs will appear here.")
+    gui.runtime_log_view.setStyleSheet(
+        "QPlainTextEdit#runtimeLogView { background: #0b1220; color: #c9d8e8; "
+        "border: 1px solid #30425b; border-radius: 6px; padding: 6px; font-family: Consolas, monospace; }"
+    )
+    existing_logs = getattr(gui, "_runtime_logs", [])
+    if existing_logs:
+        gui.runtime_log_view.setPlainText("\n".join(existing_logs))
+    logs_layout.addWidget(gui.runtime_log_view)
+    logs_actions = QHBoxLayout()
+    gui.export_logs_btn = QPushButton("Export Logs")
+    gui.export_logs_btn.clicked.connect(gui.export_runtime_logs)
+    gui.clear_logs_btn = QPushButton("Clear Logs")
+    gui.clear_logs_btn.clicked.connect(gui.clear_log)
+    logs_actions.addWidget(gui.export_logs_btn)
+    logs_actions.addWidget(gui.clear_logs_btn)
+    logs_actions.addStretch(1)
+    logs_layout.addLayout(logs_actions)
+    group_layout.addWidget(logs_card)
 
     source_card = _build_audio_source_controls(gui)
     audio_layout = getattr(gui, "workflow_audio_layout", None)
