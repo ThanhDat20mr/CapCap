@@ -328,6 +328,7 @@ class ExportWorkflow:
                                 # export size so both views match visually.
                                 "font_size": max(1, int(round(float(layer.get("font_size", 60) or 60) * 0.85))),
                                     "font_color": str(layer.get("font_color", "#FFFFFF") or "#FFFFFF"),
+                                    "background_color": str(layer.get("background_color", "") or ""),
                                     "font_bold": bool(layer.get("font_bold", False)),
                                     "x": max(0.0, min(1.0, float(transform.get("x", 0.5)))),
                                     "y": max(0.0, min(1.0, float(transform.get("y", 0.5)))),
@@ -406,7 +407,7 @@ class ExportWorkflow:
                 # Keep this field order exactly aligned with the ASS
                 # Format line (including StrikeOut). A shifted style record
                 # can make libass reject the whole subtitle style section.
-                f"&H000000FF,&H00000000,&H00000000,{ -1 if layer['font_bold'] else 0},0,0,0,100,100,0,0,1,0,0,5,0,0,0,0"
+                f"&H000000FF,{self._ass_color(layer['background_color']) if layer.get('background_color') else '&H00000000'},{self._ass_color(layer['background_color']) if layer.get('background_color') else '&H00000000'},{ -1 if layer['font_bold'] else 0},0,0,0,100,100,0,0,{3 if layer.get('background_color') else 1},3,0,5,0,0,0,0"
             )
             text = str(layer["text"]).replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\r\n", "\n").replace("\n", "\\N")
             start, end = float(layer["start"]), float(layer["end"])

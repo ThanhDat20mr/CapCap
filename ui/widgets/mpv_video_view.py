@@ -1240,6 +1240,9 @@ class _TextLayerOverlayWindow(QWidget):
         painter = QPainter(self); painter.setRenderHint(QPainter.TextAntialiasing)
         for item in self._items:
             rect, font, metrics, lines = self._rect_for(item); painter.setFont(font)
+            bg = QColor(str(item.get("background_color", "") or ""))
+            if bg.isValid():
+                painter.fillRect(rect, bg)
             color = QColor(str(item.get("font_color", "#FFFFFF"))); painter.setPen(color if color.isValid() else QColor("#FFFFFF"))
             baseline = rect.top() + 5 + metrics.ascent()
             for line in lines: painter.drawText(QPointF(rect.left() + 6, baseline), line); baseline += metrics.height()

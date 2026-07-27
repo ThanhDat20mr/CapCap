@@ -1,6 +1,7 @@
 ﻿import os
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -20,6 +21,7 @@ class PreviewController:
     def _extract_overlay_layers(self):
         mask_regions = []
         logo_layers = []
+        text_layers = []
         try:
             if hasattr(self.gui, "_current_mask_regions_payload"):
                 raw_masks = self.gui._current_mask_regions_payload()
@@ -99,11 +101,90 @@ class PreviewController:
                                 except (TypeError, ValueError) as e:
                                     print(f"[Preview] Failed to extract logo layer: {e}")
                                     continue
+                        elif track_type == "text":
+                            for layer in tr.layers:
+                                try:
+                                    if not getattr(layer, "visible", True):
+                                        continue
+                                    text = str(getattr(layer, "text", "") or "").strip()
+                                    if not text:
+                                        continue
+                                    transform = getattr(layer, "transform", None)
+                                    text_layers.append({
+                                        "text": text,
+                                        "font_name": str(getattr(layer, "font_name", "Arial") or "Arial"),
+                                        "font_size": float(getattr(layer, "font_size", 60) or 60),
+                                        "font_color": str(getattr(layer, "font_color", "#FFFFFF") or "#FFFFFF"),
+                                        "background_color": str(getattr(layer, "background_color", "") or ""),
+                                        "font_bold": bool(getattr(layer, "font_bold", False)),
+                                        "x": float(getattr(transform, "x", 0.5)) if transform else 0.5,
+                                        "y": float(getattr(transform, "y", 0.5)) if transform else 0.5,
+                                        "start": float(getattr(layer, "start", 0.0) or 0.0),
+                                        "end": float(getattr(layer, "end", 0.0) or 0.0),
+                                    })
+                                except (TypeError, ValueError):
+                                    continue
         except Exception as e:
             print(f"Warning: Failed to extract logo layers: {e}")
 
-        print(f"[Preview] Final overlay extraction: {len(mask_regions)} mask(s), {len(logo_layers)} logo(s)")
-        return mask_regions, logo_layers
+        print(f"[Preview] Final overlay extraction: {len(mask_regions)} mask(s), {len(logo_layers)} logo(s), {len(text_layers)} text layer(s)")
+        return mask_regions, logo_layers, text_layers
+
+    @staticmethod
+    def _ass_timestamp(seconds: float) -> str:
+        total = max(0, int(round(float(seconds) * 100)))
+        hours, total = divmod(total, 360000)
+        minutes, total = divmod(total, 6000)
+        whole, centis = divmod(total, 100)
+        return f"{hours}:{minutes:02d}:{whole:02d}.{centis:02d}"
+
+    @staticmethod
+    def _ass_color(value: str) -> str:
+        value = str(value or "#FFFFFF").strip().lstrip("#")
+        if not re.fullmatch(r"[0-9a-fA-F]{6}", value):
+            value = "FFFFFF"
+        return f"&H00{value[4:6]}{value[2:4]}{value[0:2]}"
+
+    def _build_fast_preview_text_ass(self, text_layers, start_seconds, duration_seconds, width, height, temp_dir):
+        """Build a clip-relative ASS overlay for editor TEXT layers."""
+        if not text_layers:
+            return ""
+        styles, events = [], []
+        for index, layer in enumerate(text_layers):
+            layer_start, layer_end = float(layer["start"]), float(layer["end"])
+            clip_start = max(0.0, layer_start - start_seconds)
+            clip_end = min(float(duration_seconds), layer_end - start_seconds)
+            if clip_end <= clip_start:
+                continue
+            style_name = f"CapCapText{index}"
+            background_color = layer.get("background_color", "")
+            styles.append(
+                f"Style: {style_name},{layer['font_name']},{max(1, int(round(layer['font_size'] * 0.85)))},{self._ass_color(layer['font_color'])},"
+                f"&H000000FF,{self._ass_color(background_color) if background_color else '&H00000000'},{self._ass_color(background_color) if background_color else '&H00000000'},"
+                f"{-1 if layer['font_bold'] else 0},0,0,0,100,100,0,0,{3 if background_color else 1},3,0,5,0,0,0,0"
+            )
+            text = str(layer["text"]).replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\r\n", "\n").replace("\n", "\\N")
+            x = int(round(max(0.0, min(1.0, layer["x"])) * width))
+            y = int(round(max(0.0, min(1.0, layer["y"])) * height))
+            events.append(
+                f"Dialogue: 10,{self._ass_timestamp(clip_start)},{self._ass_timestamp(clip_end)},{style_name},,0,0,0,,{{\\an5\\pos({x},{y})}}{text}"
+            )
+        if not events:
+            return ""
+        os.makedirs(temp_dir, exist_ok=True)
+        ass_path = os.path.join(temp_dir, f"preview_text_layers_{int(time.time() * 1000)}.ass")
+        source = (
+            f"[Script Info]\nPlayResX: {int(width)}\nPlayResY: {int(height)}\n\n[V4+ Styles]\n"
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            + "\n".join(styles)
+            + "\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+            + "\n".join(events)
+            + "\n"
+        )
+        with open(ass_path, "w", encoding="utf-8") as handle:
+            handle.write(source)
+        print(f"[Preview] Added {len(events)} TextLayer event(s) to {ass_path}")
+        return ass_path
 
     @staticmethod
     def _format_duration_ms(duration_ms: int) -> str:
@@ -626,12 +707,23 @@ class PreviewController:
         start_seconds = max(0.0, self.gui.media_player.position() / 1000.0)
         duration_seconds = 5.0
         target_width, target_height = self._resolve_output_canvas_dimensions(video_path)
+        text_canvas_width, text_canvas_height = target_width, target_height
+        if not text_canvas_width or not text_canvas_height:
+            try:
+                from video_processor import get_video_dimensions
+                text_canvas_width, text_canvas_height = get_video_dimensions(video_path)
+            except Exception:
+                text_canvas_width, text_canvas_height = 1920, 1080
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
-        mask_regions, logo_layers = self._extract_overlay_layers()
+        mask_regions, logo_layers, text_layers = self._extract_overlay_layers()
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         preview_output = os.path.join(out_dir, f"{video_name}_preview5s_{int(time.time())}.mp4")
         preview_srt_path = ""
         preview_segments = []
+        text_ass_path = self._build_fast_preview_text_ass(
+            text_layers, start_seconds, duration_seconds, text_canvas_width, text_canvas_height,
+            self.gui.get_project_temp_dir("preview"),
+        )
 
         if mode in ("subtitle", "both"):
             preview_srt_path, preview_segments = self.build_subtitle_preview_srt(start_seconds, duration_seconds)
@@ -670,6 +762,7 @@ class PreviewController:
             video_filter_state=self.gui.get_video_filter_state() if hasattr(self.gui, "get_video_filter_state") else {},
             mask_regions=mask_regions,
             logo_layers=logo_layers,
+            text_ass_path=text_ass_path,
             temp_dir=self.gui.get_project_temp_dir("preview"),
         )
         self.gui.quick_preview_thread.finished.connect(self.gui.on_quick_preview_ready)
@@ -908,7 +1001,7 @@ class PreviewController:
 
         has_active_video_filters = bool(hasattr(self.gui, "has_active_video_filters") and self.gui.has_active_video_filters())
         self.gui.log(f"[Preview] has_active_video_filters={has_active_video_filters}")
-        mask_regions, logo_layers = self._extract_overlay_layers()
+        mask_regions, logo_layers, _text_layers = self._extract_overlay_layers()
         has_overlays = bool(mask_regions or logo_layers)
         self.gui._preview_video_has_burned_subtitles = bool(mode == "subtitle" and (has_active_video_filters or has_overlays))
 

@@ -5712,6 +5712,7 @@ class VideoTranslatorGUI(QMainWindow):
                 "font_name": getattr(layer, "font_name", "Arial"),
                 "font_size": max(1, int(round(float(getattr(layer, "font_size", 60)) * preview_text_scale))),
                 "font_color": getattr(layer, "font_color", "#FFFFFF"),
+                "background_color": getattr(layer, "background_color", ""),
                 "font_bold": getattr(layer, "font_bold", False),
                 "x": getattr(transform, "x", .5) if transform else .5,
                 "y": getattr(transform, "y", .5) if transform else .5,
@@ -5741,6 +5742,9 @@ class VideoTranslatorGUI(QMainWindow):
         color = str(getattr(layer, "font_color", "#FFFFFF"))
         self.text_inspector_color_btn.setText(color)
         self.text_inspector_color_btn.setStyleSheet(f"background-color: {color}; color: #fff;")
+        bg = str(getattr(layer, "background_color", "") or "")
+        self.text_inspector_background_btn.setText(bg or "None")
+        self.text_inspector_background_btn.setStyleSheet(f"background-color: {bg or '#26364a'}; color: #fff;")
         self.text_inspector_summary_label.setText(f"Selected: {getattr(track, 'name', 'T1 Text')} → {getattr(layer, 'name', 'Text')}. Drag it on the preview to move it.")
 
     def _wire_text_inspector_controls(self):
@@ -5784,10 +5788,20 @@ class VideoTranslatorGUI(QMainWindow):
             if layer and chosen.isValid():
                 layer.font_color = chosen.name(); self.text_inspector_color_btn.setText(layer.font_color)
                 self.text_inspector_color_btn.setStyleSheet(f"background-color: {layer.font_color}; color: #fff;"); changed()
+        def background_changed():
+            layer = selected()
+            if layer is None: return
+            current = QColor(str(getattr(layer, "background_color", "") or "#000000"))
+            chosen = QColorDialog.getColor(current, self, "Choose Text Background Color")
+            if chosen.isValid():
+                layer.background_color = chosen.name()
+                self.text_inspector_background_btn.setText(layer.background_color)
+                self.text_inspector_background_btn.setStyleSheet(f"background-color: {layer.background_color}; color: #fff;"); changed()
         self.text_inspector_content.textChanged.connect(content_changed)
         self.text_inspector_size_combo.currentIndexChanged.connect(size_changed)
         self.text_inspector_font_combo.currentTextChanged.connect(font_changed)
         self.text_inspector_color_btn.clicked.connect(color_changed)
+        self.text_inspector_background_btn.clicked.connect(background_changed)
 
     def _show_logo_inspector_for_track(self, track, layer=None):
         """Show the Logo Track Inspector populated with the selected L1 layer."""
