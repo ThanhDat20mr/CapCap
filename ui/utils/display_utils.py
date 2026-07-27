@@ -1,5 +1,7 @@
 ﻿import os
 
+import sys
+
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import QLabel, QMessageBox, QDialog, QScrollArea, QVBoxLayout
 
@@ -7,21 +9,12 @@ from PySide6.QtWidgets import QLabel, QMessageBox, QDialog, QScrollArea, QVBoxLa
 def log_message(gui, message: str):
     if not message:
         return
-    from datetime import datetime
-
     text = str(message)
-    print(text)
-    entries = getattr(gui, "_runtime_logs", None)
-    if entries is None:
-        entries = []
-        gui._runtime_logs = entries
-    entry = f"{datetime.now().strftime('%H:%M:%S')}  {text}"
-    entries.append(entry)
-    if len(entries) > 10000:
-        del entries[:-10000]
-    view = getattr(gui, "runtime_log_view", None)
-    if view is not None:
-        view.appendPlainText(entry)
+    stream = getattr(sys, "__stdout__", sys.stdout)
+    stream.write(text + "\n")
+    stream.flush()
+    if hasattr(gui, "runtime_log_received"):
+        gui.runtime_log_received.emit(text)
 
 
 def clear_log(gui):

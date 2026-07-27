@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
                              QFrame, QProgressBar, QMessageBox,
                              QScrollArea,
                              QColorDialog, QTabWidget, QDialog, QSizePolicy, QInputDialog, QLayout)
-from PySide6.QtCore import Qt, QUrl, QTimer, QSettings, QEvent
+from PySide6.QtCore import Qt, QUrl, QTimer, QSettings, QEvent, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontInfo, QIcon, QKeySequence, QPixmap, QTextCursor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
@@ -196,6 +196,7 @@ class _BootstrapMediaBackend:
 
 class VideoTranslatorGUI(QMainWindow):
     VOICE_ENTRY_ID_ROLE = Qt.UserRole + 1
+    runtime_log_received = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -596,6 +597,7 @@ class VideoTranslatorGUI(QMainWindow):
         # Keys are stable IDs, values are absolute file paths.
         self.processed_artifacts = {}
         self._runtime_logs = []
+        self.runtime_log_received.connect(self._append_runtime_log_entry)
         self.workspace_root = workspace_root()
         self._cleanup_temp_root()
         self.project_service = ProjectService(self.workspace_root)
@@ -1401,6 +1403,20 @@ class VideoTranslatorGUI(QMainWindow):
     # -----------------------------
     def log(self, message: str):
         log_message_impl(self, message)
+
+    def _append_runtime_log_entry(self, message: str):
+        from datetime import datetime
+
+        text = str(message or "").strip()
+        if not text:
+            return
+        entry = f"{datetime.now().strftime('%H:%M:%S')}  {text}"
+        self._runtime_logs.append(entry)
+        if len(self._runtime_logs) > 10000:
+            del self._runtime_logs[:-10000]
+        view = getattr(self, "runtime_log_view", None)
+        if view is not None:
+            view.appendPlainText(entry)
 
     def clear_log(self):
         clear_log_impl(self)

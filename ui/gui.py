@@ -1,6 +1,7 @@
 import os
 import shutil
 import sys
+import threading
 
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtWidgets import QApplication
@@ -8,6 +9,79 @@ from PySide6.QtWidgets import QApplication
 from main_window import VideoTranslatorGUI
 
 __all__ = ["VideoTranslatorGUI"]
+
+
+class _RuntimeLogCollector:
+    """Tee terminal output into the GUI once its log panel is available."""
+
+    def __init__(self):
+        self._pending = []
+        self._window = None
+
+    def add(self, message: str) -> None:
+        text = str(message or "").strip()
+        if not text:
+            return
+        if self._window is None:
+            self._pending.append(text)
+            self._pending = self._pending[-10000:]
+            return
+        self._window.log(text)
+
+    def attach(self, window) -> None:
+        self._window = window
+        for message in self._pending:
+            window.log(message)
+        self._pending.clear()
+
+
+class _LogTee:
+    def __init__(self, stream, collector):
+        self._stream = stream
+        self._collector = collector
+        self._partial = ""
+
+    def write(self, data):
+        text = str(data or "")
+        self._stream.write(text)
+        self._partial += text
+        lines = self._partial.splitlines(keepends=True)
+        self._partial = ""
+        for line in lines:
+            if line.endswith(("\n", "\r")):
+                self._collector.add(line.rstrip())
+            else:
+                self._partial = line
+        return len(text)
+
+    def flush(self):
+        self._stream.flush()
+        if self._partial:
+            self._collector.add(self._partial)
+            self._partial = ""
+
+    def isatty(self):
+        return bool(getattr(self._stream, "isatty", lambda: False)())
+
+    def fileno(self):
+        return self._stream.fileno()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _capture_runtime_output():
+    collector = _RuntimeLogCollector()
+    sys.stdout = _LogTee(sys.stdout, collector)
+    sys.stderr = _LogTee(sys.stderr, collector)
+
+    original_thread_hook = getattr(threading, "excepthook", None)
+    if original_thread_hook is not None:
+        def _thread_exception_hook(args):
+            collector.add(f"[Unhandled Thread Error] {args.exc_type.__name__}: {args.exc_value}")
+            original_thread_hook(args)
+        threading.excepthook = _thread_exception_hook
+    return collector
 
 
 def _app_root() -> str:
@@ -48,6 +122,7 @@ if __name__ == "__main__":
     app_root = _app_root()
     _bootstrap_env(app_root)
     os.chdir(app_root)
+    runtime_logs = _capture_runtime_output()
     app = QApplication(sys.argv)
 
     from views.launcher import show_launcher, LauncherWindow
@@ -58,6 +133,7 @@ if __name__ == "__main__":
     LauncherWindow.add_recent(None, video_path)
 
     window = VideoTranslatorGUI()
+    runtime_logs.attach(window)
     window.show()
 
     def _init_video():
