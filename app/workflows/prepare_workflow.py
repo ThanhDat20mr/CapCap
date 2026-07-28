@@ -210,27 +210,48 @@ class PrepareWorkflow:
             project_state.set_step_status("transcribe", "running")
             self.project_service.save_project(project_state)
             ocr_region = (os.getenv("OCR_SUBTITLE_REGION") or "bottom").strip().lower()
-            raw_segments = self.engine_runtime.transcribe_video_ocr(video_path, region=ocr_region)
-            if not raw_segments:
-                project_state.set_step_status("transcribe", "failed")
-                self.project_service.save_project(project_state)
-                raise RuntimeError("OCR transcription failed.")
-            segment_models = self.segment_service.transcript_dicts_to_models(raw_segments)
+            ocr_signature = self.project_service.build_ocr_transcription_signature(
+                video_path, region=ocr_region,
+            )
+            cached_ocr_signature = str(project_state.settings.get("ocr_transcription_signature", "") or "")
+            cached_raw_path = project_state.artifacts.get("transcript_raw", "")
+            cached_segment_path = project_state.artifacts.get("transcript_segments", "")
+            reused_ocr = (
+                cached_ocr_signature == ocr_signature
+                and cached_raw_path and cached_segment_path
+                and os.path.exists(cached_raw_path)
+                and os.path.exists(cached_segment_path)
+            )
+            if reused_ocr:
+                raw_segments = self.project_service.load_json_artifact(project_state, "transcript_raw", default=[])
+                segment_models = self.project_service.load_segment_artifact(project_state, "transcript_segments")
+                if not raw_segments and segment_models:
+                    raw_segments = [segment.to_original_subtitle_dict() for segment in segment_models]
+                print("[Prepare Workflow] Reusing cached OCR transcript. Generate did not scan the video again.")
+            else:
+                raw_segments = self.engine_runtime.transcribe_video_ocr(video_path, region=ocr_region)
+                if not raw_segments:
+                    project_state.set_step_status("transcribe", "failed")
+                    self.project_service.save_project(project_state)
+                    raise RuntimeError("OCR transcription failed.")
+                segment_models = self.segment_service.transcript_dicts_to_models(raw_segments)
+                project_state.set_setting("ocr_transcription_signature", ocr_signature)
             transcribe_elapsed = time.perf_counter() - transcribe_started
             print(f"Success: Generated {len(segment_models)} segments via OCR.")
             print(f"[Timing] OCR step: {transcribe_elapsed:.2f}s")
-            self.project_service.save_json_artifact(
-                project_state,
-                "transcript_raw",
-                os.path.join("analysis", "transcript_raw.json"),
-                raw_segments,
-            )
-            self.project_service.save_segment_artifact(
-                project_state,
-                "transcript_segments",
-                os.path.join("analysis", "transcript_segments.json"),
-                segment_models,
-            )
+            if not reused_ocr:
+                self.project_service.save_json_artifact(
+                    project_state,
+                    "transcript_raw",
+                    os.path.join("analysis", "transcript_raw.json"),
+                    raw_segments,
+                )
+                self.project_service.save_segment_artifact(
+                    project_state,
+                    "transcript_segments",
+                    os.path.join("analysis", "transcript_segments.json"),
+                    segment_models,
+                )
             project_state.set_step_status("transcribe", "completed")
             project_state.set_setting("transcription_engine", "ocr")
             self.project_service.save_project(project_state)

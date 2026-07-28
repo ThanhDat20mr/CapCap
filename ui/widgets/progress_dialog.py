@@ -118,6 +118,7 @@ class PipelineProgressDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._stopped = False
+        self._drag_pos = None
         self.setWindowTitle("CapCap AI Pipeline")
         self.setFixedSize(580, 700)
         # Do not force the progress dialog above QMessageBox/other dialogs.
@@ -377,9 +378,18 @@ class PipelineProgressDialog(QDialog):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._drag_pos = event.globalPosition().toPoint()
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.LeftButton:
+        if event.buttons() == Qt.LeftButton and self._drag_pos is not None:
             self.move(self.pos() + event.globalPosition().toPoint() - self._drag_pos)
             self._drag_pos = event.globalPosition().toPoint()
             event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        super().mouseReleaseEvent(event)

@@ -19,6 +19,11 @@ def log_message(gui, message: str):
 
 def clear_log(gui):
     gui._runtime_logs = []
+    gui._pending_runtime_log_entries = []
+    gui._runtime_log_view_entry_count = 0
+    timer = getattr(gui, "_runtime_log_flush_timer", None)
+    if timer is not None:
+        timer.stop()
     view = getattr(gui, "runtime_log_view", None)
     if view is not None:
         view.clear()

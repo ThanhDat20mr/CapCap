@@ -3,6 +3,7 @@ import os
 import re
 import json
 import copy
+import glob
 import hashlib
 import shutil
 import threading
@@ -83,6 +84,8 @@ from worker_adapters import (
     VoiceSamplePreviewWorker,
     VocalSeparationWorker,
     VoiceOverWorker,
+    TimelineThumbnailWorker,
+    TimelineWaveformWorker,
 )
 
 # Import our backend modules
@@ -596,6 +599,14 @@ class VideoTranslatorGUI(QMainWindow):
         # Keys are stable IDs, values are absolute file paths.
         self.processed_artifacts = {}
         self._runtime_logs = []
+        self._pending_runtime_log_entries = []
+        self._runtime_log_view_entry_count = 0
+        self._runtime_log_flush_timer = QTimer(self)
+        self._runtime_log_flush_timer.setSingleShot(True)
+        self._runtime_log_flush_timer.setInterval(100)
+        self._runtime_log_flush_timer.timeout.connect(self._flush_runtime_log_entries)
+        self._editor_highlight_chunks = {}
+        self._editor_highlight_state = {}
         self.runtime_log_received.connect(self._append_runtime_log_entry)
         self.workspace_root = workspace_root()
         self._cleanup_temp_root()
@@ -674,6 +685,17 @@ class VideoTranslatorGUI(QMainWindow):
         self._video_filter_apply_requested = False
         self._blur_edit_finish_syncing = False
         self._blur_region_preview_dirty = False
+        # Overlay drags can emit dozens of events per second.  Persisting the
+        # full project/timeline for each one causes synchronous JSON and
+        # project-file writes on the UI thread, so collect rapid edits and
+        # save their final state shortly after interaction settles.
+        self._pending_timeline_persist = False
+        self._pending_mask_state_persist = False
+        self._pending_blur_state_persist = False
+        self._timeline_persist_timer = QTimer(self)
+        self._timeline_persist_timer.setSingleShot(True)
+        self._timeline_persist_timer.setInterval(180)
+        self._timeline_persist_timer.timeout.connect(self._flush_pending_timeline_persist)
         # Simple pipeline runner (Run All)
         self._pipeline_active = False
         self._pipeline_step = ""
@@ -864,7 +886,7 @@ class VideoTranslatorGUI(QMainWindow):
         if layer is None:
             return
         layer.transform.x, layer.transform.y = float(x), float(y)
-        self.persist_current_timeline_project_data()
+        self.schedule_timeline_project_persist()
 
     def _configure_local_voice_mode_ui(self):
         if hasattr(self, "use_free_voice_radio"):
@@ -1410,12 +1432,40 @@ class VideoTranslatorGUI(QMainWindow):
         if not text:
             return
         entry = f"{datetime.now().strftime('%H:%M:%S')}  {text}"
-        self._runtime_logs.append(entry)
+        self._pending_runtime_log_entries.append(entry)
+        if not self._runtime_log_flush_timer.isActive():
+            self._runtime_log_flush_timer.start()
+
+    def _flush_runtime_log_entries(self):
+        entries = self._pending_runtime_log_entries
+        self._pending_runtime_log_entries = []
+        if not entries:
+            return
+        self._runtime_logs.extend(entries)
         if len(self._runtime_logs) > 10000:
             del self._runtime_logs[:-10000]
         view = getattr(self, "runtime_log_view", None)
-        if view is not None:
-            view.appendPlainText(entry)
+        # The Logs view belongs to the Advanced workflow page. Keep the
+        # in-memory log complete, but defer text layout/repaint work until
+        # the user actually opens that page.
+        if view is not None and view.isVisible():
+            already_rendered = int(getattr(self, "_runtime_log_view_entry_count", 0))
+            if already_rendered != len(self._runtime_logs) - len(entries):
+                view.setPlainText("\n".join(self._runtime_logs))
+            else:
+                view.appendPlainText("\n".join(entries))
+            self._runtime_log_view_entry_count = len(self._runtime_logs)
+
+    def sync_runtime_log_view(self, *_args):
+        """Populate deferred runtime logs when the Advanced page is shown."""
+        view = getattr(self, "runtime_log_view", None)
+        if view is None or not view.isVisible():
+            return
+        logs = getattr(self, "_runtime_logs", [])
+        if int(getattr(self, "_runtime_log_view_entry_count", 0)) == len(logs):
+            return
+        view.setPlainText("\n".join(logs))
+        self._runtime_log_view_entry_count = len(logs)
 
     def clear_log(self):
         clear_log_impl(self)
@@ -1432,6 +1482,7 @@ class VideoTranslatorGUI(QMainWindow):
         if not file_path:
             return
         try:
+            self._flush_runtime_log_entries()
             with open(file_path, "w", encoding="utf-8") as handle:
                 entries = getattr(self, "_runtime_logs", [])
                 handle.write("\n".join(entries))
@@ -2167,41 +2218,20 @@ class VideoTranslatorGUI(QMainWindow):
         return os.path.join(self.get_workspace_temp_root(create=True), f"waveform_{video_hash}.wav")
 
     def _timeline_waveform_request_signature(self):
-        audio_path = self.resolve_timeline_audio_visualization_path()
-        if audio_path and os.path.exists(audio_path):
-            try:
-                stat = os.stat(audio_path)
-                return (
-                    "v2-envelope",
-                    "audio",
-                    os.path.abspath(audio_path),
-                    int(stat.st_size),
-                    int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
-                )
-            except Exception:
-                return ("v2-envelope", "audio", os.path.abspath(audio_path), 0, 0)
-
+        # A1 represents the source video's original audio. It must remain
+        # stable as Transcript/Translate/TTS change project artifacts.
         video_path = self._normalize_local_file_path(self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else "")
         if video_path and os.path.exists(video_path):
             try:
                 stat = os.stat(video_path)
                 return (
-                    "v2-envelope",
-                    "video-fallback",
+                    "v4-source-video-envelope",
                     os.path.abspath(video_path),
                     int(stat.st_size),
                     int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
-                    str(getattr(self, "_preview_audio_track_mode", "original") or "original"),
                 )
             except Exception:
-                return (
-                    "v2-envelope",
-                    "video-fallback",
-                    os.path.abspath(video_path),
-                    0,
-                    0,
-                    str(getattr(self, "_preview_audio_track_mode", "original") or "original"),
-                )
+                return ("v4-source-video-envelope", os.path.abspath(video_path), 0, 0)
         return None
 
     def _timeline_thumbnail_request_signature(self):
@@ -2212,23 +2242,79 @@ class VideoTranslatorGUI(QMainWindow):
         try:
             stat = os.stat(video_path)
             return (
+                "v5-timeline-thumbnails",
                 os.path.abspath(video_path),
                 int(stat.st_size),
                 int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
                 int(round(duration_s)),
             )
         except Exception:
-            return (os.path.abspath(video_path), 0, 0, int(round(duration_s)))
+            return ("v5-timeline-thumbnails", os.path.abspath(video_path), 0, 0, int(round(duration_s)))
+
+    def _load_launcher_timeline_visual_cache(self):
+        """Return static V1/A1 data prepared by the launcher, if valid."""
+        video_path = self._normalize_local_file_path(
+            self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else ""
+        )
+        if not video_path or not os.path.exists(video_path):
+            return None
+        try:
+            stat = os.stat(video_path)
+            digest = hashlib.md5(os.path.abspath(video_path).encode("utf-8")).hexdigest()[:12]
+            manifest_path = os.path.join(
+                self.get_workspace_temp_root(create=True), "timeline_visuals", f"{digest}.json"
+            )
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if (
+                data.get("source") != os.path.abspath(video_path)
+                or int(data.get("size", -1)) != int(stat.st_size)
+                or int(data.get("mtime_ns", -1)) != int(getattr(stat, "st_mtime_ns", 0))
+            ):
+                return None
+            return data
+        except (OSError, ValueError, TypeError):
+            return None
 
     def refresh_timeline_waveform(self):
         if not hasattr(self, "timeline"):
-            print("[Timeline] no timeline widget")
             return
-        self._desired_timeline_waveform_request = None
-        self._timeline_waveform_cache_key = None
-        self._timeline_waveform_samples = []
-        self._timeline_waveform_duration_s = 0.0
-        self.timeline.set_waveform_data([], 0.0)
+        request_signature = self._timeline_waveform_request_signature()
+        if not request_signature:
+            self._desired_timeline_waveform_request = None
+            self._timeline_waveform_cache_key = None
+            self._timeline_waveform_samples = []
+            self._timeline_waveform_duration_s = 0.0
+            self.timeline.set_waveform_data([], 0.0)
+            return
+        launcher_cache = self._load_launcher_timeline_visual_cache()
+        if launcher_cache and launcher_cache.get("waveform"):
+            self._desired_timeline_waveform_request = request_signature
+            self._timeline_waveform_cache_key = request_signature
+            self._timeline_waveform_samples = list(launcher_cache.get("waveform") or [])
+            self._timeline_waveform_duration_s = max(0.0, float(launcher_cache.get("duration_s") or 0.0))
+            self.timeline.set_waveform_data(
+                self._timeline_waveform_samples, self._timeline_waveform_duration_s
+            )
+            return
+        self._desired_timeline_waveform_request = request_signature
+        if self._timeline_waveform_cache_key == request_signature:
+            self.timeline.set_waveform_data(
+                self._timeline_waveform_samples, self._timeline_waveform_duration_s
+            )
+            return
+        worker = self._timeline_waveform_worker
+        if worker is not None and worker.isRunning():
+            return
+        video_path = self._normalize_local_file_path(
+            self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else ""
+        )
+        worker = TimelineWaveformWorker(
+            request_signature, video_path, "", self._waveform_temp_path()
+        )
+        worker.finished.connect(self._on_timeline_waveform_ready)
+        self._timeline_waveform_worker = worker
+        worker.start()
 
     def _on_timeline_waveform_ready(self, request_signature, waveform, duration_s, error):
         self._timeline_waveform_worker = None
@@ -2252,8 +2338,9 @@ class VideoTranslatorGUI(QMainWindow):
             self.timeline.set_waveform_data(self._timeline_waveform_samples, self._timeline_waveform_duration_s)
 
     def schedule_timeline_visual_refresh(self, *, waveform: bool = True, thumbnails: bool = True, delay_ms: int = 40):
-        if not bool(getattr(self, "_allow_post_pipeline_preview_assets", False)):
-            return
+        # V1/A1 visuals are tied only to the source media, not to a pipeline
+        # stage. They are static cached assets and may be prepared as soon as
+        # a video is opened.
         if waveform:
             self._pending_timeline_waveform_refresh = True
         if thumbnails:
@@ -2277,12 +2364,40 @@ class VideoTranslatorGUI(QMainWindow):
     def refresh_timeline_video_thumbnails(self):
         if not hasattr(self, "timeline"):
             return
-        # Timeline thumbnails are disabled to keep long videos lightweight.
-        self._timeline_video_thumb_cache_key = None
-        self._timeline_video_thumbnails = []
-        self.timeline.set_video_thumbnails([])
-        self._desired_timeline_thumbnail_request = None
-        return
+        request_signature = self._timeline_thumbnail_request_signature()
+        if not request_signature:
+            self._timeline_video_thumb_cache_key = None
+            self._timeline_video_thumbnails = []
+            self._desired_timeline_thumbnail_request = None
+            self.timeline.set_video_thumbnails([])
+            return
+        launcher_cache = self._load_launcher_timeline_visual_cache()
+        if launcher_cache and launcher_cache.get("thumbnails"):
+            pixmaps = []
+            for timestamp_s, output_path in launcher_cache.get("thumbnails"):
+                pixmap = QPixmap(str(output_path or ""))
+                if not pixmap.isNull():
+                    pixmaps.append((float(timestamp_s), pixmap))
+            if pixmaps:
+                self._desired_timeline_thumbnail_request = request_signature
+                self._timeline_video_thumb_cache_key = request_signature
+                self._timeline_video_thumbnails = pixmaps
+                self.timeline.set_video_thumbnails(pixmaps)
+                return
+        self._desired_timeline_thumbnail_request = request_signature
+        if self._timeline_video_thumb_cache_key == request_signature:
+            self.timeline.set_video_thumbnails(self._timeline_video_thumbnails)
+            return
+        worker = self._timeline_thumbnail_worker
+        if worker is not None and worker.isRunning():
+            return
+        video_path = self._normalize_local_file_path(self.video_path_edit.text().strip())
+        duration_s = max(0.0, float(self.timeline.duration or 0) / 1000.0)
+        thumb_dir = os.path.join(self.get_workspace_temp_root(create=True), "timeline_thumbnails")
+        worker = TimelineThumbnailWorker(request_signature, video_path, duration_s, thumb_dir)
+        worker.finished.connect(self._on_timeline_video_thumbnails_ready)
+        self._timeline_thumbnail_worker = worker
+        worker.start()
 
     def _on_timeline_video_thumbnails_ready(self, request_signature, thumbnails, error):
         self._timeline_thumbnail_worker = None
@@ -3006,6 +3121,42 @@ class VideoTranslatorGUI(QMainWindow):
             state.set_artifact("timeline", timeline_path)
         
         self.project_service.save_project(state)
+
+    def schedule_timeline_project_persist(self, *, mask_state=False, blur_state=False):
+        """Coalesce persistence requested by high-frequency editor events.
+
+        Preview geometry is updated by the callers immediately.  Only the
+        disk-backed project/timeline write is delayed, which prevents drag
+        operations and text typing from blocking the Qt event loop.
+        """
+        self._pending_timeline_persist = True
+        self._pending_mask_state_persist = self._pending_mask_state_persist or bool(mask_state)
+        self._pending_blur_state_persist = self._pending_blur_state_persist or bool(blur_state)
+        timer = getattr(self, "_timeline_persist_timer", None)
+        if timer is not None:
+            timer.start()
+        else:
+            self._flush_pending_timeline_persist()
+
+    def _flush_pending_timeline_persist(self):
+        """Write coalesced editor changes once after an edit burst ends."""
+        if not getattr(self, "_pending_timeline_persist", False):
+            return
+        save_mask = self._pending_mask_state_persist
+        save_blur = self._pending_blur_state_persist
+        self._pending_timeline_persist = False
+        self._pending_mask_state_persist = False
+        self._pending_blur_state_persist = False
+        try:
+            if save_mask:
+                self.persist_project_mask_state()
+            if save_blur:
+                self.persist_project_blur_state()
+            self.persist_current_timeline_project_data()
+        except Exception:
+            # Preserve existing best-effort persistence behavior: a save
+            # failure must not interrupt editing or leave the timer running.
+            pass
 
     def _cache_core_timeline_tracks_only(self):
         """Keep only V1, A1, and TS1 when a video session is closed.
@@ -5179,11 +5330,8 @@ class VideoTranslatorGUI(QMainWindow):
             layer.transform = transform
         except Exception:
             pass
-        # Save timeline data (includes logo layer changes)
-        try:
-            self.persist_current_timeline_project_data()
-        except Exception:
-            pass
+        # Coalesce the disk write while the overlay emits drag events.
+        self.schedule_timeline_project_persist()
 
     def _show_mask_overlay(self, track, layer):
         """Show the draggable mask overlay for the selected mask layer."""
@@ -5269,16 +5417,9 @@ class VideoTranslatorGUI(QMainWindow):
             self._apply_mask_to_preview()
         except Exception:
             pass
-        try:
-            if hasattr(self, "persist_project_mask_state"):
-                self.persist_project_mask_state()
-        except Exception:
-            pass
-        # Save timeline data (includes mask layer changes)
-        try:
-            self.persist_current_timeline_project_data()
-        except Exception:
-            pass
+        # Both project settings and timeline JSON are disk-backed.  Defer
+        # those writes during the drag while keeping all preview state live.
+        self.schedule_timeline_project_persist(mask_state=True)
         # Keep the spinboxes in sync so the inspector shows the new
         # values as the user drags the overlay.
         try:
@@ -5799,7 +5940,7 @@ class VideoTranslatorGUI(QMainWindow):
             layer = selected()
             if layer:
                 self._refresh_text_layer_preview(layer.id)
-                self.persist_current_timeline_project_data()
+                self.schedule_timeline_project_persist()
         def content_changed():
             layer = selected()
             if layer:
@@ -8099,7 +8240,7 @@ class VideoTranslatorGUI(QMainWindow):
         if not self._blur_effect_enabled():
             return
         self._blur_region_preview_dirty = True
-        self.persist_project_blur_state()
+        self.schedule_timeline_project_persist(blur_state=True)
 
     def toggle_ocr_region_editing(self, checked: bool):
         overlay = getattr(self, "ocr_region_overlay", None)
@@ -8132,13 +8273,12 @@ class VideoTranslatorGUI(QMainWindow):
                 try:
                     regions = self._current_blur_regions_payload() if hasattr(self, "_current_blur_regions_payload") else []
                     self.timeline.sync_blur_regions(regions)
-                    if hasattr(self, "persist_project_blur_state"):
-                        self.persist_project_blur_state()
+                    self.schedule_timeline_project_persist(blur_state=True)
                 except Exception:
                     pass
             return
         self.apply_preview_blur_region()
-        self.persist_project_blur_state()
+        self.schedule_timeline_project_persist(blur_state=True)
         if hasattr(self, "timeline"):
             regions = self._current_blur_regions_payload() if hasattr(self, "_current_blur_regions_payload") else []
             self.timeline.sync_blur_regions(regions)
@@ -9231,18 +9371,8 @@ class VideoTranslatorGUI(QMainWindow):
         return self._write_live_preview_assets(segments)
 
     def _find_active_segment_index(self, position_ms: int, segments):
-        position_seconds = max(0.0, float(position_ms) / 1000.0)
-        for idx, seg in enumerate(segments or []):
-            if not isinstance(seg, dict):
-                continue
-            try:
-                start_s = float(seg.get("start", 0.0))
-                end_s = float(seg.get("end", 0.0))
-            except (TypeError, ValueError):
-                continue
-            if start_s <= position_seconds <= end_s:
-                return idx
-        return -1
+        active = self._find_active_segment_indices(position_ms, segments)
+        return active[0] if active else -1
 
     def _find_active_segment_indices(self, position_ms: int, segments) -> list[int]:
         """Return the indices of every segment whose [start, end] contains
@@ -9250,8 +9380,25 @@ class VideoTranslatorGUI(QMainWindow):
         time, so the live overlay can stack them on separate lines.
         """
         position_seconds = max(0.0, float(position_ms) / 1000.0)
+        # ``segments`` is already the editor's indexed list. Avoid copying a
+        # long TS1 list on each 200 ms playback tick; the cache below only
+        # needs its identity and length to detect a replacement.
+        source = segments or []
+        cache = getattr(self, "_playback_subtitle_activity_cache", None)
+        source_key = (id(segments), len(source))
+        if cache and cache.get("source_key") == source_key:
+            # The end is exclusive so a tick landing exactly on the next cue
+            # boundary recalculates the active set immediately.
+            if cache["stable_start"] <= position_seconds < cache["stable_end"]:
+                return list(cache["active_indices"])
+
+        # This full scan happens only when playback crosses a subtitle/gap
+        # boundary. The cached stable interval handles the several position
+        # updates that occur while a cue remains unchanged.
         result: list[int] = []
-        for idx, seg in enumerate(segments or []):
+        previous_boundary = 0.0
+        next_boundary = None
+        for idx, seg in enumerate(source):
             if not isinstance(seg, dict):
                 continue
             try:
@@ -9259,21 +9406,47 @@ class VideoTranslatorGUI(QMainWindow):
                 end_s = float(seg.get("end", 0.0))
             except (TypeError, ValueError):
                 continue
+            for boundary in (start_s, end_s):
+                if boundary <= position_seconds:
+                    previous_boundary = max(previous_boundary, boundary)
+                else:
+                    next_boundary = boundary if next_boundary is None else min(next_boundary, boundary)
             if start_s <= position_seconds <= end_s:
                 result.append(idx)
+        stable_start = previous_boundary
+        stable_end = next_boundary if next_boundary is not None else float("inf")
+        self._playback_subtitle_activity_cache = {
+            "source_key": source_key,
+            "stable_start": stable_start,
+            "stable_end": stable_end,
+            "active_indices": list(result),
+        }
         return result
 
     def _set_editor_highlight(self, editor, active_index: int):
         if not editor:
             return
 
+        document = editor.document()
+        revision = int(document.revision())
+        editor_key = id(editor)
+        state = (revision, active_index)
+        if self._editor_highlight_state.get(editor_key) == state:
+            return
+        self._editor_highlight_state[editor_key] = state
+
         selections = []
-        text = editor.toPlainText()
-        block_pattern = re.compile(
-            r"(^|\n\n)(\d+\n\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}\n.*?)(?=\n\n\d+\n|\Z)",
-            re.DOTALL,
-        )
-        chunks = [(match.start(2), match.end(2)) for match in block_pattern.finditer(text)]
+        cached = self._editor_highlight_chunks.get(editor_key)
+        if cached and cached[0] == revision:
+            chunks = cached[1]
+        else:
+            text = editor.toPlainText()
+            block_pattern = re.compile(
+                r"(^|\n\n)(\d+\n\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}\n.*?)(?=\n\n\d+\n|\Z)",
+                re.DOTALL,
+            )
+            chunks = [(match.start(2), match.end(2)) for match in block_pattern.finditer(text)]
+            self._editor_highlight_chunks[editor_key] = (revision, chunks)
 
         if 0 <= active_index < len(chunks):
             start, end = chunks[active_index]
@@ -9319,7 +9492,8 @@ class VideoTranslatorGUI(QMainWindow):
             if hasattr(self, "video_view"):
                 if getattr(self, "_preview_video_has_burned_subtitles", False):
                     self.video_view.subtitle_item.set_text("")
-                    self.video_view.subtitle_item.hide()
+                    if self.video_view.subtitle_item.isVisible():
+                        self.video_view.subtitle_item.hide()
                 else:
                     active_indices = self._find_active_segment_indices(position_ms, segments)
                     if active_indices:
@@ -9329,7 +9503,8 @@ class VideoTranslatorGUI(QMainWindow):
                         else:
                             self.video_view.subtitle_item.set_lines(active_lines)
                         self._set_live_subtitle_effects(segments[active_indices[0]], position_ms)
-                        self.video_view.subtitle_item.show()
+                        if not self.video_view.subtitle_item.isVisible():
+                            self.video_view.subtitle_item.show()
                     else:
                         # Keep a real subtitle visible while paused so it
                         # remains a draggable editing layer after subtitle
@@ -9338,7 +9513,8 @@ class VideoTranslatorGUI(QMainWindow):
                             self._show_subtitle_drag_layer(segments)
                         else:
                              self.video_view.subtitle_item.set_text("")
-                             self.video_view.subtitle_item.hide()
+                             if self.video_view.subtitle_item.isVisible():
+                                 self.video_view.subtitle_item.hide()
                 self.video_view.reposition_subtitle()
         except Exception as exc:
             self.log(f"[Preview] subtitle highlight skipped: {exc}")
@@ -11098,7 +11274,7 @@ class VideoTranslatorGUI(QMainWindow):
         confirmation = QMessageBox.question(
             self,
             "Clean Project",
-            "This will remove intermediate project files, temp previews, separated audio, and cached TTS files for the current project.\n\n"
+            "This will remove intermediate project files, temp previews, separated audio, cached TTS files, and this video's timeline media cache.\n\n"
             "It will keep your source video, imported assets, and final exported video.\n\n"
             "Do you want to continue?",
             QMessageBox.Yes | QMessageBox.No,
@@ -11115,6 +11291,7 @@ class VideoTranslatorGUI(QMainWindow):
             "Preview temp files": [],
             "TTS cache": [],
             "Temp folders": [],
+            "Timeline media cache": [],
         }
         project_temp_root = self.get_project_temp_root()
         output_root = os.path.join(self.workspace_root, "output")
@@ -11155,6 +11332,32 @@ class VideoTranslatorGUI(QMainWindow):
             self._remove_path_if_safe(candidate, allowed_roots=allowed_roots, removed=removed_paths)
             if len(removed_paths) > before_count:
                 removed_groups[group_name].append(removed_paths[-1])
+
+        # V1/A1 visual assets live in the shared temp root because they are
+        # prepared in the launcher before a project context exists. Remove
+        # only files whose digest belongs to this source video; caches for
+        # other projects remain untouched.
+        source_video = self._normalize_local_file_path(
+            self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else ""
+        )
+        if source_video:
+            source = os.path.abspath(source_video)
+            digest = hashlib.md5(source.encode("utf-8")).hexdigest()[:12]
+            temp_root = self.get_workspace_temp_root()
+            timeline_cache_paths = [
+                os.path.join(temp_root, f"waveform_{digest}.wav"),
+                os.path.join(temp_root, "timeline_visuals", f"{digest}.json"),
+            ]
+            thumb_dir = os.path.join(temp_root, "timeline_thumbnails")
+            if os.path.isdir(thumb_dir):
+                timeline_cache_paths.extend(
+                    glob.glob(os.path.join(thumb_dir, f"launcher_{digest}_*.jpg"))
+                )
+            for candidate in timeline_cache_paths:
+                before_count = len(removed_paths)
+                self._remove_path_if_safe(candidate, allowed_roots=[temp_root], removed=removed_paths)
+                if len(removed_paths) > before_count:
+                    removed_groups["Timeline media cache"].append(removed_paths[-1])
 
         self._reset_project_runtime_state()
 
@@ -11246,6 +11449,10 @@ class VideoTranslatorGUI(QMainWindow):
 
     def closeEvent(self, event):
         try:
+            # A drag may have ended less than one debounce interval ago.
+            # Flush it before teardown so the final overlay position is not
+            # lost when the window is closed immediately.
+            self._flush_pending_timeline_persist()
             # Persist the current blur state BEFORE clearing the overlay.
             # Block the blurRegionChanged signal during the clear so the
             # signal handler does not overwrite the saved state with an
@@ -11385,6 +11592,12 @@ def _relaunch_launcher():
             new_window.refresh_video_dimensions(video_path)
         new_window.current_project_state = new_window.ensure_current_project()
         new_window.load_project_context(new_window.current_project_state)
+        if hasattr(new_window, "timeline") and hasattr(new_window.timeline, "set_video_source"):
+            try:
+                dur = new_window.media_player.duration() / 1000.0
+            except Exception:
+                dur = 60.0
+            new_window.timeline.set_video_source(new_window._current_video_path, dur)
         new_window.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
     QTimer.singleShot(100, _init)
 

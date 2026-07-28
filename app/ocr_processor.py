@@ -21,6 +21,34 @@ _OCR_WATERMARK_PATTERNS = [
 ]
 
 
+def _onnx_cuda_provider_ready() -> tuple[bool, str]:
+    """Return whether ONNX Runtime's CUDA provider can actually load.
+
+    ``get_available_providers`` only reports that the provider was compiled
+    into the installed package.  It does not verify dependent CUDA DLLs.
+    RapidOCR otherwise tries every model with CUDA, emits repeated loader
+    errors, then silently runs each one on CPU.
+    """
+    try:
+        import onnxruntime
+        if "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
+            return False, "CUDAExecutionProvider is not installed"
+        if os.name == "nt":
+            import ctypes
+            provider_dll = os.path.join(
+                os.path.dirname(onnxruntime.__file__), "capi", "onnxruntime_providers_cuda.dll"
+            )
+            if not os.path.isfile(provider_dll):
+                return False, "onnxruntime CUDA provider DLL is not installed"
+            try:
+                ctypes.WinDLL(provider_dll)
+            except OSError as exc:
+                return False, str(exc)
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
 def _get_lock():
     global _OCR_ENGINE_LOCK
     if _OCR_ENGINE_LOCK is None:
@@ -78,16 +106,25 @@ def _load_ocr_engine():
             )
 
         from rapidocr import RapidOCR
-        params = {
-            "Global.log_level": "warning",
-            "EngineConfig.onnxruntime.use_cuda": True,
-        }
-        try:
-            _OCR_ENGINE = RapidOCR(params=params)
-            print("[OCR] RapidOCR engine loaded (PP-OCRv4 ONNX, CUDA GPU)")
-        except Exception:
-            _OCR_ENGINE = RapidOCR()
-            print("[OCR] RapidOCR engine loaded (PP-OCRv4 ONNX, CPU fallback)")
+        cuda_ready, cuda_reason = _onnx_cuda_provider_ready()
+        if cuda_ready:
+            try:
+                _OCR_ENGINE = RapidOCR(params={
+                    # Empty sampled frames are normal. Keep real errors, but
+                    # do not emit a warning for every frame without text.
+                    "Global.log_level": "error",
+                    "EngineConfig.onnxruntime.use_cuda": True,
+                })
+                print("[OCR] RapidOCR engine loaded (PP-OCRv4 ONNX, CUDA GPU)")
+            except Exception as exc:
+                # This covers a genuine RapidOCR initialization failure after
+                # the provider itself loaded successfully.
+                _OCR_ENGINE = RapidOCR()
+                print(f"[OCR] CUDA initialization failed; using CPU: {exc}")
+        else:
+            _OCR_ENGINE = RapidOCR(params={"Global.log_level": "error"})
+            detail = f" ({cuda_reason})" if cuda_reason else ""
+            print(f"[OCR] CUDA unavailable; using CPU OCR{detail}")
         return _OCR_ENGINE
 
 

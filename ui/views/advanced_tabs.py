@@ -86,6 +86,7 @@ def build_advanced_group(gui, left_layout):
     existing_logs = getattr(gui, "_runtime_logs", [])
     if existing_logs:
         gui.runtime_log_view.setPlainText("\n".join(existing_logs))
+        gui._runtime_log_view_entry_count = len(existing_logs)
     logs_layout.addWidget(gui.runtime_log_view)
     logs_actions = QHBoxLayout()
     gui.export_logs_btn = QPushButton("Export Logs")

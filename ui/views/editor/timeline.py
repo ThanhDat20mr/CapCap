@@ -1,7 +1,7 @@
 import os
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView
+from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView, QPushButton
 
 
 from app.layers.base import BaseLayer, LayerType
@@ -71,8 +71,31 @@ class EditorTimeline(QGraphicsView):
         # preview and export must continue using the real project visibility.
         self._timeline_hidden_track_ids: set[str] = set()
         self._segment_indices: dict[str, int] = {}
+        # Playback repaints occur several times per second. Keep the static
+        # subtitle overlap layout between edits instead of sorting every TS1
+        # segment again on every paint.
+        self._overlap_layout_cache: dict[str, tuple[list, dict[str, int], int]] = {}
+        self._waveform_samples: list[float] = []
+        self._waveform_duration_s = 0.0
+        self._video_thumbnails: list[tuple[float, object]] = []
         self._has_add_btn = False
         self._voice_sync_mode: str = "Smart"
+        self._playhead_follow_animation = QPropertyAnimation(self.horizontalScrollBar(), b"value", self)
+        self._playhead_follow_animation.setDuration(180)
+        self._playhead_follow_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._manual_navigation_active = False
+        self._return_to_playhead_button = QPushButton("Return to Playhead", self.viewport())
+        self._return_to_playhead_button.setCursor(Qt.PointingHandCursor)
+        self._return_to_playhead_button.setStyleSheet(
+            "QPushButton { background:#1b3852; color:#d9f3ff; border:1px solid #4a8cff; "
+            "border-radius:9px; padding:4px 9px; font:600 10px 'Segoe UI'; }"
+            "QPushButton:hover { background:#244b6d; }"
+        )
+        self._return_to_playhead_button.clicked.connect(self._return_to_playhead)
+        self._return_to_playhead_button.hide()
+        self.horizontalScrollBar().sliderPressed.connect(self._begin_manual_navigation)
+        self.horizontalScrollBar().actionTriggered.connect(self._on_horizontal_scroll_action)
+        self.horizontalScrollBar().valueChanged.connect(lambda _value: self._update_return_to_playhead_button())
 
         self._init_default_tracks()
 
@@ -237,6 +260,9 @@ class EditorTimeline(QGraphicsView):
 
     def set_playing(self, playing: bool) -> None:
         self._playing = playing
+        if not playing:
+            self._manual_navigation_active = False
+            self._return_to_playhead_button.hide()
         self.viewport().update()
 
     def set_active_segment_index(self, index: int) -> None:
@@ -268,15 +294,28 @@ class EditorTimeline(QGraphicsView):
                 return
         for lid, idx in self._segment_indices.items():
             if idx == index:
+                if self._selected_layer_id == lid:
+                    return
                 self._selected_layer_id = lid
                 self.viewport().update()
                 return
 
     def set_waveform_data(self, samples: list, duration_s: float) -> None:
-        pass
+        self._waveform_samples = [
+            max(0.0, min(1.0, float(value)))
+            for value in (samples or [])
+            if isinstance(value, (int, float))
+        ]
+        self._waveform_duration_s = max(0.0, float(duration_s or 0.0))
+        self.viewport().update()
 
     def set_video_thumbnails(self, thumbnails: list) -> None:
-        pass
+        self._video_thumbnails = [
+            (max(0.0, float(timestamp)), pixmap)
+            for timestamp, pixmap in (thumbnails or [])
+            if pixmap is not None and not getattr(pixmap, "isNull", lambda: True)()
+        ]
+        self.viewport().update()
 
     def set_video_source(self, path: str, duration_s: float) -> None:
         from app.layers.sync_bridge import ensure_v1_a1_tracks
@@ -342,6 +381,7 @@ class EditorTimeline(QGraphicsView):
 
     def set_playhead(self, seconds: float) -> None:
         self._playhead = seconds
+        self._follow_playhead_during_playback()
         viewport = self.viewport()
         if viewport:
             viewport.update()
@@ -349,6 +389,84 @@ class EditorTimeline(QGraphicsView):
 
     def set_position(self, ms: int) -> None:
         self.set_playhead(ms / 1000.0)
+
+    def _follow_playhead_during_playback(self) -> None:
+        """Keep a playing playhead comfortably inside the visible timeline.
+
+        This only moves the horizontal viewport; it never seeks media or
+        changes timeline content. The short scrollbar animation avoids abrupt
+        jumps once the playhead reaches the right-side follow threshold.
+        """
+        if not self._playing:
+            return
+        if self._manual_navigation_active:
+            self._update_return_to_playhead_button()
+            return
+        viewport = self.viewport()
+        scroll_bar = self.horizontalScrollBar()
+        if viewport is None or scroll_bar is None:
+            return
+        view_width = max(1, viewport.width())
+        playhead_x = self._playhead * self.pixels_per_second - scroll_bar.value()
+        follow_threshold = view_width * 0.78
+        if playhead_x <= follow_threshold:
+            return
+        target = int(self._playhead * self.pixels_per_second - view_width * 0.70)
+        target = max(scroll_bar.minimum(), min(target, scroll_bar.maximum()))
+        if target <= scroll_bar.value():
+            return
+        if self._playhead_follow_animation.state() == QAbstractAnimation.Running:
+            self._playhead_follow_animation.stop()
+        self._playhead_follow_animation.setStartValue(scroll_bar.value())
+        self._playhead_follow_animation.setEndValue(target)
+        self._playhead_follow_animation.start()
+
+    def _begin_manual_navigation(self) -> None:
+        if not self._playing:
+            return
+        if self._playhead_follow_animation.state() == QAbstractAnimation.Running:
+            self._playhead_follow_animation.stop()
+        self._manual_navigation_active = True
+        self._update_return_to_playhead_button()
+
+    def _on_horizontal_scroll_action(self, _action: int) -> None:
+        # Scrollbar arrows, page clicks, keyboard navigation, and dragging
+        # all enter the same playback-only manual navigation mode.
+        self._begin_manual_navigation()
+
+    def _update_return_to_playhead_button(self) -> None:
+        button = self._return_to_playhead_button
+        viewport = self.viewport()
+        if not self._manual_navigation_active or not self._playing or viewport is None:
+            button.hide()
+            return
+        playhead_x = self._playhead * self.pixels_per_second - self.horizontalScrollBar().value()
+        is_visible = 0 <= playhead_x <= viewport.width()
+        if is_visible:
+            button.hide()
+            return
+        button.adjustSize()
+        button.move(
+            max(6, viewport.width() - button.width() - 10),
+            self.RULER_HEIGHT + 6,
+        )
+        button.show()
+        button.raise_()
+
+    def _return_to_playhead(self) -> None:
+        viewport = self.viewport()
+        if viewport is None:
+            return
+        scroll_bar = self.horizontalScrollBar()
+        target = int(self._playhead * self.pixels_per_second - viewport.width() * 0.70)
+        target = max(scroll_bar.minimum(), min(target, scroll_bar.maximum()))
+        self._manual_navigation_active = False
+        self._return_to_playhead_button.hide()
+        if self._playhead_follow_animation.state() == QAbstractAnimation.Running:
+            self._playhead_follow_animation.stop()
+        self._playhead_follow_animation.setStartValue(scroll_bar.value())
+        self._playhead_follow_animation.setEndValue(target)
+        self._playhead_follow_animation.start()
 
     def set_voice_sync_mode(self, mode: str) -> None:
         """Update the active voice-timing sync mode and re-stack the
@@ -391,6 +509,7 @@ class EditorTimeline(QGraphicsView):
     def _redraw(self) -> None:
         if not self._timeline:
             return
+        self._overlap_layout_cache.clear()
         tl = self._timeline
         tracks = [t for t in tl.tracks if self.is_track_shown_on_timeline(t)]
         # Recompute each track's height based on its layer count so
@@ -642,7 +761,11 @@ class EditorTimeline(QGraphicsView):
         painter.drawRect(body_rect)
 
         painter.setPen(QColor("#1e2d42"))
-        for i in range(1, int(self._duration) + 1):
+        # Draw only second markers that can reach the current viewport. On a
+        # long project, iterating from 0 on every playback repaint becomes
+        # needlessly expensive after the playhead has moved far right.
+        start_second = max(1, int(scroll_x / max(1, self.pixels_per_second)) - 1)
+        for i in range(start_second, int(self._duration) + 1):
             x = int(i * self.pixels_per_second) - scroll_x
             if x > view_w:
                 break
@@ -671,11 +794,26 @@ class EditorTimeline(QGraphicsView):
         # stale SubtitleLayer rather than a DubSubtitleLayer from an
         # older project file).
         force_subtitle_color = self._is_subtitle_track(track)
-        visible_layers = [l for l in track.layers if l.visible]
         if overlap_stack:
-            # Sort by start time for proper overlap detection
-            visible_layers_sorted = sorted(visible_layers, key=lambda l: float(getattr(l, "start", 0.0)))
-            layer_rows, num_rows = self._compute_overlap_rows(visible_layers_sorted)
+            cached_layout = self._overlap_layout_cache.get(track.id)
+            if cached_layout is None:
+                visible_layers = [layer for layer in track.layers if layer.visible]
+                # Sort by start time for proper overlap detection. This is
+                # deliberately cached: doing it for a long TS1 on every
+                # playhead repaint was a major source of stutter.
+                visible_layers_sorted = sorted(
+                    visible_layers, key=lambda layer: float(getattr(layer, "start", 0.0))
+                )
+                layer_rows, cached_num_rows = self._compute_overlap_rows(visible_layers_sorted)
+                # ``list.index(layer)`` inside the draw loop made subtitle-
+                # track painting quadratic. Precompute the assignment once.
+                layer_row_by_id = {
+                    str(getattr(layer, "id", "")): row
+                    for layer, row in zip(visible_layers_sorted, layer_rows)
+                }
+                cached_layout = (visible_layers, layer_row_by_id, max(1, cached_num_rows))
+                self._overlap_layout_cache[track.id] = cached_layout
+            visible_layers, layer_row_by_id, num_rows = cached_layout
             num_rows = max(1, num_rows)
             # All rows (primary + overlap-child) share the same small
             # CHILD_TRACK_H height so the whole track stays compact.
@@ -685,37 +823,32 @@ class EditorTimeline(QGraphicsView):
                 row_slots.append((cursor, self.CHILD_TRACK_H))
                 cursor += self.CHILD_TRACK_H
         else:
+            visible_layers = [layer for layer in track.layers if layer.visible]
             num_layers = max(1, len(visible_layers))
             row_h = (h - margin * 2) / num_layers if num_layers > 0 else h
-        for row_index, layer in enumerate(track.layers):
-            if not layer.visible:
-                continue
+        visible_row_index = 0
+        for layer in visible_layers:
             x = int(layer.start * self.pixels_per_second) - scroll_x
             w = max(int(layer.duration * self.pixels_per_second), 20)
+            # Off-screen bars have no visual effect. Skip row assignment,
+            # QPainter path creation, labels, and glyph work for them.
+            clip_x = max(x, 0)
+            clip_w = min(x + w, view_w) - clip_x
+            if clip_w <= 0:
+                visible_row_index += 1
+                continue
             if overlap_stack:
-                # Look up the row assigned to this layer in the sorted
-                # visible list (it was indexed in start-time order by
-                # _compute_overlap_rows).
-                try:
-                    visible_idx = visible_layers_sorted.index(layer)
-                    row = layer_rows[visible_idx]
-                except ValueError:
-                    row = 0
+                row = layer_row_by_id.get(str(getattr(layer, "id", "")), 0)
                 bar_y, slot_h = row_slots[row]
                 bar_h = max(slot_h - margin * 2, 8)
             elif uses_layer_rows:
-                visible_count = sum(1 for l in track.layers[:track.layers.index(layer) + 1] if l.visible)
-                z = max(0, visible_count - 1)
+                z = max(0, visible_row_index)
                 z = min(z, num_layers - 1)
                 bar_y = y + margin + z * row_h
                 bar_h = max(row_h - 2, 8)
             else:
                 bar_y = y + margin
                 bar_h = h - margin * 2
-            clip_x = max(x, 0)
-            clip_w = min(x + w, view_w) - clip_x
-            if clip_w <= 0:
-                continue
             is_selected = layer.id == self._selected_layer_id
             track_name = (getattr(track, "name", "") or "").split(" ")[0]
             is_subtitle_track_name = track_name in ("TS1", "S1")
@@ -727,6 +860,127 @@ class EditorTimeline(QGraphicsView):
                     is_selected, force_subtitle_color=force_subtitle_color,
                     force_subtitle_track=is_subtitle_track_name,
                 )
+            # V1/A1 visuals are precomputed when media is opened. Drawing
+            # uses only the cached data and clips to the current viewport, so
+            # playback never decodes video or reads audio samples.
+            if track.type == LayerType.VIDEO:
+                self._draw_video_thumbnails(painter, x, bar_y, w, bar_h, view_w)
+            elif track.type == LayerType.AUDIO:
+                self._draw_waveform(painter, x, bar_y, w, bar_h, view_w)
+            if is_selected and track.type in (LayerType.VIDEO, LayerType.AUDIO):
+                painter.setPen(QPen(QColor("#4a8cff"), 2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRoundedRect(QRectF(x, bar_y, w, bar_h), 4, 4)
+            visible_row_index += 1
+
+    def _draw_waveform(self, painter: QPainter, x: int, y: float, w: int,
+                       h: float, view_w: int) -> None:
+        samples = self._waveform_samples
+        duration_s = self._waveform_duration_s or self._duration
+        if not samples or duration_s <= 0.0 or h <= 4:
+            return
+        left = max(0, x)
+        right = min(view_w, x + w)
+        if right <= left:
+            return
+        center_y = y + h / 2.0
+        max_amp = max(2.0, (h - 8.0) / 2.0)
+        painter.save()
+        painter.setClipRect(QRectF(left, y, right - left, h))
+        # Teal-on-teal styling keeps A1 cohesive with the application while
+        # the darker waveform remains legible on its green track.
+        painter.setPen(QPen(QColor("#248d82"), 1))
+        painter.drawLine(left, int(center_y), right, int(center_y))
+        # This is a single vertical gradient brush reused for every peak,
+        # giving A1 a subtle modern highlight without changing sample count
+        # or doing any additional media processing.
+        waveform_gradient = QLinearGradient(0, y, 0, y + h)
+        waveform_gradient.setColorAt(0.0, QColor(18, 108, 102, 135))
+        waveform_gradient.setColorAt(0.5, QColor(41, 151, 136, 185))
+        waveform_gradient.setColorAt(1.0, QColor(8, 67, 76, 155))
+        soft_pen = QPen(QBrush(waveform_gradient), 3)
+        soft_pen.setCapStyle(Qt.RoundCap)
+        detail_pen = QPen(QColor("#083946"), 1)
+        detail_pen.setCapStyle(Qt.RoundCap)
+        # One inexpensive vertical stroke per two display pixels. Sample
+        # lookup is proportional to the viewport width, never video length.
+        strokes = []
+        for pixel_x in range(left, right, 2):
+            time_s = ((pixel_x - x) / max(1, w)) * duration_s
+            index = min(len(samples) - 1, max(0, int((time_s / duration_s) * len(samples))))
+            amplitude = samples[index] * max_amp
+            strokes.append((pixel_x, int(center_y - amplitude), int(center_y + amplitude)))
+        painter.setPen(soft_pen)
+        for pixel_x, top_y, bottom_y in strokes:
+            painter.drawLine(pixel_x, top_y, pixel_x, bottom_y)
+        painter.setPen(detail_pen)
+        for pixel_x, top_y, bottom_y in strokes:
+            painter.drawLine(pixel_x, top_y, pixel_x, bottom_y)
+        painter.restore()
+
+    def _draw_video_thumbnails(self, painter: QPainter, x: int, y: float, w: int,
+                               h: float, view_w: int) -> None:
+        thumbnails = self._video_thumbnails
+        if not thumbnails or self._duration <= 0.0 or h <= 8:
+            return
+        left = max(0, x)
+        right = min(view_w, x + w)
+        if right <= left:
+            return
+        target_h = max(12, int(h - 8))
+        painter.save()
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.setClipRect(QRectF(left, y, right - left, h))
+        for index, (timestamp_s, pixmap) in enumerate(thumbnails):
+            block_end_s = (
+                thumbnails[index + 1][0]
+                if index + 1 < len(thumbnails)
+                else self._duration
+            )
+            block_left = x + int(timestamp_s * self.pixels_per_second)
+            block_right = x + int(block_end_s * self.pixels_per_second)
+            if block_right <= left or block_left >= right:
+                continue
+            source_w = max(1, int(pixmap.width()))
+            source_h = max(1, int(pixmap.height()))
+            # Avoid turning one small cached thumbnail into an enormous,
+            # blurry block. Cap horizontal enlargement at 2x its cached
+            # width, then repeat that same frame when the time block is wider.
+            max_tile_w = max(48, source_w * 2)
+            tile_left = block_left
+            while tile_left < block_right:
+                tile_right = min(block_right, tile_left + max_tile_w)
+                if tile_right > left and tile_left < right:
+                    target_w = max(1, tile_right - tile_left)
+                    target_ratio = target_w / max(1, target_h)
+                    source_ratio = source_w / source_h
+                    if source_ratio > target_ratio:
+                        # Centered cover crop: remove equal left/right excess.
+                        crop_h = source_h
+                        crop_w = crop_h * target_ratio
+                        crop_x = (source_w - crop_w) / 2.0
+                        crop_y = 0.0
+                    else:
+                        # Centered cover crop for tall source frames.
+                        crop_w = source_w
+                        crop_h = crop_w / target_ratio
+                        crop_x = 0.0
+                        crop_y = (source_h - crop_h) / 2.0
+                    rect = QRectF(tile_left, y + 4, target_w, target_h)
+                    painter.drawPixmap(rect, pixmap, QRectF(crop_x, crop_y, crop_w, crop_h))
+                tile_left = tile_right
+            # A narrow translucent transition softens the hand-off to the
+            # next cached source frame without blurring either thumbnail.
+            if left < block_right < right:
+                fade_w = 14
+                edge_fade = QLinearGradient(block_right - fade_w, 0, block_right + fade_w, 0)
+                edge_fade.setColorAt(0.0, QColor(10, 18, 30, 0))
+                edge_fade.setColorAt(0.5, QColor(10, 18, 30, 44))
+                edge_fade.setColorAt(1.0, QColor(10, 18, 30, 0))
+                painter.fillRect(QRectF(block_right - fade_w, y + 4, fade_w * 2, target_h), QBrush(edge_fade))
+                painter.setPen(QPen(QColor(207, 232, 239, 42), 1))
+                painter.drawLine(block_right, int(y + 4), block_right, int(y + 4 + target_h))
+        painter.restore()
 
     def _draw_standard_layer_bar(self, painter, layer, x, y, w, h, view_w, is_selected, is_overflow_row: bool = False, force_subtitle_color: bool = False, force_subtitle_track: bool = False):
         # Every subtitle bar (DubSubtitleLayer, SubtitleLayer, or any
@@ -1054,6 +1308,9 @@ class EditorTimeline(QGraphicsView):
                     new_end = max(t, drag["start_time"] + self.MIN_DUR)
                     new_end = min(new_end, self._duration)
                     layer.end = new_end
+                # Timing is being edited in place, so the cached overlap
+                # layout is no longer valid until the next paint.
+                self._overlap_layout_cache.clear()
                 self.viewport().update()
             event.accept()
             return
@@ -1083,6 +1340,23 @@ class EditorTimeline(QGraphicsView):
                 self.zoom_out()
         else:
             super().wheelEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_return_to_playhead_button()
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:
+        # Some platforms update the horizontal scrollbar directly for a
+        # shift-wheel/trackpad gesture without emitting a slider action.
+        # Treat that as manual navigation too, but never interrupt our own
+        # short follow/return animation.
+        if (
+            dx
+            and self._playing
+            and self._playhead_follow_animation.state() != QAbstractAnimation.Running
+        ):
+            self._begin_manual_navigation()
+        super().scrollContentsBy(dx, dy)
 
     def _pos_to_time(self, x: float, scroll_x: int) -> float:
         t = (x + scroll_x - self.TRACK_HEADER_W) / self.pixels_per_second

@@ -1,4 +1,5 @@
 import hashlib
+import math
 import os
 import shutil
 import subprocess
@@ -294,7 +295,11 @@ class TimelineWaveformWorker(QThread):
 
             # Build a lightweight envelope: fixed number of buckets regardless of video length.
             # This keeps the timeline readable without the FFT cost of a full spectrum view.
-            bucket_count = int(min(320, max(120, round(duration_s * 10.0))))
+            # Keep this compact enough for instant drawing, but retain enough
+            # peaks for long source videos to look like a real waveform.
+            # These values are computed once in the background, never while
+            # playback is running.
+            bucket_count = int(min(1200, max(240, round(duration_s * 12.0))))
             chunk_size = max(256, int(np.ceil(samples.size / max(1, bucket_count))))
             waveform = []
             for start in range(0, samples.size, chunk_size):
@@ -346,12 +351,20 @@ class TimelineThumbnailWorker(QThread):
                 self.finished.emit(self.request_signature, [], "")
                 return
 
-            thumb_count = max(4, min(10, int(round(self.duration_s / 3.0)) or 6))
+            # Adapt density to media length: short clips need frequent visual
+            # landmarks, while long videos stay bounded for fast preparation.
+            if self.duration_s <= 60.0:
+                interval_s = max(2.0, self.duration_s / 12.0)
+            elif self.duration_s <= 300.0:
+                interval_s = max(5.0, self.duration_s / 30.0)
+            else:
+                interval_s = max(20.0, self.duration_s / 90.0)
+            thumb_count = max(1, min(120, int(math.ceil(self.duration_s / interval_s))))
             if self.duration_s <= 1.0:
                 timestamps = [0.0]
             else:
                 timestamps = [
-                    min(self.duration_s - 0.05, max(0.0, ((idx + 0.5) * self.duration_s) / thumb_count))
+                    min(self.duration_s - 0.05, max(0.0, idx * interval_s))
                     for idx in range(thumb_count)
                 ]
 

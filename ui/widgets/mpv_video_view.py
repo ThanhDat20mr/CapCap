@@ -237,12 +237,28 @@ class _SubtitleOverlayWidget(QWidget):
                     karaoke_word_index=-1, auto_keyword_highlight=False,
                     animation_style="Static", animation_progress=1.0):
         """Apply cue-specific TikTok/highlight effects to the live layer."""
-        self.highlight_color = QColor(highlight_color or "#FFD400")
-        self.highlight_phrases = [str(value).strip() for value in (highlight_phrases or []) if str(value).strip()]
-        self.karaoke_word_index = int(karaoke_word_index)
-        self.auto_keyword_highlight = bool(auto_keyword_highlight)
-        self.animation_style = str(animation_style or "Static").strip().lower()
-        self.animation_progress = max(0.0, min(1.0, float(animation_progress)))
+        next_color = QColor(highlight_color or "#FFD400")
+        next_phrases = [str(value).strip() for value in (highlight_phrases or []) if str(value).strip()]
+        next_word_index = int(karaoke_word_index)
+        next_auto_highlight = bool(auto_keyword_highlight)
+        next_animation = str(animation_style or "Static").strip().lower()
+        next_progress = max(0.0, min(1.0, float(animation_progress)))
+        changed = (
+            self.highlight_color != next_color
+            or self.highlight_phrases != next_phrases
+            or self.karaoke_word_index != next_word_index
+            or self.auto_keyword_highlight != next_auto_highlight
+            or self.animation_style != next_animation
+            or abs(self.animation_progress - next_progress) > 0.0001
+        )
+        if not changed:
+            return
+        self.highlight_color = next_color
+        self.highlight_phrases = next_phrases
+        self.karaoke_word_index = next_word_index
+        self.auto_keyword_highlight = next_auto_highlight
+        self.animation_style = next_animation
+        self.animation_progress = next_progress
         self.update()
 
     def _visible_lines(self) -> list[str]:
@@ -1662,10 +1678,16 @@ class MpvVideoView(QWidget):
         # native surface. Convert the preview-local position to global
         # screen coordinates before moving it.
         if item.is_top_level_overlay():
-            item.move(self.mapToGlobal(QPoint(int(x_pos), int(y_pos))))
+            target_position = self.mapToGlobal(QPoint(int(x_pos), int(y_pos)))
         else:
-            item.move(int(x_pos), int(y_pos))
-        item.setFixedSize(int(item_w), int(item_h))
+            target_position = QPoint(int(x_pos), int(y_pos))
+        target_size = (int(item_w), int(item_h))
+        current_size = (item.width(), item.height())
+        if item.pos() == target_position and current_size == target_size:
+            return
+        item.move(target_position)
+        if current_size != target_size:
+            item.setFixedSize(*target_size)
         item.sync_to_view()
         item.update()
 

@@ -239,6 +239,18 @@ class ProjectService:
             }
         )
 
+    def build_ocr_transcription_signature(self, video_path: str, *, region: str = "bottom") -> str:
+        """Fingerprint all inputs that affect video-subtitle OCR output."""
+        return self._hash_payload(
+            {
+                "version": 1,
+                "video": self._file_signature(video_path),
+                "region": str(region or "bottom").strip().lower(),
+                "subtitle_rect": str(os.getenv("OCR_SUBTITLE_RECT") or "").strip(),
+                "crop_ratio": str(os.getenv("OCR_CROP_RATIO") or "0.25").strip(),
+            }
+        )
+
     def build_separation_signature(self, extracted_audio_path: str, *, audio_handling_mode: str = "fast") -> str:
         return self._hash_payload(
             {

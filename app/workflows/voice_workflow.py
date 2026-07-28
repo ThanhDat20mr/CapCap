@@ -62,7 +62,9 @@ def predict_speed_ratios(segments):
 
 class VoiceWorkflow:
     MAX_TTS_WORKERS = 6
-    PIPER_TTS_WORKERS = 1
+    # Piper synthesis runs in independent subprocesses, so a small bounded
+    # pool improves long projects without monopolising the CPU or disk.
+    PIPER_TTS_WORKERS = 2
     AI_REWRITE_RATIO = 1.05
     SMART_RETRY_RATIO = 1.15
     HARD_RETRY_RATIO = 1.30
@@ -1478,7 +1480,13 @@ class VoiceWorkflow:
 
         if pending_jobs:
             if voice_provider == "piper":
-                worker_count = max(1, min(self.PIPER_TTS_WORKERS, len(pending_jobs)))
+                configured_workers = int(os.getenv("CAPCAP_PIPER_TTS_WORKERS", self.PIPER_TTS_WORKERS) or self.PIPER_TTS_WORKERS)
+                # Keep the default responsive: two workers for ordinary
+                # projects, up to four for a long queue, never more than the
+                # available logical CPUs.
+                long_project_workers = 4 if len(pending_jobs) >= 160 else (3 if len(pending_jobs) >= 60 else configured_workers)
+                cpu_limit = max(1, (os.cpu_count() or 2) - 1)
+                worker_count = max(1, min(4, long_project_workers, len(pending_jobs), cpu_limit))
                 try:
                     # Warm Piper once before parallel synthesis so the UI does not appear frozen during first-load.
                     self.engine_runtime.synthesize_segment(

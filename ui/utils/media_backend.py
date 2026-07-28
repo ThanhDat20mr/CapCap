@@ -319,6 +319,10 @@ class MpvMediaPlayerBackend(QObject):
         return ""
 
     def _poll_state(self):
+        # The timer remains allocated for backend lifetime, but querying mpv
+        # properties every 200 ms while no media is loaded is needless work.
+        if not self._source_path:
+            return
         try:
             time_pos = self._read_property("time-pos", "time_pos", 0.0)
             duration = self._read_property("duration", default=0.0)
@@ -335,9 +339,6 @@ class MpvMediaPlayerBackend(QObject):
         next_position = int(float(time_pos or 0.0) * 1000)
         next_duration = int(float(duration or 0.0) * 1000)
         next_state = QMediaPlayer.PausedState if pause else QMediaPlayer.PlayingState
-        if not self._source_path:
-            next_state = QMediaPlayer.StoppedState
-
         if next_position != self._position_ms:
             self._position_ms = next_position
             self.positionChanged.emit(next_position)

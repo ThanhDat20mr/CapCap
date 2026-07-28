@@ -44,8 +44,11 @@ def build_main_window_ui(gui):
     root_layout.addLayout(content_layout, 1)
 
     _connect_ui_signals(gui)
+    if hasattr(gui, "left_panel_stack"):
+        gui.left_panel_stack.currentChanged.connect(gui.sync_runtime_log_view)
     _initialize_ui_state(gui)
     QTimer.singleShot(0, gui.sync_left_panel_container_width)
+    QTimer.singleShot(0, gui.sync_runtime_log_view)
 
 
 def _build_header_bar(gui):

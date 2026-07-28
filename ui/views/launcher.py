@@ -1,4 +1,5 @@
 import hashlib
+import math
 import os
 import json
 import time
@@ -205,6 +206,120 @@ def _extract_waveform_audio(video_path: str, temp_root: str) -> str:
         print(f"[Launcher] Waveform extract failed: {exc}")
         return ""
     return audio_path if os.path.exists(audio_path) else ""
+
+
+def _prepare_timeline_visual_cache(video_path: str, temp_root: str) -> None:
+    """Build the editor's static V1/A1 cache before opening the editor."""
+    try:
+        import numpy as np
+        import subprocess
+        import wave
+
+        source = os.path.abspath(video_path)
+        stat = os.stat(source)
+        digest = hashlib.md5(source.encode("utf-8")).hexdigest()[:12]
+        cache_dir = os.path.join(temp_root, "timeline_visuals")
+        thumb_dir = os.path.join(temp_root, "timeline_thumbnails")
+        manifest_path = os.path.join(cache_dir, f"{digest}.json")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                existing = json.load(handle)
+            if (
+                int(existing.get("visual_version", 0)) == 4
+                and
+                existing.get("source") == source
+                and existing.get("size") == int(stat.st_size)
+                and existing.get("mtime_ns") == int(stat.st_mtime_ns)
+                and existing.get("waveform")
+                and all(os.path.exists(path) for _time, path in existing.get("thumbnails", []))
+            ):
+                print("[Launcher] Timeline visuals loaded from cache")
+                return
+        except (OSError, ValueError, TypeError):
+            pass
+
+        duration_s = _get_video_duration(source)
+        if duration_s <= 60.0:
+            interval_s = max(2.0, duration_s / 12.0)
+        elif duration_s <= 300.0:
+            interval_s = max(5.0, duration_s / 30.0)
+        else:
+            interval_s = max(20.0, duration_s / 90.0)
+        thumb_count = max(1, min(120, int(math.ceil(duration_s / interval_s))))
+        timestamps = [0.0] if duration_s <= 1.0 else [
+            min(duration_s - 0.05, index * interval_s) for index in range(thumb_count)
+        ]
+        os.makedirs(thumb_dir, exist_ok=True)
+
+        def build_waveform():
+            waveform = []
+            audio_path = _extract_waveform_audio(source, temp_root)
+            waveform_duration = duration_s
+            if audio_path and os.path.exists(audio_path):
+                with wave.open(audio_path, "rb") as audio_file:
+                    frame_count = audio_file.getnframes()
+                    sample_rate = max(1, audio_file.getframerate())
+                    raw_samples = audio_file.readframes(frame_count)
+                samples = np.frombuffer(raw_samples, dtype=np.int16).astype(np.float32)
+                waveform_duration = max(waveform_duration, frame_count / sample_rate)
+                peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+                if peak > 0:
+                    samples /= peak
+                    bucket_count = int(min(1200, max(240, round(waveform_duration * 12.0))))
+                    chunk_size = max(256, int(np.ceil(samples.size / max(1, bucket_count))))
+                    for start in range(0, samples.size, chunk_size):
+                        chunk = samples[start:start + chunk_size]
+                        peak_value = float(np.max(np.abs(chunk))) if chunk.size else 0.0
+                        rms_value = float(np.sqrt(np.mean(np.square(chunk)))) if chunk.size else 0.0
+                        waveform.append(min(1.0, max(0.03, max(peak_value, rms_value * 1.15) ** 0.85)))
+            return waveform, waveform_duration
+
+        def build_thumbnail(index_and_time):
+            index, timestamp_s = index_and_time
+            output_path = os.path.join(thumb_dir, f"launcher_{digest}_v4_{index:03d}.jpg")
+            if not os.path.exists(output_path):
+                subprocess.run(
+                    [_ffmpeg_path(), "-y", "-loglevel", "error", "-ss", f"{timestamp_s:.3f}",
+                     "-i", source, "-frames:v", "1", "-q:v", "4",
+                     "-vf", "scale=180:-1:force_original_aspect_ratio=decrease", output_path],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=20,
+                )
+            return [float(timestamp_s), output_path] if os.path.exists(output_path) and os.path.getsize(output_path) > 0 else None
+
+        # Two independent FFmpeg workers seek the original video directly,
+        # while waveform extraction runs alongside them. This stays bounded
+        # (two thumbnail processes plus one audio process) and avoids splits.
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        print(f"[Launcher] Preparing {thumb_count} timeline thumbnails with 2 workers + waveform worker")
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="capcap-thumbs") as thumbnail_pool:
+            # Keep waveform CPU/audio work independent from the two thumbnail
+            # slots so all three tasks can progress concurrently.
+            waveform_result = []
+            waveform_error = []
+            def run_waveform():
+                try:
+                    waveform_result.extend(build_waveform())
+                except Exception as exc:
+                    waveform_error.append(exc)
+            waveform_thread = threading.Thread(target=run_waveform, name="capcap-waveform", daemon=True)
+            waveform_thread.start()
+            thumbnails = [item for item in thumbnail_pool.map(build_thumbnail, enumerate(timestamps)) if item]
+            waveform_thread.join()
+        if waveform_error:
+            raise waveform_error[0]
+        waveform, duration_s = waveform_result if waveform_result else ([], duration_s)
+
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "visual_version": 4, "source": source, "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns),
+                "duration_s": float(duration_s), "waveform": waveform, "thumbnails": thumbnails,
+            }, handle)
+        print(f"[Launcher] Timeline visuals prepared: waveform={len(waveform)}, thumbnails={len(thumbnails)}")
+    except Exception as exc:
+        print(f"[Launcher] Timeline visual preparation skipped: {exc}")
 
 
 class LauncherWindow(QDialog):
@@ -463,7 +578,7 @@ class LauncherWindow(QDialog):
         def _preprocess():
             from runtime_paths import workspace_root
             temp_root = os.path.join(workspace_root(), "temp")
-            _extract_waveform_audio(self.selected_video, temp_root)
+            _prepare_timeline_visual_cache(self.selected_video, temp_root)
             self._extraction_done = True
         threading.Thread(target=_preprocess, daemon=True).start()
         self._loader_timer = QTimer()

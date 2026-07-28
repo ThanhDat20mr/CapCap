@@ -145,7 +145,6 @@ if __name__ == "__main__":
             window.refresh_video_dimensions(video_path)
         window.current_project_state = window.ensure_current_project()
         window.load_project_context(window.current_project_state)
-        window.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
 
         if hasattr(window, "timeline") and hasattr(window.timeline, "set_video_source"):
             try:
@@ -153,6 +152,7 @@ if __name__ == "__main__":
             except Exception:
                 dur = 60.0
             window.timeline.set_video_source(window._current_video_path, dur)
+        window.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
 
     QTimer.singleShot(100, _init_video)
     sys.exit(app.exec())
