@@ -15,6 +15,11 @@ class ResourceDownloadService:
     HIGH_AI_RESOURCE_ID = "ai:local-high"
     NORMAL_AI_FILENAME = "Hy-MT2-1.8B-Q4_K_M.gguf"
     HIGH_AI_FILENAME = "gemma-4-E4B-it-Q4_K_M.gguf"
+    WHISPER_ZIP_FILES = {
+        "base": "models--Systran--faster-whisper-base.zip",
+        "small": "models--Systran--faster-whisper-small.zip",
+        "medium": "models--Systran--faster-whisper-medium.zip",
+    }
 
     HF_RESOURCE_REPO = os.getenv("CAPCAP_RESOURCE_REPO", "Hacht/CapCapResource").strip() or "Hacht/CapCapResource"
     HF_RESOURCE_REVISION = os.getenv("CAPCAP_RESOURCE_REVISION", "main").strip() or "main"
@@ -348,6 +353,28 @@ class ResourceDownloadService:
                 "description": "Higher-quality local AI model used to translate and refine subtitles.",
             },
             {
+                "id": "whisper:base",
+                "name": "Whisper Base",
+                "kind": "whisper_cpu",
+                "status": "installed" if self.is_resource_installed("whisper:base") else "missing",
+                "target_dir": self._whisper_cache_root(),
+                "download_url": "https://huggingface.co/Hacht/CapCapResource/blob/main/zipResource/models--Systran--faster-whisper-base.zip",
+                "expected_filename": self.WHISPER_ZIP_FILES["base"],
+                "auto_download_supported": False,
+                "description": "Speech-recognition model for CPU transcription.",
+            },
+            {
+                "id": "whisper:small",
+                "name": "Whisper Small",
+                "kind": "whisper_cpu",
+                "status": "installed" if self.is_resource_installed("whisper:small") else "missing",
+                "target_dir": self._whisper_cache_root(),
+                "download_url": "https://huggingface.co/Hacht/CapCapResource/blob/main/zipResource/models--Systran--faster-whisper-small.zip",
+                "expected_filename": self.WHISPER_ZIP_FILES["small"],
+                "auto_download_supported": False,
+                "description": "Faster speech-recognition model for CPU transcription.",
+            },
+            {
                 "id": "whisper:medium",
                 "name": "Whisper Medium",
                 "kind": "whisper",
@@ -355,7 +382,7 @@ class ResourceDownloadService:
                 "target_dir": self._whisper_cache_root(),
                 "download_url": self._hf_blob_url("zipResource/models--Systran--faster-whisper-medium.zip"),
                 "expected_filename": "models--Systran--faster-whisper-medium.zip",
-                "auto_download_supported": True,
+                "auto_download_supported": False,
                 "description": "Speech-recognition model used to create the original transcript.",
             },
             {
@@ -510,19 +537,9 @@ class ResourceDownloadService:
 
     def download_resource(self, resource_id: str, progress_cb=None) -> None:
         if resource_id.startswith("whisper:"):
-            model_name = resource_id.split(":", 1)[1].strip().lower()
-            if progress_cb:
-                progress_cb(-1, f"Downloading Whisper {model_name} via faster-whisper...")
-            from whisper_processor import _download_whisper_from_custom_repo
-
-            local_dir = _download_whisper_from_custom_repo(model_name)
-            if not local_dir:
-                raise RuntimeError(
-                    f"Whisper {model_name} download failed. See logs for details."
-                )
-            if progress_cb:
-                progress_cb(100, f"Whisper {model_name} is ready.")
-            return
+            raise ValueError(
+                "Whisper models are downloaded manually. Use Open Download Page, then extract the ZIP into models/faster_whisper."
+            )
 
         if resource_id == "sensevoice:model":
             zip_url = self._hf_blob_url("zipResource/sensevoice.zip")

@@ -26,12 +26,12 @@ class _RuntimeLogCollector:
             self._pending.append(text)
             self._pending = self._pending[-10000:]
             return
-        self._window.log(text)
+        self._window.runtime_log_received.emit(text)
 
     def attach(self, window) -> None:
         self._window = window
         for message in self._pending:
-            window.log(message)
+            window.runtime_log_received.emit(message)
         self._pending.clear()
 
 

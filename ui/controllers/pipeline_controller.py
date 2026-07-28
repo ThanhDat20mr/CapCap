@@ -326,7 +326,7 @@ class PipelineController:
             return
         self._start_prepare_status_polling()
         cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
-        default_engine = "sensevoice" if cpu_mode else "whisper"
+        default_engine = "sensevoice"
         transcription_engine = os.getenv("TRANSCRIPTION_ENGINE", default_engine)
         # Transcript-only is a true stop point: PrepareWorkflow still
         # extracts audio and transcribes, but does not call translation.
@@ -342,7 +342,7 @@ class PipelineController:
             self.gui.is_ai_polish_enabled(),
             False,
             self.gui.get_ai_style_instruction(),
-            self.gui.get_whisper_model_path(),
+            self.gui.get_whisper_model_name(),
             transcription_engine=transcription_engine,
             skip_translation=skip_translation,
             prefetch_voice_name=self.gui.get_active_voice_name() if output_mode in ("voice", "both") else "",

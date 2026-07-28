@@ -264,7 +264,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         dialog._resource_rows = {}
 
         resources = service.list_resources()
-        cpu_items = [r for r in resources if r.get("kind") == "sensevoice"]
+        cpu_items = [r for r in resources if r.get("kind") in {"sensevoice", "whisper_cpu"}]
         gpu_kinds = {"ai", "whisper", "cuda"}
         gpu_items = [r for r in resources if r.get("kind") in gpu_kinds]
         voice_items = [r for r in resources if r.get("kind") == "voice"]

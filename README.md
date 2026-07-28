@@ -2,7 +2,7 @@
 
 ![CapCap Editor Preview](https://github.com/notepower2k1/CapCap/blob/main/assets/preview.JPG)
 
-**One-click video localization.** Vietnamese subtitle & dubbing tool for short-form content. Works on CPU — faster with GPU.
+**Video localization and layered editing.** Create Vietnamese or English subtitles and voice-overs for short-form content. Works on CPU — faster with GPU.
 
 > **Zero setup.** Double-click the `.exe`. No Python, no CUDA Toolkit, no model downloads — everything bundled. Only needs NVIDIA driver for GPU acceleration.
 
@@ -11,7 +11,7 @@
 - **Fully offline capable** — all processing runs locally on your PC
 - **CPU-first** — works on any Windows PC without GPU
 - **GPU-accelerated** — plug in NVIDIA GPU, install driver only, get ~5x faster transcription
-- Three output modes: `subtitle only`, `voice only`, `subtitle + voice`
+- Vietnamese and English output, with automatic Piper voice selection for the chosen output language
 - Speech-to-text: `faster-whisper` (CPU/GPU), `SenseVoice` (CPU, multilingual), or `RapidOCR` (video subtitle)
 - OCR subtitle region editor with separate show/hide control
 - AI translation — 5 providers:
@@ -23,12 +23,13 @@
   - **Microsoft Translator** (Azure Cognitive Services, cloud)
   - **OpenRouter** (generic OpenAI-compatible API)
 - Free Google translate fallback — no API key needed
-- Vietnamese voice with `Piper` (fully offline) or `edge-tts` (online)
+- Vietnamese and English voice with `Piper` (fully offline) or `edge-tts` (online)
 - Default bundled Piper voice: `ngochuyen`
 - Vocal/instrumental separation via ONNX Runtime (CPU, ~9s for 10s audio)
 - VAD + denoise + loudness normalization for cleaner transcription
-- Smart Generate — one button: transcribe → translate → voice → preview
-- Timeline editing, subtitle styling, video filters
+- Guided pipeline: **Prepare → Transcript → Translate → TTS → Export**, with completion badges
+- Generate menu for a guided **Step-by-Step** workflow or the **Full Pipeline**
+- Timeline editing, subtitle styling, video filters, and timed overlay layers
 - Translation-to-TTS cache prefetch to reduce voice generation wait time
 - Subtitle + voice export with FFmpeg
 - **TTS speed highlighting** — audio timeline segments show predicted voice-over timing fit via 5 color levels (green/cyan/yellow/orange/red)
@@ -36,11 +37,14 @@
 - **Audio overlap row stacking** — when TTS audio bleeds past a segment's time window, the bar is pushed down a row in the TS1 track (like blur regions in B1). Overlap is detected via the actual `.wav` duration from `_audio_end`, not the segment window. A dashed border marks overflow-row bars.
 - **Timeline Priority sync mode** (Off / Smart / Timeline Priority / Force) — controls what happens when TTS audio is longer than the segment. Smart trims or stretches within safe range. Force uses atempo speed-up. **Timeline Priority** always cuts to the segment window — audio stops at the segment end, next segment plays immediately, and row stacking is disabled. Off = no adjustment.
 - **Single-segment Regenerate Voice** — probes the generated `.wav` with ffprobe for the exact duration, updates the segment + layer `_audio_end`, and redraws the timeline immediately so audio bleed is reflected in real time.
-- **Per-track inspectors** — clicking a layer on any track opens a dedicated inspector card (Subtitle, Audio, Blur, Logo, Mask, Video) with controls tailored to the track. The subtitle inspector is a flat single panel (no tabs) with action buttons at top, shared original text, segment editor, and voice widgets below.
-- **TS1 track label mute** — clicking the TS1 label toggles dubbed audio mute (same as A1/A2). Hover cursor now uses `MUTE_PREFIXES` so the pointing hand shows on all clickable labels.
-- **Drag-to-position overlay regions** — Blur, Logo, and Mask regions share the same overlay UX: drag the middle to move, drag corner handles to resize, X to delete
-- **Logo / Watermark track (L1)** — add multiple images and place them independently on the video; pick colour / opacity / rotation from the inspector. The selected overlay stays in sync with its layer position.
-- **Mask track (M1)** — add multiple solid-colour rectangles to recolour regions (e.g. hide watermarks, redact faces). All mask regions remain visible in the editor; the selected region exposes drag handles. The colour is only applied while the video is playing to keep dragging smooth and avoid preview lag.
+- **Per-track inspectors** — clicking a layer opens a dedicated inspector card for Subtitle, Audio, Blur, Logo, Mask, Text, or Video.
+- **Drag-to-position overlay layers** — Blur, Logo, Mask, Text, and Subtitle layers can be positioned directly on the video preview when their timeline layer is selected.
+- **Timed overlay layers** — Blur, Logo, Mask, and Text layers support start/end times, edge dragging on the timeline, direct timing fields, and Split.
+- **TEXT track (T1)** — add multiple editable text layers with content, font family, subtitle-matched font-size presets, text color, optional background color, position, and timing. Text layers are included in Fast Preview and final export.
+- **Logo / Watermark track (L1)** — add multiple images and place them independently on the video; pick colour, opacity, rotation, and timing from the inspector.
+- **Mask track (M1)** — add multiple solid-colour rectangles to recolour regions (e.g. hide watermarks or redact faces). All mask regions remain visible in the editor; the selected region exposes drag handles and timing controls.
+- **Timeline layer visibility** — use the **Layers** menu to temporarily show or hide whole optional tracks in the timeline without affecting preview or export.
+- **Runtime logs** — Advanced → Logs shows app messages, console output, and error tracebacks. Export a log file for bug reports or clear the current session log.
 - **Blur inspector** — per-region blur radius (1-20), opacity, and pixelate (mosaic) toggle
 - **Vietnamese normalizer dictionary manager** (More → Normalizer Dictionary) — CRUD editor for custom acronym/non-Vietnamese word mappings
 - **GGUF translator improvements** — automatic enable when provider is local, absolute model paths, smarter CJK quality validation, increased token limit
@@ -58,7 +62,7 @@
    - **Ollama** — install [Ollama](https://ollama.com), run `ollama pull qwen2.5:7b`
    - **Microsoft Translator** — get [Azure key](https://portal.azure.com), paste it
    - **Google Translate** — free, no key (fallback quality)
-7. Save → Load video → click **Generate**
+7. Save → Load video → choose **Generate → Full Pipeline**, or run each stage from **Generate → Step-by-Step**
 
 If you use OCR mode, the OCR engine ships inside the `rapidocr` package and is used automatically when present.
 
@@ -93,21 +97,23 @@ Videos over 2 hours are blocked from opening. Use the **Split Video** button to 
 ## Editor UI
 
 ### Top Header
-- `Generate` — smart button: runs transcription + translation (if needed), then voice + preview
+- `Generate` — opens **Step-by-Step** and **Full Pipeline** generation choices
 - `Export` — final video/subtitle export
-- `More` — Subtitle download, Original script download, Exit (back to launcher), Clean project, Settings
+- `More` — subtitle download, Original script download, Exit (back to launcher), Clean project, Settings
 
 ### Left Panel
 - `Media` — video, audio, background music, output quality, aspect ratio, canvas (Fit/Fill), Reset Framing
-- `Language` — source/target language, Whisper model
+- `Language` — source/target language (Vietnamese or English output), Whisper model
 - `Voice` — engine (Fast Voice only, Piper + edge-tts), gender, speed, voice preview
 - `Style`
   - `Presets` — TikTok, YouTube, Short, Custom
   - `Text Position` — placement mode, placement, custom X/Y, vertical offset
-  - `Text Style` — font, font size, colors, background box, outline, bold, single-line subtitle
+  - `Text Style` — font, preset font scale (50–150%), colours, outline, bold, and animation
+  - `Background` — background box, colour, opacity, and padding
+  - `Single Line Subtitle` — enable word-based subtitle splitting and choose **Words per Segment** (default: 4)
   - `Animation & Timing` — animation, duration, text timing
 - `Filter` — video filters (blur, brightness, contrast, etc.)
-- `Advanced` — audio handling (Fast/Clean), ducking, timing sync
+- `Advanced` — audio handling, timing options, and **Logs** (Export Logs / Clear Logs)
 
 ### Center Preview
 - Video player with live subtitle overlay
@@ -116,6 +122,7 @@ Videos over 2 hours are blocked from opening. Use the **Split Video** button to 
   - `Blur` — add / show / hide a blur region (drag-to-place on the video)
   - `Logo` — add a Logo / Watermark image to the video
   - `Mask` — add a solid-colour mask region (see the M1 Mask track below)
+  - `Text` — add an editable text layer (see the T1 Text track below)
   - `OCR` button — show/hide OCR region in OCR mode
 - Speed and audio track selection
 
@@ -129,6 +136,7 @@ The inspector always stays expanded and swaps its card to match the track type y
 - **Default** (idx 4) — fallback card when no track layer is selected.
 - **Logo (L1)** (idx 5) — `Colour` (background swatch), `Opacity` (0-100%), `Rotation` (-180 to 180°). Drag the logo on the video to move; drag a corner to resize; X to delete.
 - **Mask (M1)** (idx 6) — `Colour` (background swatch), `Opacity` (0-100%). Drag the mask on the video to move; drag a corner to resize; X to delete. The colour is **only applied while the video is playing** — moving the mask does not trigger any mpv filter update, so dragging stays smooth. The overlay is locked (`set_editable(False)`) while playing so you cannot accidentally move a region during playback.
+- **Text (T1)** — edit text content, font family, font-size preset, text colour, optional background colour, and start/end timing. Text cannot be empty; it falls back to `Text`.
 
 Behavior notes:
 - By default, TTS reads the same text shown in the subtitle. A separate voice text is only used when you explicitly edit it in the inspector and regenerate voice.
@@ -138,15 +146,14 @@ Behavior notes:
 - Timeline track labels (left strip) are clickable: A1 / A2 / TS1 toggle mute, B1 toggles the blur effect, L1 toggles the logo, M1 toggles the mask.
 
 ### Timeline
-- Multi-lane: V1 Video, A1 Audio, TS1 Subtitle+Dub, B1 Blur, L1 Logo, M1 Mask
+- Multi-lane: V1 Video, A1 Audio, TS1 Subtitle+Dub, B1 Blur, L1 Logo, M1 Mask, T1 Text
 - **Hybrid TS1 track** — single lane replaces the old S1 + A2 two-track layout. Each segment is a `DubSubtitleLayer` holding both display text and TTS voice data. Audio-blending segments stack vertically into child rows (like B1 blur regions).
 - **Track label bar** (left strip) — fixed-width column with the track name + icon (▶ V1, ♪ A1, T TS1, ▣ B1, ■ M1, ⬖ L1, etc.) and mute / effect toggle on click. The label bar scrolls in sync with the timeline's vertical scroll. Toggle visibility via **Label mode** button.
-- Undo/Redo, Split, Delete, Nudge, Ripple controls
-- Zoom and Fit controls
+- Undo/Redo, Split, Delete, Nudge, Ripple, and **Layers** controls
 - **Voice timing sync** combo (Off / Smart / Timeline Priority / Force) — controls TTS timing adjustment strategy
 - Time display
-- Blur, Logo, and Mask layers are stacked vertically inside their tracks (one full-height row per region) so overlapping regions are all visible.
-- Mask layers span the full timeline duration (like the audio track) so the M1 row matches the video length.
+- Blur, Logo, Mask, and Text layers are stacked vertically inside their tracks so overlapping layers are all visible.
+- The Delete button removes the currently selected Blur, Logo, Mask, or Text layer.
 - **Row stacking** — DubSubtitleLayer bars that overlap in audio time (via `_audio_end`) are pushed down a row so both are visible. Overflow-row bars get a dashed border.
 
 ## Technical Stack
@@ -230,6 +237,7 @@ Per-card progress replaces the status pill during an Auto Download. Click **Refr
 | GPU Acceleration Pack (CUDA 12) | `bin/cuda12_fw/` | ✅ |
 | SenseVoice ASR Model | `models/sensevoice/` | ✅ |
 | Local Vietnamese Voices (Piper) | `models/piper/` | ✅ |
+| Local English Voices (Piper) | `models/piper-en/` | ✅ |
 
 - **AI Model** (Normal / High)
   - File: `models/ai/Hy-MT2-1.8B-Q4_K_M.gguf` (default) or `models/ai/gemma-4-E4B-it-Q4_K_M.gguf`
@@ -248,6 +256,9 @@ Per-card progress replaces the status pill during an Auto Download. Click **Refr
   - Folder: `models/piper/`
   - Manual: [`Hacht/CapCapResource/piper`](https://huggingface.co/Hacht/CapCapResource/tree/main/piper)
   - Drop each `.onnx` file together with its `.onnx.json` config.
+- **Local English Voices (Piper)**
+  - Folder: `models/piper-en/`
+  - Download through **Manage Resources** or install the supplied English Piper `.onnx` files with their `.onnx.json` configs.
 
 ## Run From Source
 
@@ -269,15 +280,15 @@ python app/remote_api_server.py
 
 ## Workflow
 
-1. Load a video and choose the source and target language.
-2. Select audio handling mode: **Fast** (full audio) or **Clean** (vocal separation + VAD + denoise).
-3. Click **Generate**.
-   - Subtitle/OCR preparation runs first
-   - AI translation runs next
-   - TTS cache prefetch can start during translation for voice modes
-4. Review subtitle styling, timing, and voice text in the editor.
-5. Fine-tune segments in the subtitle inspector and timeline.
-6. Preview the result, then export subtitles, dubbed audio, or the full video.
+1. Load a video. **Prepare** is marked complete once the video is ready.
+2. Choose the source and target language, then select audio handling.
+3. Open **Generate** and either:
+   - choose **Full Pipeline** to run Transcript → Translate → TTS, or
+   - choose **Step-by-Step** to run stages in order. Each next stage unlocks after the preceding stage completes.
+4. To translate manually, run to Transcript, export the subtitle file from **More**, translate it externally, then use **Generate → Step-by-Step → Import Translated File** and continue with TTS.
+5. Review subtitle styling, timing, voice text, and optional overlay layers in the editor.
+6. Use **Fast Preview** to render a five-second sample of the final subtitle, TEXT, and overlay output before exporting.
+7. Export the finished video.
 
 Performance notes:
 - Heavy preview assets such as exact-frame preview, waveform, and timeline thumbnails are intentionally deferred to keep long-video loading responsive.

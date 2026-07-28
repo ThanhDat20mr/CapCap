@@ -514,9 +514,10 @@ class MpvMediaPlayerBackend(QObject):
         # Hiding a selected MPV subtitle track is not sufficient here: its
         # renderer can remain visible briefly while the editable Qt subtitle
         # overlay is being positioned. Remove the track completely.
-        if self._sub_track_id >= 0:
+        track_id = self._sub_track_id
+        if isinstance(track_id, int) and track_id >= 0:
             try:
-                self._player.command("sub-remove", self._sub_track_id)
+                self._player.command("sub-remove", track_id)
             except Exception:
                 pass
         self._sub_track_id = -1

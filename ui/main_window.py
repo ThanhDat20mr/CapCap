@@ -93,8 +93,7 @@ from audio_mixer import mix_voice_with_background
 
 
 def _default_asr_engine() -> str:
-    cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
-    return "sensevoice" if cpu_mode else "whisper"
+    return "sensevoice"
 
 
 class _BootstrapMediaBackend:
@@ -609,7 +608,7 @@ class VideoTranslatorGUI(QMainWindow):
         self.current_project_state = None
         self.current_segment_models = []
         self.current_translated_segment_models = []
-        self.selected_whisper_model_name = "medium"
+        self.selected_whisper_model_name = "auto"
         self._last_audio_preview_path = ""
         self._segment_preview_threads = {}
         self._voice_sample_preview_thread = None
@@ -1477,8 +1476,13 @@ class VideoTranslatorGUI(QMainWindow):
         if button is None:
             return
         tracked = [d for d in getattr(self, "_tracked_progress_dialogs", []) if d is not None]
-        button.setVisible(bool(tracked))
-        button.setEnabled(bool(tracked))
+        try:
+            button.setVisible(bool(tracked))
+            button.setEnabled(bool(tracked))
+        except RuntimeError:
+            # Qt can destroy the toolbar button before a tracked progress
+            # dialog emits its destroyed signal during application shutdown.
+            pass
 
     def show_active_progress_dialog(self):
         dialogs = [d for d in getattr(self, "_tracked_progress_dialogs", []) if d is not None]
@@ -9840,6 +9844,29 @@ class VideoTranslatorGUI(QMainWindow):
         dlg.show()
 
     def get_whisper_model_name(self) -> str:
+        selected = str(getattr(self, "selected_whisper_model_name", "auto") or "auto").strip().lower()
+        is_gpu_mode = os.environ.get("CAPCAP_DEVICE", "cuda").strip().lower() == "cuda"
+        if not is_gpu_mode and selected == "medium":
+            selected = "auto"
+        if selected and selected != "auto":
+            return selected
+        model_root = os.path.join(self.workspace_root, "models", "faster_whisper")
+        preferred_models = ("medium", "small", "base", "tiny") if is_gpu_mode else ("small", "base", "tiny")
+        for candidate in preferred_models:
+            model_dir = os.path.join(model_root, candidate)
+            if os.path.isdir(model_dir) and any(
+                name.endswith(".bin") for name in os.listdir(model_dir)
+            ):
+                return candidate
+            snapshots_dir = os.path.join(
+                model_root,
+                f"models--Systran--faster-whisper-{candidate}",
+                "snapshots",
+            )
+            if os.path.isdir(snapshots_dir):
+                for snapshot_name in os.listdir(snapshots_dir):
+                    if os.path.isfile(os.path.join(snapshots_dir, snapshot_name, "model.bin")):
+                        return candidate
         return "medium"
 
     def get_whisper_model_path(self) -> str:
@@ -9918,9 +9945,8 @@ class VideoTranslatorGUI(QMainWindow):
         layout.addWidget(engine_title)
 
         engine_combo = QComboBox(dialog)
-        if not cpu_mode:
-            engine_combo.addItem("Audio (Whisper) - Quality", "whisper")
         engine_combo.addItem("Audio (SenseVoice) - Speed", "sensevoice")
+        engine_combo.addItem("Audio (Whisper) - Quality", "whisper")
         engine_combo.addItem("Video (OCR)", "ocr")
         current_engine = (os.getenv("TRANSCRIPTION_ENGINE") or _default_asr_engine()).strip().lower()
         idx = engine_combo.findData(current_engine)
@@ -9951,8 +9977,15 @@ class VideoTranslatorGUI(QMainWindow):
         layout.addWidget(whisper_title)
         
         whisper_combo = QComboBox(dialog)
-        whisper_combo.addItem("Medium (Accurate)", "medium")
-        whisper_combo.setCurrentIndex(0)
+        whisper_combo.addItem("Base", "base")
+        whisper_combo.addItem("Small (Fast)", "small")
+        if os.environ.get("CAPCAP_DEVICE", "cuda").strip().lower() == "cuda":
+            whisper_combo.addItem("Medium (Auto)", "medium")
+        current_whisper = str(getattr(self, "selected_whisper_model_name", "auto") or "auto").strip().lower()
+        if current_whisper == "auto":
+            current_whisper = self.get_whisper_model_name()
+        whisper_index = whisper_combo.findData(current_whisper)
+        whisper_combo.setCurrentIndex(whisper_index if whisper_index >= 0 else 0)
         whisper_combo.setVisible(is_whisper)
         layout.addWidget(whisper_combo)
 
@@ -10298,8 +10331,8 @@ class VideoTranslatorGUI(QMainWindow):
             return
 
         # Save Logic
-        new_whisper = str(whisper_combo.currentData() or "medium").strip().lower()
-        new_engine = str(engine_combo.currentData() or "whisper").strip().lower()
+        new_whisper = str(whisper_combo.currentData() or "small").strip().lower()
+        new_engine = str(engine_combo.currentData() or "sensevoice").strip().lower()
         new_ocr_region = str(region_combo.currentData() or "bottom").strip().lower()
         new_key = key_edit.text().strip()
         new_model = model_edit.text().strip()

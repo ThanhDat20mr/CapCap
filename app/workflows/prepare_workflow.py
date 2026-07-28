@@ -159,7 +159,11 @@ class PrepareWorkflow:
         sensevoice_model_dir = ""
         if is_sensevoice:
             sensevoice_model_dir = os.path.join(self.workspace_root, "models", "sensevoice")
-        whisper_model = os.path.join(self.workspace_root, "models", whisper_model_name) if not is_sensevoice else ""
+        # Faster-Whisper accepts a model name (for example ``base``) or a
+        # resolved local model directory. Do not prepend ``models/`` here:
+        # doing so turns a selected Base/Small model into an invalid path and
+        # makes the loader fall back to the legacy Medium alias.
+        whisper_model = str(whisper_model_name or "medium").strip() if not is_sensevoice else ""
         raw_segments = []
         segment_models = []
         streamed_translation_executor = None
@@ -347,6 +351,8 @@ class PrepareWorkflow:
 
             engine_name = "SenseVoice" if is_sensevoice else "Whisper"
             print(f"\n--- Step 2: Transcribing audio ({engine_name}) ---")
+            if not is_sensevoice:
+                print(f"[Whisper] Requested model: {whisper_model}")
             if step_callback: step_callback("transcription")
             transcribe_started = time.perf_counter()
             project_state.set_step_status("transcribe", "running")

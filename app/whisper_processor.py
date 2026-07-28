@@ -48,6 +48,23 @@ KNOWN_FASTER_WHISPER_MODELS = {
 }
 
 
+def _cached_model_snapshot(model_name: str) -> str | None:
+    """Return the newest complete Hugging Face cache snapshot for a model."""
+    snapshots_dir = Path(models_path(
+        "faster_whisper",
+        f"models--Systran--faster-whisper-{model_name}",
+        "snapshots",
+    ))
+    if not snapshots_dir.is_dir():
+        return None
+    snapshots = sorted(
+        (path for path in snapshots_dir.iterdir() if path.is_dir() and (path / "model.bin").is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return str(snapshots[0]) if snapshots else None
+
+
 def _resolve_model_name(model_path):
     if not model_path:
         local_default = models_path("faster_whisper", "base")
@@ -55,6 +72,9 @@ def _resolve_model_name(model_path):
 
     model_path = str(model_path).strip()
     if model_path in KNOWN_FASTER_WHISPER_MODELS:
+        cached_snapshot = _cached_model_snapshot(model_path)
+        if cached_snapshot:
+            return cached_snapshot
         local_dir = models_path("faster_whisper", model_path)
         if os.path.isdir(local_dir):
             return local_dir
@@ -69,6 +89,9 @@ def _resolve_model_name(model_path):
 
     stem = Path(model_path).stem
     if stem in KNOWN_FASTER_WHISPER_MODELS:
+        cached_snapshot = _cached_model_snapshot(stem)
+        if cached_snapshot:
+            return cached_snapshot
         local_dir = models_path("faster_whisper", stem)
         if os.path.isdir(local_dir):
             return local_dir
@@ -239,6 +262,7 @@ def _load_whisper_model(model_name):
         "device": runtime["device"],
         "compute_type": runtime["compute_type"],
     }
+    print(f"[Whisper] Model: {model_name}")
 
     original_name = str(model_name)
     if not os.path.isdir(str(model_name)):

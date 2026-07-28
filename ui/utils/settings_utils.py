@@ -25,7 +25,7 @@ def save_user_settings(gui):
             json.dumps(filter_state.get("modified", {}), ensure_ascii=True, sort_keys=True),
         )
     s.setValue("source_lang", gui.lang_whisper_combo.currentText())
-    s.setValue("whisper_model_name", gui.get_whisper_model_name())
+    s.setValue("whisper_model_name", getattr(gui, "selected_whisper_model_name", "auto"))
     s.setValue("final_output_folder", gui.final_output_folder_edit.text())
     s.setValue("audio_folder", gui.audio_folder_edit.text())
     s.setValue("srt_output_folder", gui.srt_output_folder_edit.text())
@@ -115,8 +115,13 @@ def load_user_settings(gui):
         gui.set_video_filter_state(filter_preset, filter_intensity, filter_overrides, filter_modified)
     source_lang = s.value("source_lang", gui.lang_whisper_combo.currentText())
     gui.selected_whisper_model_name = str(
-        s.value("whisper_model_name", getattr(gui, "selected_whisper_model_name", "medium")) or "medium"
+        s.value("whisper_model_name", getattr(gui, "selected_whisper_model_name", "auto")) or "auto"
     ).strip().lower()
+    # Older versions only offered Medium and persisted it as the implicit
+    # default. Migrate that legacy default to Auto once Small is available.
+    small_model_dir = os.path.join(gui.workspace_root, "models", "faster_whisper", "small")
+    if gui.selected_whisper_model_name == "medium" and os.path.isdir(small_model_dir):
+        gui.selected_whisper_model_name = "auto"
     source_index = gui.lang_whisper_combo.findText(source_lang)
     if source_index < 0:
         source_index = gui.lang_whisper_combo.findData(source_lang)
