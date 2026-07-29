@@ -131,6 +131,29 @@ class GUIProjectBridge:
         translation_json = state.artifacts.get("translation_final")
         if translation_json and os.path.exists(translation_json):
             translation_models = self.project_service.load_segment_artifact(state, "translation_final")
+            # Repair projects written before flat ``speaker`` metadata was
+            # retained during translation persistence.  Speaker identity is
+            # visualization/TTS metadata, so match the stable cue order from
+            # the transcript and save the repaired project artifact once.
+            repaired_speakers = False
+            for index, translation_model in enumerate(translation_models):
+                if index >= len(context["current_segment_models"]):
+                    break
+                if translation_model.metadata.get("speaker"):
+                    continue
+                source_speaker = str(
+                    context["current_segment_models"][index].metadata.get("speaker", "") or ""
+                ).strip()
+                if source_speaker:
+                    translation_model.metadata["speaker"] = source_speaker
+                    repaired_speakers = True
+            if repaired_speakers:
+                self.project_service.save_segment_artifact(
+                    state,
+                    "translation_final",
+                    os.path.join("translation", "translation_final.json"),
+                    translation_models,
+                )
             context["current_translated_segment_models"] = translation_models
             context["current_translated_segments"] = [segment.to_subtitle_dict() for segment in translation_models]
 

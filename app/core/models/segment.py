@@ -27,6 +27,12 @@ class Segment:
         final_text = str(data.get("final_text", data.get("text", "")) or "")
         tts_text = str(data.get("tts_text", "") or "")
         metadata = dict(data.get("metadata", {}) or {})
+        # Editor and diarization workflows use a flat ``speaker`` field,
+        # while persisted Segment artifacts keep supplemental data in
+        # metadata. Preserve it in both directions.
+        speaker = str(data.get("speaker", "") or "").strip()
+        if speaker and not metadata.get("speaker"):
+            metadata["speaker"] = speaker
         if "words" in data and "words" not in metadata:
             metadata["words"] = list(data.get("words") or [])
         if "manual_highlights" in data and "manual_highlights" not in metadata:

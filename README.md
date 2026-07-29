@@ -13,6 +13,7 @@
 - **GPU-accelerated** — plug in NVIDIA GPU, install driver only, get ~5x faster transcription
 - Vietnamese and English output, with automatic Piper voice selection for the chosen output language
 - Speech-to-text: `faster-whisper` (CPU/GPU), `SenseVoice` (CPU, multilingual), or `RapidOCR` (video subtitle)
+- **Offline speaker diarization** — optional Sherpa-ONNX speaker detection for Whisper and SenseVoice; no PyTorch dependency. Speaker turns are colour-coded on TS1 and retained with the project.
 - OCR subtitle region editor with separate show/hide control
 - AI translation — 5 providers:
   - **Local GGUF** (default, offline, CPU/GPU, `.gguf` model)
@@ -29,6 +30,7 @@
 - VAD + denoise + loudness normalization for cleaner transcription
 - Guided pipeline: **Prepare → Transcript → Translate → TTS → Export**, with completion badges
 - Generate menu for a guided **Step-by-Step** workflow or the **Full Pipeline**
+- Optional TTS — after translation, choose **TTS** or **Skip** and export translated subtitles with the original audio when no voice-over is needed
 - Timeline editing, subtitle styling, video filters, and timed overlay layers
 - Translation-to-TTS cache prefetch to reduce voice generation wait time
 - Subtitle + voice export with FFmpeg
@@ -102,13 +104,13 @@ Videos over 2 hours are blocked from opening. Use the **Split Video** button to 
 - `More` — subtitle download, Original script download, Exit (back to launcher), Clean project, Settings
 
 ### Left Panel
-- `Media` — video, audio, background music, output quality, aspect ratio, canvas (Fit/Fill), Reset Framing
+- `Media` — video, audio, background music, output quality, aspect ratio, canvas (Fit/Fill), Reset Framing, and optional **Speaker Diarization** for audio-based transcription. It is unavailable in OCR mode and is off by default; choose Auto or a fixed expected speaker count.
 - `Language` — source/target language (Vietnamese or English output), Whisper model
-- `Voice` — engine (Fast Voice only, Piper + edge-tts), gender, speed, voice preview
+- `Voice` — engine (Fast Voice only, Piper + edge-tts), gender, speed, voice preview, and **Detected Speakers** after diarization. Each detected speaker shows its timeline colour and segment count, can use a dedicated voice, and can be bulk-reassigned to another detected speaker. Speakers without an override use the global default voice.
 - `Style`
   - `Presets` — TikTok, YouTube, Short, Custom
   - `Text Position` — placement mode, placement, custom X/Y, vertical offset
-  - `Text Style` — font, preset font scale (50–150%), colours, outline, bold, and animation
+  - `Text Style` — font, preset font scale (50–150%), colours, outline, bold, animation, and optional **Use speaker colors** to match subtitle text to speaker colours on TS1
   - `Background` — background box, colour, opacity, and padding
   - `Single Line Subtitle` — enable word-based subtitle splitting and choose **Words per Segment** (default: 4)
   - `Animation & Timing` — animation, duration, text timing
@@ -129,7 +131,7 @@ Videos over 2 hours are blocked from opening. Use the **Split Video** button to 
 ### Track Inspector (Right Panel)
 The inspector always stays expanded and swaps its card to match the track type you click. Each card is wrapped in a scroll view so tall content doesn't clip.
 
-- **Subtitle / Dub** (flat single panel, no tabs) — `Rewrite`, `Rewrite Selected`, `Import SRT`, `Regenerate Voice` (top action row), shared `Original text` label, segment timing chips, segment editor (180px height).
+- **Subtitle / Dub** (flat single panel, no tabs) — `Rewrite`, `Rewrite Selected`, `Import SRT`, `Regenerate Voice` (top action row), shared `Original text` label, segment timing chips, segment editor (180px height), and a **Speaker** selector for correcting an individual diarization assignment.
 - **Audio** (idx 1) — per-track volume (0-200%), gain in dB, speed, fade-in / fade-out, mute / solo, A1 vs A2 (Dub) selection.
 - **Blur** (idx 2) — B1 Blur track on/off toggle + per-region controls: `Blur radius` (1-20), `Opacity` (0-100%), `Pixelate` (mosaic) + `Pixel size` (2-60). Multiple regions stack vertically in the timeline so overlapping blurs stay visible.
 - **Video** (idx 3) — V1 Video track filter. Preset + intensity sliders, plus per-channel adjust sliders (brightness, contrast, saturation, temperature, gamma, hue), Apply / Revert.
@@ -155,6 +157,7 @@ Behavior notes:
 - Blur, Logo, Mask, and Text layers are stacked vertically inside their tracks so overlapping layers are all visible.
 - The Delete button removes the currently selected Blur, Logo, Mask, or Text layer.
 - **Row stacking** — DubSubtitleLayer bars that overlap in audio time (via `_audio_end`) are pushed down a row so both are visible. Overflow-row bars get a dashed border.
+- **Speaker colours** — when diarization is enabled, TS1 segments are colour-coded by detected speaker. Selecting a speaker in the Voice panel highlights that speaker's segments for review.
 
 ## Technical Stack
 
@@ -164,6 +167,7 @@ Behavior notes:
 | Video preview | libmpv / Qt Multimedia |
 | Workers | QThread |
 | Speech-to-text | faster-whisper (CTranslate2, CUDA/CPU), SenseVoice (sherpa-onnx, CPU) |
+| Speaker diarization | Sherpa-ONNX (offline ONNX Runtime) |
 | OCR subtitle extraction | RapidOCR (PP-OCRv4) via opencv-python-headless |
 | Voice activity detection | Silero VAD (sherpa-onnx) |
 | Vocal separation | ONNX Runtime + UVR MDX-NET model, Demucs (Hybrid Transformer, optional) |
@@ -238,6 +242,7 @@ Per-card progress replaces the status pill during an Auto Download. Click **Refr
 | SenseVoice ASR Model | `models/sensevoice/` | ✅ |
 | Local Vietnamese Voices (Piper) | `models/piper/` | ✅ |
 | Local English Voices (Piper) | `models/piper-en/` | ✅ |
+| Speaker Diarization | `models/pyannote/` | manual model files |
 
 - **AI Model** (Normal / High)
   - File: `models/ai/Hy-MT2-1.8B-Q4_K_M.gguf` (default) or `models/ai/gemma-4-E4B-it-Q4_K_M.gguf`
@@ -259,6 +264,9 @@ Per-card progress replaces the status pill during an Auto Download. Click **Refr
 - **Local English Voices (Piper)**
   - Folder: `models/piper-en/`
   - Download through **Manage Resources** or install the supplied English Piper `.onnx` files with their `.onnx.json` configs.
+- **Speaker Diarization (optional)**
+  - Folder: `models/pyannote/`
+  - Requires the supplied Sherpa-ONNX segmentation and speaker-embedding `.onnx` models. It runs locally through ONNX Runtime and is used only when **Speaker Diarization** is enabled for Whisper or SenseVoice.
 
 ## Run From Source
 
@@ -282,13 +290,14 @@ python app/remote_api_server.py
 
 1. Load a video. **Prepare** is marked complete once the video is ready.
 2. Choose the source and target language, then select audio handling.
-3. Open **Generate** and either:
+3. If wanted, enable **Speaker Diarization** in Media before transcribing. It runs alongside GPU Whisper where possible, then assigns speaker labels to subtitle segments.
+4. Open **Generate** and either:
    - choose **Full Pipeline** to run Transcript → Translate → TTS, or
    - choose **Step-by-Step** to run stages in order. Each next stage unlocks after the preceding stage completes.
-4. To translate manually, run to Transcript, export the subtitle file from **More**, translate it externally, then use **Generate → Step-by-Step → Import Translated File** and continue with TTS.
-5. Review subtitle styling, timing, voice text, and optional overlay layers in the editor.
-6. Use **Fast Preview** to render a five-second sample of the final subtitle, TEXT, and overlay output before exporting.
-7. Export the finished video.
+5. To translate manually, run to Transcript, export the subtitle file from **More**, translate it externally, then use **Generate → Step-by-Step → Import Translated File**. At the final stage, select **TTS** to generate voices or **Skip** to export subtitles with the original audio.
+6. Review speaker assignments, styling, timing, voice text, and optional overlay layers in the editor. Use the Subtitle Inspector for individual speaker corrections or Voice → Detected Speakers for bulk reassignment.
+7. Use **Fast Preview** to render a five-second sample of the final subtitle, TEXT, and overlay output before exporting.
+8. Export the finished video.
 
 Performance notes:
 - Heavy preview assets such as exact-frame preview, waveform, and timeline thumbnails are intentionally deferred to keep long-video loading responsive.
