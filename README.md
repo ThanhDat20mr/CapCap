@@ -447,6 +447,8 @@ Apache License 2.0. See [LICENSE](./LICENSE).
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — Speech-to-text (CTranslate2)
 - [SenseVoice](https://github.com/FunAudioLLM/SenseVoice) — Multilingual ASR model
 - [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — ONNX ASR runtime (SenseVoice, Silero VAD)
+- [Sherpa-ONNX Speaker Diarization](https://k2-fsa.github.io/sherpa/onnx/speaker-diarization/index.html) — Offline ONNX speaker diarization
+- [Sherpa-ONNX Diarization Models](https://k2-fsa.github.io/sherpa/onnx/speaker-diarization/models.html) — Segmentation and speaker-embedding model reference
 - [Silero VAD](https://github.com/snakers4/silero-vad) — Voice activity detection
 - [RapidOCR](https://github.com/RapidAI/RapidOCR) — OCR subtitle extraction (PP-OCRv4)
 - [UVR MDX-NET](https://github.com/TRvlvr/model_repo) — Vocal separation model
