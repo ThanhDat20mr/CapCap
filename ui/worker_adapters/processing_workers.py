@@ -437,6 +437,8 @@ class PrepareWorkflowWorker(QThread):
         translator_style,
         whisper_model_name,
         transcription_engine="whisper",
+        speaker_diarization=False,
+        speaker_diarization_num_speakers=-1,
         skip_translation=False,
         prefetch_voice_name="",
         prefetch_voice_speed=1.0,
@@ -456,6 +458,8 @@ class PrepareWorkflowWorker(QThread):
         self.translator_style = translator_style
         self.whisper_model_name = whisper_model_name
         self.transcription_engine = transcription_engine
+        self.speaker_diarization = bool(speaker_diarization)
+        self.speaker_diarization_num_speakers = int(speaker_diarization_num_speakers or -1)
         self.skip_translation = skip_translation
         self.prefetch_voice_name = prefetch_voice_name
         self.prefetch_voice_speed = float(prefetch_voice_speed or 1.0)
@@ -489,6 +493,8 @@ class PrepareWorkflowWorker(QThread):
                             "translator_style": self.translator_style,
                             "whisper_model_name": self.whisper_model_name,
                             "transcription_engine": self.transcription_engine,
+                            "speaker_diarization": self.speaker_diarization,
+                            "speaker_diarization_num_speakers": self.speaker_diarization_num_speakers,
                             "skip_translation": self.skip_translation,
                             "prefetch_voice_name": self.prefetch_voice_name,
                             "prefetch_voice_speed": self.prefetch_voice_speed,
@@ -520,6 +526,8 @@ class PrepareWorkflowWorker(QThread):
                     translator_style=self.translator_style,
                     whisper_model_name=self.whisper_model_name,
                     transcription_engine=self.transcription_engine,
+                    speaker_diarization=self.speaker_diarization,
+                    speaker_diarization_num_speakers=self.speaker_diarization_num_speakers,
                     skip_translation=self.skip_translation,
                     prefetch_voice_name=self.prefetch_voice_name,
                     prefetch_voice_speed=self.prefetch_voice_speed,

@@ -1,5 +1,6 @@
 import os
 import concurrent.futures
+import hashlib
 import subprocess
 import time
 
@@ -133,6 +134,53 @@ class PrepareWorkflow:
         provider = str(os.getenv("OPENAI_PROVIDER") or "local").strip().lower()
         return provider == "openai"
 
+    @staticmethod
+    def _speaker_diarization_signature(audio_path: str, diarization_key: str = "") -> str:
+        try:
+            stat = os.stat(audio_path)
+            source = f"{os.path.abspath(audio_path)}|{stat.st_size}|{stat.st_mtime_ns}|{diarization_key}"
+        except OSError:
+            source = f"{os.path.abspath(audio_path)}|{diarization_key}"
+        return hashlib.sha1(source.encode("utf-8", errors="replace")).hexdigest()
+
+    @staticmethod
+    def _should_run_diarization_parallel(*, is_sensevoice: bool) -> bool:
+        """Only overlap CPU diarization with ASR that does not consume CPU."""
+        if is_sensevoice:
+            return False
+        if is_remote_profile():
+            return True
+        return str(os.getenv("CAPCAP_DEVICE", "") or "").strip().lower() == "cuda"
+
+    @staticmethod
+    def _apply_speaker_labels(segments: list[dict], speaker_turns: list[dict]) -> list[dict]:
+        """Assign each transcript cue to the speaker with the most overlap."""
+        if not speaker_turns:
+            return [dict(segment) for segment in (segments or [])]
+        labeled = []
+        for segment in segments or []:
+            item = dict(segment)
+            try:
+                start = float(item.get("start", 0.0))
+                end = max(start, float(item.get("end", start)))
+            except (TypeError, ValueError):
+                labeled.append(item)
+                continue
+            best_speaker = ""
+            best_overlap = 0.0
+            for turn in speaker_turns:
+                try:
+                    overlap = max(0.0, min(end, float(turn.get("end", 0.0))) - max(start, float(turn.get("start", 0.0))))
+                except (TypeError, ValueError):
+                    continue
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_speaker = str(turn.get("speaker", "") or "").strip()
+            if best_speaker:
+                item["speaker"] = best_speaker
+            labeled.append(item)
+        return labeled
+
     def run(
         self,
         video_path: str,
@@ -146,6 +194,8 @@ class PrepareWorkflow:
         translator_style: str = "",
         whisper_model_name: str = "ggml-medium.bin",
         transcription_engine: str = "whisper",
+        speaker_diarization: bool = False,
+        speaker_diarization_num_speakers: int = -1,
         skip_translation: bool = False,
         prefetch_voice_name: str = "",
         prefetch_voice_speed: float = 1.0,
@@ -155,6 +205,13 @@ class PrepareWorkflow:
         if step_callback: step_callback("prepare")
         workflow_started = time.perf_counter()
         is_ocr = transcription_engine == "ocr"
+        speaker_diarization = bool(speaker_diarization and not is_ocr)
+        try:
+            speaker_diarization_num_speakers = int(speaker_diarization_num_speakers)
+        except (TypeError, ValueError):
+            speaker_diarization_num_speakers = -1
+        if speaker_diarization_num_speakers < 2:
+            speaker_diarization_num_speakers = -1
         is_sensevoice = transcription_engine == "sensevoice"
         sensevoice_model_dir = ""
         if is_sensevoice:
@@ -183,6 +240,8 @@ class PrepareWorkflow:
             project_state.set_setting("whisper_model", whisper_model)
         project_state.set_setting("audio_handling_mode", audio_handling_mode)
         project_state.set_setting("transcription_engine", transcription_engine)
+        project_state.set_setting("speaker_diarization_enabled", speaker_diarization)
+        project_state.set_setting("speaker_diarization_num_speakers", speaker_diarization_num_speakers)
         self.project_service.save_project(project_state)
 
         if is_ocr:
@@ -370,6 +429,91 @@ class PrepareWorkflow:
                 project_state.set_step_status("separate_audio", "skipped")
                 self.project_service.save_project(project_state)
 
+            speaker_turns: list[dict] = []
+            diarization_future = None
+            diarization_executor = None
+            diarization_signature = ""
+            diarization_started = 0.0
+            if speaker_diarization:
+                print("\n--- Step 1.75: Detecting speakers (Sherpa-ONNX) ---")
+                if step_callback:
+                    step_callback("diarization")
+                project_state.set_step_status("diarize", "running")
+                self.project_service.save_project(project_state)
+                from services import SpeakerDiarizationService
+                diarization_signature = self._speaker_diarization_signature(
+                    audio_output_path,
+                    SpeakerDiarizationService.cache_key(
+                        num_speakers=speaker_diarization_num_speakers
+                    ),
+                )
+                cached_signature = str(project_state.settings.get("speaker_diarization_signature", "") or "")
+                cached_turns_path = project_state.artifacts.get("speaker_diarization", "")
+                if (
+                    cached_signature == diarization_signature
+                    and cached_turns_path
+                    and os.path.exists(cached_turns_path)
+                ):
+                    speaker_turns = self.project_service.load_json_artifact(
+                        project_state, "speaker_diarization", default=[]
+                    ) or []
+                    print(f"[Diarization] Reusing cached speaker turns: {len(speaker_turns)}")
+                    project_state.set_step_status("diarize", "done")
+                    self.project_service.save_project(project_state)
+                else:
+                    diarization_started = time.perf_counter()
+                    # GPU Whisper and remote ASR do not compete for the CPU
+                    # used by Sherpa diarization.  Keep CPU Whisper and
+                    # SenseVoice sequential so they remain responsive.
+                    use_parallel_diarization = self._should_run_diarization_parallel(
+                        is_sensevoice=is_sensevoice
+                    )
+                    if use_parallel_diarization:
+                        execution_mode = "remote ASR" if is_remote_profile() else "GPU Whisper"
+                        cluster_label = (
+                            f"fixed at {speaker_diarization_num_speakers} speaker(s)"
+                            if speaker_diarization_num_speakers >= 2 else "auto clustering"
+                        )
+                        print(f"[Diarization] Running in parallel with {execution_mode} ({cluster_label}).")
+                        diarization_executor = concurrent.futures.ThreadPoolExecutor(
+                            max_workers=1,
+                            thread_name_prefix="speaker-diarization",
+                        )
+                        diarization_future = diarization_executor.submit(
+                            SpeakerDiarizationService().diarize,
+                            audio_output_path,
+                            num_speakers=speaker_diarization_num_speakers,
+                        )
+                    else:
+                        cluster_label = (
+                            f"fixed at {speaker_diarization_num_speakers} speaker(s)"
+                            if speaker_diarization_num_speakers >= 2 else "auto clustering"
+                        )
+                        print(
+                            "[Diarization] Running sequentially to avoid CPU contention with ASR "
+                            f"({cluster_label})."
+                        )
+                        speaker_turns = SpeakerDiarizationService().diarize(
+                            audio_output_path,
+                            num_speakers=speaker_diarization_num_speakers,
+                        )
+                        self.project_service.save_json_artifact(
+                            project_state,
+                            "speaker_diarization",
+                            os.path.join("analysis", "speaker_diarization.json"),
+                            speaker_turns,
+                        )
+                        project_state.set_setting("speaker_diarization_signature", diarization_signature)
+                        print(
+                            f"[Diarization] Detected {len(speaker_turns)} speaker turn(s) "
+                            f"in {time.perf_counter() - diarization_started:.2f}s"
+                        )
+                        project_state.set_step_status("diarize", "done")
+                        self.project_service.save_project(project_state)
+            else:
+                project_state.set_step_status("diarize", "skipped")
+                self.project_service.save_project(project_state)
+
             engine_name = "SenseVoice" if is_sensevoice else "Whisper"
             print(f"\n--- Step 2: Transcribing audio ({engine_name}) ---")
             if not is_sensevoice:
@@ -517,6 +661,44 @@ class PrepareWorkflow:
                     raise RuntimeError("Transcription failed.")
                 segment_models = self.segment_service.transcript_dicts_to_models(raw_segments)
                 project_state.set_setting("transcription_signature", transcription_signature)
+            if diarization_future is not None:
+                try:
+                    print("[Diarization] Waiting for parallel speaker detection to finish...")
+                    speaker_turns = diarization_future.result()
+                    self.project_service.save_json_artifact(
+                        project_state,
+                        "speaker_diarization",
+                        os.path.join("analysis", "speaker_diarization.json"),
+                        speaker_turns,
+                    )
+                    project_state.set_setting("speaker_diarization_signature", diarization_signature)
+                    print(
+                        f"[Diarization] Detected {len(speaker_turns)} speaker turn(s) "
+                        f"in {time.perf_counter() - diarization_started:.2f}s (parallel)"
+                    )
+                    project_state.set_step_status("diarize", "done")
+                    self.project_service.save_project(project_state)
+                except Exception:
+                    project_state.set_step_status("diarize", "failed")
+                    self.project_service.save_project(project_state)
+                    raise
+                finally:
+                    diarization_executor.shutdown(wait=True)
+            if speaker_turns:
+                raw_segments = self._apply_speaker_labels(raw_segments, speaker_turns)
+                segment_models = self.segment_service.transcript_dicts_to_models(raw_segments)
+                labeled_count = sum(
+                    1 for segment in raw_segments if str(segment.get("speaker", "") or "").strip()
+                )
+                speaker_count = len({
+                    str(segment.get("speaker", "") or "").strip()
+                    for segment in raw_segments
+                    if str(segment.get("speaker", "") or "").strip()
+                })
+                print(
+                    f"[Diarization] Applied speaker labels to {labeled_count}/{len(raw_segments)} "
+                    f"transcript segment(s) across {speaker_count} detected speaker(s)."
+                )
             transcribe_elapsed = time.perf_counter() - transcribe_started
             print(f"Success: Generated {len(segment_models)} segments.")
             print(f"[Timing] Transcribe step: {transcribe_elapsed:.2f}s")
@@ -590,10 +772,6 @@ class PrepareWorkflow:
                 def _prefetch_batch(start_idx: int, batch_segments: list[dict]) -> None:
                     if not batch_segments:
                         return
-                    print(
-                        "[Prepare Workflow] Queue TTS cache prefetch: "
-                        f"start={start_idx}, count={len(batch_segments)}"
-                    )
                     future = tts_prefetch_executor.submit(
                         voice_prefetch.prime_tts_cache,
                         segments=list(batch_segments),
@@ -601,6 +779,7 @@ class PrepareWorkflow:
                         voice_name=prefetch_voice_name,
                         voice_speed=float(prefetch_voice_speed or 1.0),
                         index_offset=int(start_idx),
+                        quiet=True,
                     )
                     tts_prefetch_futures.append(future)
 
@@ -653,6 +832,15 @@ class PrepareWorkflow:
                 if cached_translation_signature == translation_signature and cached_translation_path and os.path.exists(cached_translation_path):
                     cached_models = self.project_service.load_segment_artifact(project_state, "translation_final")
                     if cached_models:
+                        # A cached translation can predate diarization. Keep
+                        # speaker metadata from the freshly labeled transcript
+                        # so TS1 remains a visualization-only speaker map.
+                        for index, cached_model in enumerate(cached_models):
+                            if index >= len(segment_models):
+                                break
+                            speaker = str(segment_models[index].metadata.get("speaker", "") or "").strip()
+                            if speaker:
+                                cached_model.metadata["speaker"] = speaker
                         segment_models = cached_models
                         print("[Prepare Workflow] Reusing cached Vietnamese subtitles. Generate did not call AI again.")
                     else:

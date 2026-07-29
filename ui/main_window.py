@@ -1330,6 +1330,7 @@ class VideoTranslatorGUI(QMainWindow):
             self._voice_signals_bound = True
         self.on_voice_tier_changed()
         self._update_voice_preview_meta()
+        self.refresh_detected_speakers_section()
 
     def on_voice_gender_changed(self):
         self.refresh_voice_catalog_combos()
@@ -1395,6 +1396,276 @@ class VideoTranslatorGUI(QMainWindow):
 
     def get_active_voice_name(self) -> str:
         return self._resolve_active_voice_name(persist_new_clone=False)
+
+    @staticmethod
+    def _speaker_sort_key(speaker: str) -> tuple[int, str]:
+        value = str(speaker or "").strip()
+        try:
+            return (int(value.rsplit("_", 1)[-1]), value)
+        except (TypeError, ValueError):
+            return (9999, value)
+
+    @staticmethod
+    def _speaker_color_hex(speaker: str) -> str:
+        value = str(speaker or "").strip()
+        try:
+            index = int(value.rsplit("_", 1)[-1])
+        except (TypeError, ValueError):
+            index = sum(ord(char) for char in value)
+        return QColor.fromHsv((index * 137 + 20) % 360, 155, 205).name()
+
+    def _uses_speaker_subtitle_colors(self) -> bool:
+        checkbox = getattr(self, "subtitle_speaker_colors_cb", None)
+        return bool(checkbox and checkbox.isChecked())
+
+    def _subtitle_color_for_segment(self, segment: dict | None) -> QColor:
+        speaker = str((segment or {}).get("speaker", "") or "").strip()
+        if self._uses_speaker_subtitle_colors() and speaker:
+            return QColor(self._speaker_color_hex(speaker))
+        return QColor(self.subtitle_color_hex)
+
+    def _apply_live_subtitle_segment_color(self, segment: dict | None) -> None:
+        item = getattr(getattr(self, "video_view", None), "subtitle_item", None)
+        if item is None:
+            return
+        color = self._subtitle_color_for_segment(segment)
+        if color != getattr(item, "font_color", None):
+            item.font_color = color
+            item.update()
+
+    def _refresh_speaker_subtitle_colors_if_needed(self) -> None:
+        """Rebuild the ASS preview only when speaker IDs affect its colors."""
+        if self._uses_speaker_subtitle_colors():
+            self.update_subtitle_preview_style()
+
+    def _detected_speaker_ids(self) -> list[str]:
+        segments = list(
+            getattr(self, "current_translated_segments", None)
+            or getattr(self, "current_segments", None)
+            or []
+        )
+        return sorted(
+            {
+                str(segment.get("speaker", "") or "").strip()
+                for segment in segments
+                if str(segment.get("speaker", "") or "").strip()
+            },
+            key=self._speaker_sort_key,
+        )
+
+    @staticmethod
+    def _speaker_display_name(speaker: str, position: int) -> str:
+        """Use stable automatic labels; diarization IDs remain internal."""
+        if 0 <= position < 26:
+            return f"Speaker {chr(ord('A') + position)}"
+        return f"Speaker {position + 1}"
+
+    def _speaker_voice_assignments(self) -> dict:
+        state = getattr(self, "current_project_state", None)
+        raw = state.settings.get("speaker_voice_assignments", {}) if state is not None else {}
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _save_speaker_voice_assignment(self, speaker: str, *, name: str | None = None, voice: str | None = None) -> None:
+        state = getattr(self, "current_project_state", None)
+        speaker = str(speaker or "").strip()
+        if state is None or not speaker:
+            return
+        assignments = self._speaker_voice_assignments()
+        entry = dict(assignments.get(speaker, {}) or {})
+        if name is not None:
+            entry["name"] = str(name or "").strip()
+        if voice is not None:
+            entry["voice"] = str(voice or "").strip()
+        assignments[speaker] = entry
+        state.set_setting("speaker_voice_assignments", assignments)
+        self.project_service.save_project(state)
+        self._voiceover_force_refresh = True
+
+    def _voice_display_entries(self) -> list[tuple[str, str]]:
+        combo = getattr(self, "free_voice_combo", None)
+        if combo is None:
+            return []
+        entries = []
+        for index in range(combo.count()):
+            entries.append((str(combo.itemText(index) or ""), str(combo.itemData(index) or "")))
+        return [(label, value) for label, value in entries if value]
+
+    def refresh_detected_speakers_section(self) -> None:
+        card = getattr(self, "detected_speakers_card", None)
+        layout = getattr(self, "detected_speakers_list_layout", None)
+        if card is None or layout is None:
+            return
+        # Voice catalog initialization happens during UI construction, before
+        # a project (and therefore the segment lists) necessarily exists.
+        segments = list(
+            getattr(self, "current_translated_segments", None)
+            or getattr(self, "current_segments", None)
+            or []
+        )
+        speakers = self._detected_speaker_ids()
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        card.setVisible(bool(speakers))
+        if not speakers:
+            if hasattr(self, "timeline"):
+                self.timeline.set_highlighted_speaker("")
+            return
+        assignments = self._speaker_voice_assignments()
+        voice_entries = self._voice_display_entries()
+        for position, speaker in enumerate(speakers):
+            entry = dict(assignments.get(speaker, {}) or {})
+            display_name = self._speaker_display_name(speaker, position)
+            segment_count = sum(
+                1 for segment in segments
+                if str(segment.get("speaker", "") or "").strip() == speaker
+            )
+            row = QFrame()
+            row.setObjectName("statusCard")
+            row_layout = QVBoxLayout(row)
+            row_layout.setContentsMargins(9, 8, 9, 8)
+            row_layout.setSpacing(6)
+            header = QHBoxLayout()
+            indicator = QLabel()
+            indicator.setFixedSize(12, 12)
+            indicator.setStyleSheet(
+                f"background: {self._speaker_color_hex(speaker)}; border-radius: 6px; border: 1px solid #dcecff;"
+            )
+            header.addWidget(indicator)
+            speaker_label = QLabel(f"{display_name}  ·  {segment_count} segment{'s' if segment_count != 1 else ''}")
+            speaker_label.setToolTip(f"Timeline ID: {speaker}")
+            header.addWidget(speaker_label, 1)
+            row_layout.addLayout(header)
+            row_layout.addWidget(QLabel("Voice"))
+            voice_combo = QComboBox()
+            voice_combo.addItem("Use default voice", "")
+            for label, value in voice_entries:
+                voice_combo.addItem(label, value)
+            assigned_voice = str(entry.get("voice", "") or "")
+            voice_index = voice_combo.findData(assigned_voice)
+            voice_combo.setCurrentIndex(voice_index if voice_index >= 0 else 0)
+            row_layout.addWidget(voice_combo)
+            voice_combo.currentIndexChanged.connect(
+                lambda _index, sp=speaker, combo=voice_combo: self._save_speaker_voice_assignment(
+                    sp, voice=str(combo.currentData() or "")
+                )
+            )
+            voice_combo.activated.connect(
+                lambda _index, sp=speaker: self.highlight_timeline_speaker(sp)
+            )
+            reassign_row = QHBoxLayout()
+            reassign_row.setContentsMargins(0, 0, 0, 0)
+            reassign_row.setSpacing(6)
+            reassign_row.addWidget(QLabel("Move all to"))
+            reassign_combo = QComboBox()
+            for target_position, target_speaker in enumerate(speakers):
+                if target_speaker != speaker:
+                    reassign_combo.addItem(
+                        self._speaker_display_name(target_speaker, target_position),
+                        target_speaker,
+                    )
+            reassign_button = QPushButton("Apply")
+            reassign_button.setToolTip(
+                f"Reassign every {display_name} subtitle segment to the selected speaker."
+            )
+            has_target = reassign_combo.count() > 0
+            reassign_combo.setEnabled(has_target)
+            reassign_button.setEnabled(has_target)
+            reassign_button.clicked.connect(
+                lambda _checked=False, source=speaker, combo=reassign_combo: self.reassign_all_speaker_segments(
+                    source, str(combo.currentData() or "")
+                )
+            )
+            reassign_row.addWidget(reassign_combo, 1)
+            reassign_row.addWidget(reassign_button)
+            row_layout.addLayout(reassign_row)
+            row.mousePressEvent = lambda event, sp=speaker, original=row.mousePressEvent: (
+                self.highlight_timeline_speaker(sp), original(event)
+            )[-1]
+            layout.addWidget(row)
+        layout.addStretch()
+
+    def highlight_timeline_speaker(self, speaker: str) -> None:
+        if hasattr(self, "timeline"):
+            self.timeline.set_highlighted_speaker(speaker)
+
+    def _apply_speaker_voice_assignments(self, segments: list[dict]) -> list[dict]:
+        assignments = self._speaker_voice_assignments()
+        if not assignments:
+            return [dict(segment) for segment in segments or []]
+        resolved = []
+        for segment in segments or []:
+            item = dict(segment)
+            speaker = str(item.get("speaker", "") or "").strip()
+            voice = str((assignments.get(speaker, {}) or {}).get("voice", "") or "").strip()
+            if voice:
+                item["voice_name"] = voice
+            resolved.append(item)
+        return resolved
+
+    def on_segment_speaker_changed(self, index: int, speaker: str) -> None:
+        """Apply a manual diarization correction without rerunning analysis."""
+        if getattr(self, "_syncing_segment_editor", False):
+            return
+        speaker = str(speaker or "").strip()
+        updated = False
+        for segments_list in (
+            getattr(self, "current_segments", None),
+            getattr(self, "current_translated_segments", None),
+        ):
+            if segments_list and 0 <= index < len(segments_list):
+                if speaker:
+                    segments_list[index]["speaker"] = speaker
+                else:
+                    segments_list[index].pop("speaker", None)
+                updated = True
+        if not updated:
+            return
+        self._sync_segment_models_from_current_segments()
+        self._voiceover_force_refresh = True
+        # Speaker identity changes the TS1 color and future voice selection,
+        # not subtitle text, timing, or visual style.  Avoid the full
+        # apply_segments_to_timeline() path here because it refreshes the
+        # live subtitle preview assets and rewrites its SRT unnecessarily.
+        if hasattr(self, "timeline"):
+            self.timeline.set_segments(self.get_active_segments())
+            self.timeline.set_active_segment_index(index)
+        self._refresh_speaker_subtitle_colors_if_needed()
+        self.refresh_detected_speakers_section()
+        self.persist_current_timeline_project_data()
+
+    def reassign_all_speaker_segments(self, source_speaker: str, target_speaker: str) -> None:
+        """Move every cue from one diarized speaker to another."""
+        source_speaker = str(source_speaker or "").strip()
+        target_speaker = str(target_speaker or "").strip()
+        if not source_speaker or not target_speaker or source_speaker == target_speaker:
+            return
+        changed_indexes: set[int] = set()
+        for segments_list in (
+            getattr(self, "current_segments", None),
+            getattr(self, "current_translated_segments", None),
+        ):
+            if not segments_list:
+                continue
+            for index, segment in enumerate(segments_list):
+                if str(segment.get("speaker", "") or "").strip() == source_speaker:
+                    segment["speaker"] = target_speaker
+                    changed_indexes.add(index)
+        if not changed_indexes:
+            return
+        self._sync_segment_models_from_current_segments()
+        self._voiceover_force_refresh = True
+        if hasattr(self, "timeline"):
+            self.timeline.set_segments(self.get_active_segments())
+            self.timeline.set_highlighted_speaker(target_speaker)
+        self._refresh_speaker_subtitle_colors_if_needed()
+        self.refresh_detected_speakers_section()
+        self.persist_current_timeline_project_data()
+        self.log(
+            f"[Diarization] Reassigned {len(changed_indexes)} segment(s) "
+            f"from {source_speaker} to {target_speaker}."
+        )
 
     def on_voice_tier_changed(self):
         mode = self.get_output_mode_key() if hasattr(self, "output_mode_combo") else "both"
@@ -2823,6 +3094,7 @@ class VideoTranslatorGUI(QMainWindow):
             "background_alpha": float(self.subtitle_bg_alpha_spin.value()) if hasattr(self, "subtitle_bg_alpha_spin") else 0.6,
             "background_padding": int(self.subtitle_background_padding_spin.value()) if hasattr(self, "subtitle_background_padding_spin") else 6,
             "bold": bool(self.subtitle_bold_cb.isChecked()),
+            "speaker_colors": self._uses_speaker_subtitle_colors(),
             "auto_keyword_highlight": bool(self.subtitle_keyword_highlight_cb.isChecked()),
             "highlight_color": self.subtitle_highlight_color_combo.currentText().strip(),
             "highlight_mode": self.subtitle_highlight_mode_combo.currentText().strip(),
@@ -2844,6 +3116,7 @@ class VideoTranslatorGUI(QMainWindow):
             "background_alpha": float(self.subtitle_bg_alpha_spin.value()) if hasattr(self, "subtitle_bg_alpha_spin") else 0.6,
             "background_padding": int(self.subtitle_background_padding_spin.value()) if hasattr(self, "subtitle_background_padding_spin") else 6,
             "bold": bool(self.subtitle_bold_cb.isChecked()),
+            "speaker_colors": self._uses_speaker_subtitle_colors(),
             "auto_keyword_highlight": bool(self.subtitle_keyword_highlight_cb.isChecked()),
             "highlight_color": self.subtitle_highlight_color_combo.currentText().strip(),
             "highlight_mode": self.subtitle_highlight_mode_combo.currentText().strip(),
@@ -2880,6 +3153,10 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "subtitle_bg_alpha_spin"):
             self.subtitle_bg_alpha_spin.setValue(float(state.get("background_alpha", self.subtitle_bg_alpha_spin.value())))
         self.subtitle_bold_cb.setChecked(bool(state.get("bold", self.subtitle_bold_cb.isChecked())))
+        if hasattr(self, "subtitle_speaker_colors_cb"):
+            self.subtitle_speaker_colors_cb.setChecked(
+                bool(state.get("speaker_colors", self.subtitle_speaker_colors_cb.isChecked()))
+            )
         self.subtitle_keyword_highlight_cb.setChecked(
             bool(state.get("auto_keyword_highlight", self.subtitle_keyword_highlight_cb.isChecked()))
         )
@@ -3239,6 +3516,7 @@ class VideoTranslatorGUI(QMainWindow):
         self.current_translated_segment_models = context["current_translated_segment_models"]
         self.current_segments = context["current_segments"]
         self.current_translated_segments = context["current_translated_segments"]
+        self.refresh_detected_speakers_section()
         if self.current_translated_segments:
             self.refresh_auto_keyword_highlights(force=True)
         if self.get_audio_handling_mode() == "clean" and self.last_vocals_path and os.path.exists(self.last_vocals_path):
@@ -3956,6 +4234,48 @@ class VideoTranslatorGUI(QMainWindow):
             return str(value).strip().lower()
         return "fast"
 
+    def is_speaker_diarization_enabled(self) -> bool:
+        engine = str(os.getenv("TRANSCRIPTION_ENGINE", _default_asr_engine()) or "").strip().lower()
+        return bool(
+            engine != "ocr"
+            and hasattr(self, "speaker_diarization_cb")
+            and self.speaker_diarization_cb.isChecked()
+        )
+
+    def get_speaker_diarization_num_speakers(self) -> int:
+        combo = getattr(self, "speaker_diarization_speakers_combo", None)
+        if combo is None:
+            return -1
+        try:
+            value = int(combo.currentData())
+            return value if value >= 2 else -1
+        except (TypeError, ValueError):
+            return -1
+
+    def update_speaker_diarization_availability(self) -> None:
+        checkbox = getattr(self, "speaker_diarization_cb", None)
+        hint = getattr(self, "speaker_diarization_hint_label", None)
+        card = getattr(self, "speaker_diarization_card", None)
+        speakers_combo = getattr(self, "speaker_diarization_speakers_combo", None)
+        if checkbox is None:
+            return
+        engine = str(os.getenv("TRANSCRIPTION_ENGINE", _default_asr_engine()) or "").strip().lower()
+        available = engine != "ocr"
+        if not available:
+            checkbox.setChecked(False)
+        checkbox.setEnabled(available)
+        checkbox.setVisible(available)
+        if card is not None:
+            card.setVisible(available)
+        if speakers_combo is not None:
+            speakers_combo.setEnabled(available)
+        if hint is not None:
+            hint.setVisible(available)
+        checkbox.setToolTip(
+            "Detect speakers offline with Sherpa-ONNX and color TS1 segments."
+            if available else "Speaker diarization is unavailable when Video (OCR) is selected."
+        )
+
     def get_source_language_code(self):
         if not hasattr(self, "lang_whisper_combo"):
             return "auto"
@@ -4184,7 +4504,10 @@ class VideoTranslatorGUI(QMainWindow):
             str(steps.get("translate_raw", "")).lower() == "done"
             or bool(artifacts.get("translation_final"))
         )
-        voice = bool(artifacts.get("voice_vi") or artifacts.get("mixed_vi") or self.last_voice_vi_path or self.last_mixed_vi_path)
+        tts_skipped = bool(state and state.settings.get("tts_skipped", False))
+        voice = not tts_skipped and bool(
+            artifacts.get("voice_vi") or artifacts.get("mixed_vi") or self.last_voice_vi_path or self.last_mixed_vi_path
+        )
         exported = bool(artifacts.get("final_video"))
         running = str(getattr(self, "_pipeline_step", "") or "") if getattr(self, "_pipeline_active", False) else ""
         values = {
@@ -4203,6 +4526,11 @@ class VideoTranslatorGUI(QMainWindow):
                 text, color = "Processing…", "#f6c453"
             elif complete:
                 text, color = "✓ Completed", "#6ee7d6"
+            elif key == "tts" and translated:
+                # A translated subtitle track is exportable without a dub.
+                # Keep TTS available for later regeneration, but make its
+                # optional nature obvious in the workflow sidebar.
+                text, color = "Optional", "#8394aa"
             else:
                 text, color = "Not started", "#8394aa"
             badge.setText(text)
@@ -4224,6 +4552,8 @@ class VideoTranslatorGUI(QMainWindow):
                 translated and not self._pipeline_active
                 and self.get_output_mode_key() in ("voice", "both")
             )
+        if hasattr(self, "_generate_tts_skip_action"):
+            self._generate_tts_skip_action.setEnabled(translated and not self._pipeline_active)
 
     def update_preview_context_label(self, has_subtitles: bool, has_voice_audio: bool):
         subtitle_source = "Vietnamese review track" if self.current_translated_segments else ("original subtitle track" if self.current_segments else "no subtitle track yet")
@@ -4369,7 +4699,9 @@ class VideoTranslatorGUI(QMainWindow):
         item.set_style(
             font_name=font_name or preset.get("font_name", "Segoe UI"),
             font_size=preview_font_size,
-            font_color=QColor(self.subtitle_color_hex),
+            font_color=self._subtitle_color_for_segment(
+                (self.live_preview_segments or self.get_active_segments() or [None])[0]
+            ),
             # Stroke/shadow values are authored for the source video. Scale
             # them for the smaller Qt preview too; otherwise TikTok's 7px
             # export outline overwhelms its preview-sized glyphs.
@@ -4397,7 +4729,9 @@ class VideoTranslatorGUI(QMainWindow):
         )
         segments = self.live_preview_segments or self.get_active_segments()
         selected = int(getattr(self, "_selected_segment_index", -1))
-        self._set_live_subtitle_effects(segments[selected] if 0 <= selected < len(segments) else (segments[0] if segments else None))
+        style_segment = segments[selected] if 0 <= selected < len(segments) else (segments[0] if segments else None)
+        self._apply_live_subtitle_segment_color(style_segment)
+        self._set_live_subtitle_effects(style_segment)
         self.video_view.reposition_subtitle()
         self.sync_live_subtitle_preview()
         self.schedule_auto_frame_preview()
@@ -4489,6 +4823,14 @@ class VideoTranslatorGUI(QMainWindow):
             "font_size": export_font_size,
             "font_scale": export_font_scale,
             "font_color": self._hex_to_ass_color(self.subtitle_color_hex),
+            "speaker_colors": (
+                [
+                    self._hex_to_ass_color(self._speaker_color_hex(str(segment.get("speaker", "") or "")))
+                    if str(segment.get("speaker", "") or "").strip() else ""
+                    for segment in (style_segments or [])
+                ]
+                if self._uses_speaker_subtitle_colors() else []
+            ),
             "highlight_color": self._hex_to_ass_color(self._highlight_color_hex()),
             "outline_color": self._hex_to_ass_color(preset.get("outline_color", "#000000")),
             "outline_width": (
@@ -7934,6 +8276,49 @@ class VideoTranslatorGUI(QMainWindow):
 
                 card_layout.addLayout(timing_meta_layout)
 
+                # Speaker assignment is intentionally local to the selected
+                # cue.  It lets users correct diarization mistakes without
+                # rerunning the entire audio analysis pass.
+                speaker_row = QHBoxLayout()
+                speaker_row.setContentsMargins(0, 0, 0, 0)
+                speaker_row.setSpacing(8)
+                speaker_ids = self._detected_speaker_ids()
+                segment_source = self.current_translated_segments or self.current_segments or []
+                selected_speaker = ""
+                if 0 <= idx < len(segment_source):
+                    selected_speaker = str(segment_source[idx].get("speaker", "") or "").strip()
+                try:
+                    speaker_position = speaker_ids.index(selected_speaker)
+                except ValueError:
+                    speaker_position = -1
+                speaker_indicator = QLabel()
+                speaker_indicator.setFixedSize(10, 10)
+                speaker_indicator.setStyleSheet(
+                    "background: %s; border-radius: 5px; border: 1px solid #dcecff;"
+                    % (self._speaker_color_hex(selected_speaker) if selected_speaker else "#53657d")
+                )
+                speaker_row.addWidget(speaker_indicator)
+                speaker_row.addWidget(QLabel("Speaker:"))
+                speaker_combo = QComboBox()
+                for position, speaker_id in enumerate(speaker_ids):
+                    speaker_combo.addItem(self._speaker_display_name(speaker_id, position), speaker_id)
+                combo_index = speaker_combo.findData(selected_speaker)
+                if combo_index >= 0:
+                    speaker_combo.setCurrentIndex(combo_index)
+                speaker_combo.setEnabled(bool(speaker_ids))
+                speaker_combo.setToolTip(
+                    "Assign this subtitle segment to a detected speaker."
+                    if speaker_ids else "Run Speaker Diarization first to assign a speaker."
+                )
+                speaker_combo.currentIndexChanged.connect(
+                    lambda _value, segment_index=idx, combo=speaker_combo: self.on_segment_speaker_changed(
+                        segment_index, str(combo.currentData() or "")
+                    )
+                )
+                speaker_row.addWidget(speaker_combo, 1)
+                speaker_row.addStretch()
+                card_layout.addLayout(speaker_row)
+
                 speed_row = QHBoxLayout()
                 speed_row.setContentsMargins(0, 0, 0, 0)
                 speed_row.setSpacing(8)
@@ -8032,7 +8417,11 @@ class VideoTranslatorGUI(QMainWindow):
 
         transcript_text = self.transcript_text.toPlainText().strip()
         if transcript_text and not transcript_text.lower().startswith("transcribing..."):
-            parsed_transcript = self.parse_srt_to_segments(transcript_text)
+            # Preserve non-SRT metadata (notably diarization speaker IDs)
+            # when the hidden SRT editor is populated during project load.
+            parsed_transcript = self._segments_from_editor_text(
+                transcript_text, self.current_segments
+            )
             if parsed_transcript:
                 self.current_segments = parsed_transcript
 
@@ -8074,6 +8463,7 @@ class VideoTranslatorGUI(QMainWindow):
                     "tts_group_end": float(self.current_translated_segments[idx].get("tts_group_end", base.get("tts_group_end", base.get("end", 0.0))) or base.get("end", 0.0)) if idx < len(self.current_translated_segments) else float(base.get("tts_group_end", base.get("end", 0.0)) or base.get("end", 0.0)),
                     "words": list(base.get("words", [])),
                     "manual_highlights": list(base.get("manual_highlights", [])),
+                    "speaker": str(base.get("speaker", "") or ""),
                 }
                 for idx, base in enumerate(base_segments)
             ]
@@ -9134,6 +9524,14 @@ class VideoTranslatorGUI(QMainWindow):
             return
 
         base_segments = self.current_segments or self.current_translated_segments
+        # An SRT only stores text/timestamps.  Keep diarization metadata by
+        # matching its cue order to the existing transcript, even when the
+        # imported file supplies different timing.
+        if base_segments and len(base_segments) == len(imported_segments):
+            for idx, base in enumerate(base_segments):
+                speaker = str(base.get("speaker", "") or "").strip()
+                if speaker:
+                    imported_segments[idx]["speaker"] = speaker
         if self.keep_timeline_cb.isChecked() and base_segments and len(base_segments) == len(imported_segments):
             merged_segments = []
             for idx, base in enumerate(base_segments):
@@ -9141,6 +9539,8 @@ class VideoTranslatorGUI(QMainWindow):
                 merged["start"] = float(base.get("start", 0.0))
                 merged["end"] = float(base.get("end", 0.0))
                 merged["words"] = list(base.get("words", []))
+                if base.get("speaker"):
+                    merged["speaker"] = str(base.get("speaker", "") or "")
                 if "manual_highlights" in imported_segments[idx]:
                     merged["manual_highlights"] = imported_segments[idx]["manual_highlights"]
                 elif base.get("manual_highlights"):
@@ -9235,6 +9635,8 @@ class VideoTranslatorGUI(QMainWindow):
                         "words": list(base.get("words", [])),
                         "manual_highlights": list(base.get("manual_highlights", [])),
                     }
+                    if base.get("speaker"):
+                        d["speaker"] = str(base.get("speaker", "") or "")
                     raw = base.get("_audio_end")
                     if raw is not None:
                         try:
@@ -9250,6 +9652,8 @@ class VideoTranslatorGUI(QMainWindow):
                 base = base_segments[idx]
                 segment["words"] = list(base.get("words", []))
                 segment["manual_highlights"] = list(base.get("manual_highlights", []))
+                if base.get("speaker"):
+                    segment["speaker"] = str(base.get("speaker", "") or "")
                 if base.get("tts_text"):
                     segment["tts_text"] = str(base.get("tts_text", "") or "")
                     segment["tts_group_id"] = base.get("tts_group_id", "")
@@ -9331,6 +9735,7 @@ class VideoTranslatorGUI(QMainWindow):
             animation_duration=subtitle_style.get("animation_duration", 0.22),
             manual_highlights=subtitle_style.get("manual_highlights", []),
             word_timings=subtitle_style.get("word_timings", []),
+            speaker_colors=subtitle_style.get("speaker_colors", []),
             custom_position_enabled=subtitle_style.get("custom_position_enabled", False),
             custom_position_x=subtitle_style.get("custom_position_x", 50),
             custom_position_y=subtitle_style.get("custom_position_y", 86),
@@ -9502,6 +9907,7 @@ class VideoTranslatorGUI(QMainWindow):
                             self.video_view.subtitle_item.set_text(active_lines[0])
                         else:
                             self.video_view.subtitle_item.set_lines(active_lines)
+                        self._apply_live_subtitle_segment_color(segments[active_indices[0]])
                         self._set_live_subtitle_effects(segments[active_indices[0]], position_ms)
                         if not self.video_view.subtitle_item.isVisible():
                             self.video_view.subtitle_item.show()
@@ -9533,6 +9939,7 @@ class VideoTranslatorGUI(QMainWindow):
         if not text:
             return
         self.video_view.subtitle_item.set_text(text)
+        self._apply_live_subtitle_segment_color(items[index])
         self._set_live_subtitle_effects(items[index])
         self.video_view.subtitle_item.show()
         self.video_view.reposition_subtitle()
@@ -9593,17 +10000,14 @@ class VideoTranslatorGUI(QMainWindow):
         mode = self.get_output_mode_key()
         steps = getattr(getattr(self, "current_project_state", None), "steps", {}) or {}
         voice_running = steps.get("generate_tts") == "running" or steps.get("mix_audio") == "running"
-        can_export = False
-        if mode == "subtitle":
-            can_export = v_ok and has_subtitle_track
-        elif mode == "voice":
-            can_export = v_ok and has_voice_audio
-        else:
-            can_export = (
-                v_ok
-                and has_voice_audio
-                and has_subtitle_track
-            )
+        # Translation is sufficient for a final subtitle-only export.  TTS
+        # remains optional: if it has not been generated, Export and Fast
+        # Preview retain the source audio and burn the translated subtitles.
+        # Voice-only projects without subtitles keep their historical rule.
+        can_export = v_ok and (
+            has_subtitle_track
+            or (mode == "voice" and has_voice_audio)
+        )
 
         self.extract_btn.setEnabled(v_ok)
         self.vocal_sep_btn.setEnabled(a_ok)
@@ -9768,10 +10172,16 @@ class VideoTranslatorGUI(QMainWindow):
             import_translation_action = QAction("Import Translated File…", translate_menu)
             import_translation_action.triggered.connect(self.import_translated_srt)
             translate_menu.addActions([translate_action, import_translation_action])
-            tts_action = QAction("Run to Generate Voice / TTS", step_menu)
+            tts_menu = step_menu.addMenu("Generate Voice / TTS")
+            tts_menu.setObjectName("generateStepMenu")
+            tts_menu.setMinimumWidth(220)
+            tts_action = QAction("TTS", tts_menu)
             tts_action.triggered.connect(lambda: self.run_pipeline_to_stage("tts"))
+            tts_skip_action = QAction("Skip", tts_menu)
+            tts_skip_action.triggered.connect(self.skip_tts_stage)
+            tts_menu.addActions([tts_action, tts_skip_action])
             step_menu.insertAction(translate_menu.menuAction(), transcript_action)
-            step_menu.addAction(tts_action)
+            step_menu.addAction(tts_menu.menuAction())
             full_menu = menu.addMenu("Full Pipeline")
             full_menu.setObjectName("generateStepMenu")
             full_menu.setMinimumWidth(220)
@@ -9785,6 +10195,7 @@ class VideoTranslatorGUI(QMainWindow):
             self._generate_translate_action = translate_action
             self._generate_import_translated_srt_action = import_translation_action
             self._generate_tts_action = tts_action
+            self._generate_tts_skip_action = tts_skip_action
         self.update_workflow_stage_badges()
 
     def dragEnterEvent(self, event):
@@ -10608,6 +11019,7 @@ class VideoTranslatorGUI(QMainWindow):
         for k, v in updates.items():
             os.environ[k] = v
 
+        self.update_speaker_diarization_availability()
         self.save_user_settings()
         self._update_ocr_overlay()
         QMessageBox.information(self, "Success", "Settings saved and updated!")
@@ -10665,7 +11077,7 @@ class VideoTranslatorGUI(QMainWindow):
         source_segments = list(self.current_translated_segments or [])
         if not source_segments:
             translated_srt = self.translated_text.toPlainText().strip()
-            return self.parse_srt_to_segments(translated_srt) if translated_srt else []
+            return self._apply_speaker_voice_assignments(self.parse_srt_to_segments(translated_srt)) if translated_srt else []
 
         grouped_segments = []
         idx = 0
@@ -10715,9 +11127,10 @@ class VideoTranslatorGUI(QMainWindow):
                     ' '.join(str(item.get('source_text') or item.get('text') or '').split()).strip()
                     for item in group_items
                 ).strip(),
+                'speaker': str(group_items[0].get('speaker', '') or ''),
             })
             idx = cursor
-        return grouped_segments
+        return self._apply_speaker_voice_assignments(grouped_segments)
 
     def run_voiceover(self):
         if not self.ensure_required_resources("Voice generation", include_voice=True):
@@ -10743,6 +11156,10 @@ class VideoTranslatorGUI(QMainWindow):
         if not voice_name:
             QMessageBox.warning(self, "Missing Voice", "Choose a voice first.")
             return
+        if state is not None and state.settings.get("tts_skipped", False):
+            # Starting TTS explicitly re-enables the generated voice path.
+            state.set_setting("tts_skipped", False)
+            self.project_service.save_project(state)
         voice_speed = self._parse_voice_speed_value()
         timing_sync_mode = str(self.voice_timing_sync_combo.currentText()).strip()
         original_volume = int(self.audio_a1_volume_slider.value()) if hasattr(self, "audio_a1_volume_slider") else 50
@@ -11094,6 +11511,22 @@ class VideoTranslatorGUI(QMainWindow):
         if not self.ensure_required_resources("Generate", include_whisper=not is_ocr, include_voice=include_voice):
             return
         self.pipeline_controller.run_all_pipeline(target_stage=target_stage)
+
+    def skip_tts_stage(self):
+        """Explicitly finish the optional TTS phase after translation."""
+        has_translation = bool(self.current_translated_segments or self.translated_text.toPlainText().strip())
+        if not has_translation:
+            QMessageBox.information(self, "Skip TTS", "Complete Translate before skipping Generate Voice / TTS.")
+            return
+        state = self.ensure_current_project()
+        if state is not None:
+            state.set_setting("tts_skipped", True)
+            state.set_step_status("generate_tts", "skipped")
+            state.set_step_status("mix_audio", "skipped")
+            self.project_service.save_project(state)
+        self._voiceover_force_refresh = True
+        self.log("[Pipeline] Generate Voice / TTS skipped. The translated subtitle video is ready to export.")
+        self.refresh_ui_state()
 
     def run_all_pipeline(self):
         mode = self.get_output_mode_key()

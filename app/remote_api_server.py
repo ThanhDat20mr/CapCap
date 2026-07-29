@@ -280,6 +280,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
                 "extract_audio": "Extracting audio",
                 "extraction": "Extracting audio",
                 "separation": "Separating vocals",
+                "diarization": "Detecting speakers",
                 "transcription": "Transcribing audio",
                 "translation": "Translating subtitles",
             }
@@ -297,6 +298,8 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
                 translator_style=str(payload.get("translator_style", "") or ""),
                 whisper_model_name=str(payload.get("whisper_model_name", "base") or "base"),
                 transcription_engine=str(payload.get("transcription_engine", "whisper") or "whisper"),
+                speaker_diarization=bool(payload.get("speaker_diarization", False)),
+                speaker_diarization_num_speakers=int(payload.get("speaker_diarization_num_speakers", -1) or -1),
                 skip_translation=bool(payload.get("skip_translation", False)),
                 prefetch_voice_name=str(payload.get("prefetch_voice_name", "") or ""),
                 prefetch_voice_speed=float(payload.get("prefetch_voice_speed", 1.0) or 1.0),

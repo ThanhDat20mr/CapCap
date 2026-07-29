@@ -59,15 +59,17 @@ class Segment:
     @classmethod
     def from_transcript_dict(cls, data: dict[str, Any], segment_id: int) -> "Segment":
         text = str(data.get("text", "") or "").strip()
+        metadata = {"words": list(data.get("words") or [])}
+        speaker = str(data.get("speaker", "") or "").strip()
+        if speaker:
+            metadata["speaker"] = speaker
         return cls(
             id=segment_id,
             start=float(data.get("start", 0.0) or 0.0),
             end=float(data.get("end", 0.0) or 0.0),
             original_text=text,
             status="transcribed",
-            metadata={
-                "words": list(data.get("words") or []),
-            },
+            metadata=metadata,
         )
 
     def apply_translation(self, translated_text: str, *, refined: bool = False) -> None:
@@ -124,6 +126,8 @@ class Segment:
             payload["manual_highlights"] = list(self.metadata.get("manual_highlights") or [])
         if self.metadata.get("auto_highlights"):
             payload["auto_highlights"] = list(self.metadata.get("auto_highlights") or [])
+        if self.metadata.get("speaker"):
+            payload["speaker"] = str(self.metadata.get("speaker"))
         raw_ae = self.metadata.get("_audio_end")
         if raw_ae is not None:
             try:
@@ -141,6 +145,8 @@ class Segment:
         }
         if self.metadata.get("words"):
             payload["words"] = list(self.metadata.get("words") or [])
+        if self.metadata.get("speaker"):
+            payload["speaker"] = str(self.metadata.get("speaker"))
         return payload
 
 

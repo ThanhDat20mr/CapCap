@@ -454,6 +454,7 @@ class ExportWorkflow:
             auto_keyword_highlight=bool(style["auto_keyword_highlight"]),
             animation_duration=float(style["animation_duration"]), manual_highlights=style["manual_highlights"],
             word_timings=style["word_timings"], karaoke_timing_mode=str(style["karaoke_timing_mode"]),
+            speaker_colors=style.get("speaker_colors", []),
             custom_position_enabled=bool(style["custom_position_enabled"]),
             custom_position_x=float(style["custom_position_x"]), custom_position_y=float(style["custom_position_y"]),
             custom_position_bottom_y=style.get("custom_position_bottom_y"),

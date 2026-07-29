@@ -763,6 +763,7 @@ def _build_karaoke_dialogue_events(
     custom_position_y: float = 86.0,
     custom_position_bottom_y: float | None = None,
     margin_v: int = 0,
+    base_color: str = "",
 ) -> list[str]:
     source_text = text or ""
     segment_duration = max(0.1, float(end_seconds) - float(start_seconds))
@@ -782,7 +783,8 @@ def _build_karaoke_dialogue_events(
         custom_position_y=custom_position_y,
         custom_position_bottom_y=custom_position_bottom_y,
     )
-    base_text = (rf"{{{position_tag}}}" if position_tag else "") + base_text
+    base_tags = "".join(part for part in (position_tag, rf"\c{base_color}" if base_color else ""))
+    base_text = (rf"{{{base_tags}}}" if base_tags else "") + base_text
     mv = int(max(0, margin_v or 0))
     events = [f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,{mv},,{base_text}"]
     if not mapped_words:
@@ -830,7 +832,7 @@ def _build_manual_highlight_spans(text: str, manual_highlights) -> list[tuple[in
     return sorted(spans, key=lambda item: item[0])
 
 
-def _apply_keyword_highlight(text: str, *, preset_key: str, highlight_color: str, manual_highlights=None) -> str:
+def _apply_keyword_highlight(text: str, *, preset_key: str, highlight_color: str, manual_highlights=None, base_color: str = "") -> str:
     source_text = text or ""
     ordered_spans = _build_manual_highlight_spans(source_text, manual_highlights)
     if not ordered_spans and (preset_key or "").strip().lower() != "highlight":
@@ -854,7 +856,7 @@ def _apply_keyword_highlight(text: str, *, preset_key: str, highlight_color: str
             + color
             + r"}"
             + highlighted[start:end]
-            + r"{\c}"
+            + (r"{\c" + base_color + r"}" if base_color else r"{\c}")
             + highlighted[end:]
         )
     return highlighted
@@ -890,6 +892,7 @@ def srt_to_ass(srt_path: str,
                custom_position_bottom_y: float | None = None,
                single_line: bool = False,
                font_scale: float = 1.0,
+               speaker_colors=None,
                log_generation: bool = True) -> str:
     """Convert an SRT file to a fully-styled ASS file.
 
@@ -994,6 +997,11 @@ def srt_to_ass(srt_path: str,
         if isinstance(word_timings, list) and event_index < len(word_timings):
             line_word_timings = word_timings[event_index] or []
         raw_text = m.group(3).strip()
+        line_speaker_color = ""
+        if isinstance(speaker_colors, list) and event_index < len(speaker_colors):
+            candidate = str(speaker_colors[event_index] or "").strip()
+            if candidate.startswith("&H"):
+                line_speaker_color = candidate
         if single_line:
             raw_text = " ".join(part.strip() for part in raw_text.splitlines() if part.strip())
         style_key = (animation_style or "Static").strip().lower()
@@ -1037,6 +1045,7 @@ def srt_to_ass(srt_path: str,
                     custom_position_y=custom_position_y,
                     custom_position_bottom_y=custom_position_bottom_y,
                     margin_v=event_margin_v,
+                    base_color=line_speaker_color,
                 )
             )
             continue
@@ -1046,7 +1055,10 @@ def srt_to_ass(srt_path: str,
             preset_key="highlight" if auto_keyword_highlight else preset_key,
             highlight_color=highlight_color,
             manual_highlights=line_manual_highlights,
+            base_color=line_speaker_color,
         )
+        if line_speaker_color:
+            text_content = r"{\c" + line_speaker_color + r"}" + text_content
         text = _apply_animation_tags(
             text_content,
             animation_style=animation_style,
@@ -1416,6 +1428,7 @@ def embed_subtitles(video_path, srt_path, output_path,
                     custom_position_bottom_y=None,
                     single_line=False,
                     font_scale=1.0,
+                    speaker_colors=None,
                     blur_region=None,
                     mask_regions=None,
                     logo_layers=None,
@@ -1480,6 +1493,7 @@ def embed_subtitles(video_path, srt_path, output_path,
         custom_position_bottom_y=custom_position_bottom_y,
         single_line=single_line,
         font_scale=font_scale,
+        speaker_colors=speaker_colors,
     )
 
     success = embed_ass_subtitles(

@@ -544,13 +544,44 @@ class PreviewController:
         }
         return hashlib.sha1(json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()
 
+    def _effective_render_mode_without_tts(self, requested_mode: str) -> str:
+        """Allow a translated-subtitle export when voice generation was skipped.
+
+        The historical output mode can still be ``both``.  If there is no
+        generated or explicitly selected audio, requiring it would block a
+        perfectly valid subtitle-only export.  Never override a real voice
+        track: users who generated one retain their requested voice/both mode.
+        """
+        mode = str(requested_mode or "both").strip().lower()
+        if mode not in {"voice", "both"}:
+            return mode
+        has_translated_subtitles = bool(
+            getattr(self.gui, "current_translated_segments", None)
+            or str(self.gui.translated_text.toPlainText() if hasattr(self.gui, "translated_text") else "").strip()
+            or (
+                getattr(self.gui, "last_translated_srt_path", "")
+                and os.path.exists(str(self.gui.last_translated_srt_path))
+            )
+        )
+        project_state = getattr(self.gui, "current_project_state", None)
+        if has_translated_subtitles and bool(
+            project_state and project_state.settings.get("tts_skipped", False)
+        ):
+            self.gui.log("[Export] TTS was skipped; exporting translated subtitles with original audio.")
+            return "subtitle"
+        audio_path = self.gui.resolve_selected_audio_path()
+        if has_translated_subtitles and not (audio_path and os.path.exists(audio_path)):
+            self.gui.log("[Export] No TTS audio selected; exporting translated subtitles with original audio.")
+            return "subtitle"
+        return mode
+
     def export_final_video(self):
         video_path = self.gui.video_path_edit.text().strip()
         if not video_path or not os.path.exists(video_path):
             QMessageBox.warning(self.gui, "Error", "Please choose a video first.")
             return
 
-        mode = self.gui.get_output_mode_key()
+        mode = self._effective_render_mode_without_tts(self.gui.get_output_mode_key())
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         translated_srt_path = self.gui.last_translated_srt_path
         translated_ass_path = self.gui.live_preview_ass_path
@@ -670,7 +701,7 @@ class PreviewController:
             QMessageBox.warning(self.gui, "Error", "Please choose a video first.")
             return
 
-        mode = self.gui.get_output_mode_key()
+        mode = self._effective_render_mode_without_tts(self.gui.get_output_mode_key())
         default_dir = self.gui.final_output_folder_edit.text().strip() or os.path.join(self.gui.workspace_root, "output")
         out_dir = QFileDialog.getExistingDirectory(
             self.gui,
@@ -777,7 +808,7 @@ class PreviewController:
                 QMessageBox.warning(self.gui, "Error", "Please choose a video first.")
             return
 
-        mode = self.gui.get_output_mode_key()
+        mode = self._effective_render_mode_without_tts(self.gui.get_output_mode_key())
         preview_srt_path = ""
         preview_segments = []
         if mode in ("subtitle", "both"):
@@ -978,7 +1009,7 @@ class PreviewController:
         if hasattr(self.gui, "ensure_media_backend_ready"):
             self.gui.ensure_media_backend_ready()
         video_path = self.gui.video_path_edit.text().strip()
-        mode = self.gui.get_output_mode_key()
+        mode = self._effective_render_mode_without_tts(self.gui.get_output_mode_key())
         audio_path = ""
         if mode in ("voice", "both"):
             audio_path = self._regenerate_mixed_audio_with_current_volumes()

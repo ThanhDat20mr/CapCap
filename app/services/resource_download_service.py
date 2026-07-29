@@ -220,6 +220,21 @@ class ResourceDownloadService:
     def _whisper_cache_root(self) -> str:
         return models_path("faster_whisper")
 
+    def _speaker_diarization_root(self) -> str:
+        return models_path("pyannote")
+
+    def _speaker_diarization_segmentation_path(self) -> str:
+        return os.path.join(
+            self._speaker_diarization_root(),
+            "model.int8.onnx",
+        )
+
+    def _speaker_diarization_embedding_path(self) -> str:
+        return os.path.join(
+            self._speaker_diarization_root(),
+            "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+        )
+
     def _whisper_cache_dirs(self, model_name: str) -> list[str]:
         root = Path(self._whisper_cache_root())
         if not root.exists():
@@ -407,6 +422,28 @@ class ResourceDownloadService:
                 "auto_download_supported": True,
                 "description": "Multilingual speech-recognition model used for transcription.",
             },
+            {
+                "id": "diarization:segmentation",
+                "name": "Speaker Diarization Segmentation (Sherpa-ONNX)",
+                "kind": "diarization",
+                "status": "installed" if self.is_resource_installed("diarization:segmentation") else "missing",
+                "target_dir": self._speaker_diarization_root(),
+                "download_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+                "expected_filename": "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+                "auto_download_supported": False,
+                "description": "ONNX model that detects potential speaker changes.",
+            },
+            {
+                "id": "diarization:embedding",
+                "name": "Speaker Diarization Embedding (3D-Speaker)",
+                "kind": "diarization",
+                "status": "installed" if self.is_resource_installed("diarization:embedding") else "missing",
+                "target_dir": self._speaker_diarization_root(),
+                "download_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+                "expected_filename": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+                "auto_download_supported": False,
+                "description": "ONNX model that identifies and groups speaker voices.",
+            },
         ]
 
         vietnamese_entries = self._piper_voice_entries("vi")
@@ -453,6 +490,10 @@ class ResourceDownloadService:
             return os.path.exists(os.path.join(fw_dir, "cublas64_12.dll"))
         if resource_id == "sensevoice:model":
             return os.path.isfile(os.path.join(models_path("sensevoice"), "model.int8.onnx"))
+        if resource_id == "diarization:segmentation":
+            return os.path.isfile(self._speaker_diarization_segmentation_path())
+        if resource_id == "diarization:embedding":
+            return os.path.isfile(self._speaker_diarization_embedding_path())
         if resource_id.startswith("whisper:"):
             model_name = resource_id.split(":", 1)[1].strip().lower()
             for model_dir in self._whisper_cache_dirs(model_name):

@@ -332,6 +332,10 @@ class PipelineController:
         # extracts audio and transcribes, but does not call translation.
         skip_translation = self.gui.is_skip_translation() or self.target_stage == "transcript"
         output_mode = self.gui.get_output_mode_key()
+        # Prefetch voice audio only when Full Pipeline will immediately
+        # continue into TTS. A Run to Translate stop point must not spend
+        # resources creating cache entries the user may never need.
+        prefetch_tts = self.target_stage == "full" and output_mode in ("voice", "both")
         self.gui.prepare_workflow_thread = PrepareWorkflowWorker(
             self.gui.workspace_root,
             video_path,
@@ -344,9 +348,11 @@ class PipelineController:
             self.gui.get_ai_style_instruction(),
             self.gui.get_whisper_model_name(),
             transcription_engine=transcription_engine,
+            speaker_diarization=self.gui.is_speaker_diarization_enabled(),
+            speaker_diarization_num_speakers=self.gui.get_speaker_diarization_num_speakers(),
             skip_translation=skip_translation,
-            prefetch_voice_name=self.gui.get_active_voice_name() if output_mode in ("voice", "both") else "",
-            prefetch_voice_speed=self.gui._parse_voice_speed_value() if output_mode in ("voice", "both") else 1.0,
+            prefetch_voice_name=self.gui.get_active_voice_name() if prefetch_tts else "",
+            prefetch_voice_speed=self.gui._parse_voice_speed_value() if prefetch_tts else 1.0,
             remote_api_url=self.local_worker_api_url,
             remote_api_token=self.local_worker_api_token,
             force_remote_api=True,
@@ -371,6 +377,7 @@ class PipelineController:
             "extract_audio": "Extracting audio",
             "extraction": "Extracting audio",
             "separation": "Separating vocals",
+            "diarization": "Detecting speakers",
             "transcription": "Transcribing audio",
             "translation": "Translating subtitles",
             "done": "Prepare complete",

@@ -67,6 +67,7 @@ class EditorTimeline(QGraphicsView):
         self._drag_state = None
         self._hover_layer_id: str = ""
         self._selected_layer_id: str = ""
+        self._highlighted_speaker: str = ""
         # Presentation-only track hiding. Never write this to Track.visible:
         # preview and export must continue using the real project visibility.
         self._timeline_hidden_track_ids: set[str] = set()
@@ -184,6 +185,10 @@ class EditorTimeline(QGraphicsView):
 
         self._ensure_tracks_populated()
         self._redraw()
+
+    def set_highlighted_speaker(self, speaker: str = "") -> None:
+        self._highlighted_speaker = str(speaker or "").strip()
+        self.viewport().update()
 
     def _ensure_tracks_populated(self):
         if not self._timeline:
@@ -1000,10 +1005,28 @@ class EditorTimeline(QGraphicsView):
         # still renders as a subtitle bar.
         layer_type = getattr(layer, "type", None)
         is_subtitle_type = layer_type in (LayerType.SUBTITLE, LayerType.DUB_SUBTITLE)
+        layer_metadata = getattr(layer, "metadata", None) or {}
+        segment_metadata = layer_metadata.get("_seg_dict", {}) if isinstance(layer_metadata, dict) else {}
+        speaker = str(
+            (segment_metadata.get("speaker", "") if isinstance(segment_metadata, dict) else "")
+            or (layer_metadata.get("speaker", "") if isinstance(layer_metadata, dict) else "")
+            or ""
+        ).strip()
         has_dub_marker = bool(
             getattr(layer, "dub_text", None) or getattr(layer, "_seg_dict", None)
         )
-        if is_subtitle_type or force_subtitle_color or force_subtitle_track or has_dub_marker:
+        if speaker:
+            # Diarization can yield more than a handful of speakers.  A
+            # fixed palette repeats colors and makes distinct people look the
+            # same, so derive a stable, well-separated hue from each ID.
+            suffix = speaker.rsplit("_", 1)[-1]
+            try:
+                speaker_index = int(suffix)
+            except (TypeError, ValueError):
+                speaker_index = sum(ord(char) for char in speaker)
+            fill = QColor.fromHsv((speaker_index * 137 + 20) % 360, 155, 205)
+            border = fill.darker(140)
+        elif is_subtitle_type or force_subtitle_color or force_subtitle_track or has_dub_marker:
             fill = QColor(201, 107, 42)   # #c96b2a — exact RGB, no derivation
             border = QColor(141, 75, 29)  # #8d4b1d — color.darker(140) baked in
         else:
@@ -1065,6 +1088,10 @@ class EditorTimeline(QGraphicsView):
             # (white). drawPath() strokes AND fills, so without
             # resetting the brush the selection pass would paint the
             # bar white on top of the orange fillPath from earlier.
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(path)
+        elif speaker and speaker == self._highlighted_speaker:
+            painter.setPen(QPen(QColor("#ffe082"), 2))
             painter.setBrush(Qt.NoBrush)
             painter.drawPath(path)
 

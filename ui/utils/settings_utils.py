@@ -31,6 +31,10 @@ def save_user_settings(gui):
     s.setValue("srt_output_folder", gui.srt_output_folder_edit.text())
     s.setValue("voice_output_folder", gui.voice_output_folder_edit.text())
     s.setValue("audio_source", gui.audio_source_edit.text())
+    if hasattr(gui, "speaker_diarization_cb"):
+        s.setValue("speaker_diarization", gui.speaker_diarization_cb.isChecked())
+    if hasattr(gui, "speaker_diarization_speakers_combo"):
+        s.setValue("speaker_diarization_num_speakers", gui.get_speaker_diarization_num_speakers())
     s.setValue("background_audio", gui.bg_music_edit.text())
     s.setValue("mixed_audio", gui.mixed_audio_edit.text())
     s.setValue("free_voice_name", gui.free_voice_combo.currentText())
@@ -69,6 +73,11 @@ def save_user_settings(gui):
         getattr(gui, "subtitle_bg_alpha_spin", None).value() if hasattr(gui, "subtitle_bg_alpha_spin") else 0.6,
     )
     s.setValue("subtitle_bold", gui.subtitle_bold_cb.isChecked())
+    s.setValue(
+        "subtitle_speaker_colors",
+        getattr(gui, "subtitle_speaker_colors_cb", None).isChecked()
+        if hasattr(gui, "subtitle_speaker_colors_cb") else False,
+    )
     s.setValue("subtitle_auto_keyword_highlight", gui.subtitle_keyword_highlight_cb.isChecked())
     s.setValue("subtitle_highlight_color", gui.subtitle_highlight_color_combo.currentText())
     s.setValue("subtitle_highlight_mode", gui.subtitle_highlight_mode_combo.currentText())
@@ -192,6 +201,10 @@ def load_user_settings(gui):
     if hasattr(gui, "subtitle_bg_alpha_spin"):
         gui.subtitle_bg_alpha_spin.setValue(float(s.value("subtitle_background_alpha", gui.subtitle_bg_alpha_spin.value())))
     gui.subtitle_bold_cb.setChecked(str(s.value("subtitle_bold", gui.subtitle_bold_cb.isChecked())).lower() == "true")
+    if hasattr(gui, "subtitle_speaker_colors_cb"):
+        gui.subtitle_speaker_colors_cb.setChecked(
+            str(s.value("subtitle_speaker_colors", False)).lower() == "true"
+        )
     gui.subtitle_keyword_highlight_cb.setChecked(
         str(s.value("subtitle_auto_keyword_highlight", gui.subtitle_keyword_highlight_cb.isChecked())).lower() == "true"
     )
@@ -202,6 +215,20 @@ def load_user_settings(gui):
     audio_handling_index = gui.audio_handling_combo.findData(audio_handling_mode)
     if audio_handling_index >= 0:
         gui.audio_handling_combo.setCurrentIndex(audio_handling_index)
+    if hasattr(gui, "speaker_diarization_cb"):
+        gui.speaker_diarization_cb.setChecked(
+            str(s.value("speaker_diarization", False)).lower() == "true"
+        )
+        if hasattr(gui, "update_speaker_diarization_availability"):
+            gui.update_speaker_diarization_availability()
+    if hasattr(gui, "speaker_diarization_speakers_combo"):
+        try:
+            count = int(s.value("speaker_diarization_num_speakers", -1))
+        except (TypeError, ValueError):
+            count = -1
+        index = gui.speaker_diarization_speakers_combo.findData(count if count >= 2 else -1)
+        if index >= 0:
+            gui.speaker_diarization_speakers_combo.setCurrentIndex(index)
     gui.voice_gender_combo.setCurrentText(s.value("voice_gender", gui.voice_gender_combo.currentText()))
     gui.voice_timing_sync_combo.setCurrentText(s.value("voice_timing_sync_mode", gui.voice_timing_sync_combo.currentText()))
     if hasattr(gui, "timeline"):

@@ -240,7 +240,7 @@ def build_start_group(gui, left_layout):
     stage_layout.setContentsMargins(10, 8, 10, 8)
     stage_layout.setSpacing(4)
     for key, title in (("prepare", "Prepare"), ("transcript", "Transcript"),
-                       ("translate", "Translate"), ("tts", "Generate Voice / TTS"),
+                       ("translate", "Translate"), ("tts", "Generate Voice / TTS (Optional)"),
                        ("export", "Export")):
         row = QHBoxLayout()
         label = QLabel(title)
@@ -412,9 +412,45 @@ def build_start_group(gui, left_layout):
     gui.audio_handling_hint_label.setObjectName("helperLabel")
     gui.audio_handling_hint_label.setWordWrap(True)
     audio_cleanup_layout.addWidget(gui.audio_handling_hint_label)
+
+    diarization_card, diarization_layout = _section_card()
+    gui.speaker_diarization_card = diarization_card
+    diarization_title = QLabel("Speaker Diarization")
+    diarization_title.setObjectName("sectionTitle")
+    diarization_layout.addWidget(diarization_title)
+    gui.speaker_diarization_cb = QCheckBox("Enable speaker diarization")
+    # Opt-in by default: diarization is an additional analysis pass and
+    # should never add work to a new project unless the user enables it.
+    gui.speaker_diarization_cb.setChecked(False)
+    gui.speaker_diarization_cb.setToolTip(
+        "Detect speakers offline with Sherpa-ONNX and color TS1 segments. Available for audio transcription only."
+    )
+    diarization_layout.addWidget(gui.speaker_diarization_cb)
+    expected_speakers_row = QVBoxLayout()
+    expected_speakers_row.addWidget(QLabel("Expected speakers"))
+    gui.speaker_diarization_speakers_combo = QComboBox()
+    gui.speaker_diarization_speakers_combo.addItem("Auto detect", -1)
+    for count in range(2, 9):
+        gui.speaker_diarization_speakers_combo.addItem(f"{count} speakers", count)
+    gui.speaker_diarization_speakers_combo.setToolTip(
+        "Choose a count when you know the number of people speaking. "
+        "Auto detect uses similarity-based clustering."
+    )
+    expected_speakers_row.addWidget(gui.speaker_diarization_speakers_combo)
+    diarization_layout.addLayout(expected_speakers_row)
+    gui.speaker_diarization_hint_label = QLabel(
+        "Optional: detects speaker turns after extraction and colors TS1 segments. "
+        "Requires local Sherpa-ONNX diarization models."
+    )
+    gui.speaker_diarization_hint_label.setObjectName("helperLabel")
+    gui.speaker_diarization_hint_label.setWordWrap(True)
+    diarization_layout.addWidget(gui.speaker_diarization_hint_label)
     output_layout.addWidget(audio_cleanup_card)
+    output_layout.addWidget(diarization_card)
 
     media_layout.addWidget(output_card)
+    if hasattr(gui, "update_speaker_diarization_availability"):
+        gui.update_speaker_diarization_availability()
 
     language_card, language_layout = _build_collapsible_section("Language")
     gui.lang_whisper_combo = QComboBox()
@@ -509,6 +545,25 @@ def build_start_group(gui, left_layout):
     gui.ai_dubbing_rewrite_hint_label.setWordWrap(True)
     gui.ai_dubbing_rewrite_hint_label.hide()
     voice_layout.addWidget(voice_setup_card)
+
+    gui.detected_speakers_card, detected_speakers_layout = _section_card()
+    detected_speakers_title = QLabel("Detected Speakers")
+    detected_speakers_title.setObjectName("sectionTitle")
+    detected_speakers_layout.addWidget(detected_speakers_title)
+    gui.detected_speakers_hint_label = QLabel(
+        "Run Speaker Diarization to assign a dedicated voice to each detected speaker. "
+        "Unassigned speakers use the default voice above."
+    )
+    gui.detected_speakers_hint_label.setObjectName("helperLabel")
+    gui.detected_speakers_hint_label.setWordWrap(True)
+    detected_speakers_layout.addWidget(gui.detected_speakers_hint_label)
+    gui.detected_speakers_list = QWidget()
+    gui.detected_speakers_list_layout = QVBoxLayout(gui.detected_speakers_list)
+    gui.detected_speakers_list_layout.setContentsMargins(0, 0, 0, 0)
+    gui.detected_speakers_list_layout.setSpacing(8)
+    detected_speakers_layout.addWidget(gui.detected_speakers_list)
+    gui.detected_speakers_card.hide()
+    voice_layout.addWidget(gui.detected_speakers_card)
 
     voice_preview_card, voice_preview_layout = _section_card()
     voice_preview_title = QLabel("Preview")
@@ -688,6 +743,10 @@ def build_start_group(gui, left_layout):
     gui.subtitle_outline_cb.setChecked(True)
     gui.subtitle_bold_cb = QCheckBox("Bold")
     gui.subtitle_bold_cb.setChecked(True)
+    gui.subtitle_speaker_colors_cb = QCheckBox("Use speaker colors")
+    gui.subtitle_speaker_colors_cb.setToolTip(
+        "Use each diarized speaker's TS1 color for their subtitle text."
+    )
     gui.subtitle_single_line_cb = QCheckBox("Single-line subtitle (Netflix)")
     gui.subtitle_single_line_cb.setChecked(False)
     gui.subtitle_animation_combo = QComboBox()
@@ -724,6 +783,7 @@ def build_start_group(gui, left_layout):
     custom_controls_layout.addWidget(gui.subtitle_color_btn, 2, 1)
     custom_controls_layout.addWidget(gui.subtitle_outline_cb, 3, 0)
     custom_controls_layout.addWidget(gui.subtitle_bold_cb, 3, 1)
+    custom_controls_layout.addWidget(gui.subtitle_speaker_colors_cb, 4, 0, 1, 2)
     custom_wrapper_layout.addWidget(gui.custom_settings_content)
     custom_title_layout.addWidget(custom_wrapper)
     subtitle_layout.addWidget(custom_title_card)

@@ -1003,6 +1003,7 @@ class MpvMediaPlayerBackend(QObject):
                 auto_keyword_highlight=subtitle_style.get("auto_keyword_highlight", False),
                 animation_duration=subtitle_style.get("animation_duration", 0.22),
                 manual_highlights=subtitle_style.get("manual_highlights", []),
+                speaker_colors=subtitle_style.get("speaker_colors", []),
                 custom_position_enabled=subtitle_style.get("custom_position_enabled", False),
                 custom_position_x=subtitle_style.get("custom_position_x", 50),
                 custom_position_y=subtitle_style.get("custom_position_y", 86),

@@ -41,6 +41,9 @@ class SegmentService:
                 source_words = base_model.metadata.get("words")
                 if source_words and "words" not in seg:
                     model.metadata["words"] = list(source_words)
+                source_speaker = str(base_model.metadata.get("speaker", "") or "").strip()
+                if source_speaker and "speaker" not in seg:
+                    model.metadata["speaker"] = source_speaker
                 source_highlights = base_model.metadata.get("manual_highlights")
                 if source_highlights and "manual_highlights" not in seg:
                     model.metadata["manual_highlights"] = list(source_highlights)

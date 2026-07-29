@@ -88,6 +88,7 @@ class PreviewAdapter:
             animation_duration=subtitle_style.get("animation_duration", 0.22),
             manual_highlights=subtitle_style.get("manual_highlights", []),
             word_timings=subtitle_style.get("word_timings", []),
+            speaker_colors=subtitle_style.get("speaker_colors", []),
             karaoke_timing_mode=subtitle_style.get("karaoke_timing_mode", "vietnamese"),
             custom_position_enabled=subtitle_style.get("custom_position_enabled", False),
             custom_position_x=subtitle_style.get("custom_position_x", 50),

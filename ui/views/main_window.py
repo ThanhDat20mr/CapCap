@@ -281,6 +281,8 @@ def _connect_ui_signals(gui):
         gui.subtitle_font_size_spin.valueChanged.connect(gui.sync_subtitle_font_scale_control)
     gui.subtitle_animation_combo.currentTextChanged.connect(gui.on_subtitle_animation_changed)
     gui.subtitle_bold_cb.toggled.connect(gui.update_subtitle_preview_style)
+    if hasattr(gui, "subtitle_speaker_colors_cb"):
+        gui.subtitle_speaker_colors_cb.toggled.connect(gui.update_subtitle_preview_style)
     gui.subtitle_preset_tiktok_radio.toggled.connect(gui.on_subtitle_preset_changed)
     gui.subtitle_preset_youtube_radio.toggled.connect(gui.on_subtitle_preset_changed)
     gui.subtitle_preset_minimal_radio.toggled.connect(gui.on_subtitle_preset_changed)

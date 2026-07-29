@@ -226,6 +226,10 @@ class ProjectService:
                     "end": round(float((seg or {}).get("end", 0.0) or 0.0), 3),
                     "text": _segment_voice_text(seg),
                     "group_id": str((seg or {}).get("tts_group_id") or "").strip(),
+                    # Per-speaker selections are resolved onto the segment by
+                    # the editor.  They must participate in this signature so
+                    # an assignment change cannot reuse an old voice track.
+                    "voice_name": str((seg or {}).get("voice_name") or "").strip(),
                 }
                 for seg in list(segments or [])
             ],

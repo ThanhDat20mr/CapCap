@@ -164,16 +164,17 @@ class VoiceWorkflow:
             text = self._segment_tts_text(seg)
             if not text or not wav_path or not os.path.exists(wav_path):
                 continue
+            segment_voice_name = str((seg or {}).get("voice_name") or voice_name).strip() or voice_name
             cache_key = segment_cache_key(
                 text=text,
-                voice_name=voice_name,
+                voice_name=segment_voice_name,
                 provider_speed=provider_speed,
             )
             entry = {
                 "cache_key": cache_key,
                 "wav_path": str(wav_path),
                 "text": text,
-                "voice_name": str(voice_name),
+                "voice_name": segment_voice_name,
                 "provider_speed": float(provider_speed),
             }
             manifest_segments[str(idx)] = entry
@@ -739,6 +740,7 @@ class VoiceWorkflow:
         ai_rewrite_dubbing: bool = False,
         source_language: str = "auto",
         style_instruction: str = "",
+        log: bool = True,
     ):
         prepared = []
         for seg in list(segments or []):
@@ -773,7 +775,8 @@ class VoiceWorkflow:
                 "voice_edited": voice_edited,
             }
             prepared.append(current)
-        print(f"[Voice Workflow] Prepared TTS text: adjusted=0/{len(prepared)}")
+        if log:
+            print(f"[Voice Workflow] Prepared TTS text: adjusted=0/{len(prepared)}")
         return prepared
 
     def _probe_wav_duration_seconds(self, wav_path: str) -> float:
@@ -1432,6 +1435,7 @@ class VoiceWorkflow:
         voice_provider: str = '',
         on_progress: callable = None,
         index_offset: int = 0,
+        log: bool = True,
     ):
         segments = list(segments or [])
         manifest = self._load_manifest(tmp_dir)
@@ -1447,8 +1451,9 @@ class VoiceWorkflow:
             if not txt:
                 wavs[idx] = ""
                 continue
+            segment_voice_name = str(seg.get("voice_name") or voice_name).strip() or voice_name
             seg_wav = os.path.join(tmp_dir, f"seg_{global_idx:04d}_base.wav")
-            cache_key = self._segment_cache_key(text=txt, voice_name=voice_name, provider_speed=provider_speed)
+            cache_key = self._segment_cache_key(text=txt, voice_name=segment_voice_name, provider_speed=provider_speed)
             cache_entry = manifest_segments.get(str(global_idx), {})
             cached_wav = str(cache_entry.get("wav_path", "")).strip()
             cached_key = str(cache_entry.get("cache_key", "")).strip()
@@ -1462,7 +1467,7 @@ class VoiceWorkflow:
                     "cache_key": cache_key,
                     "wav_path": cached_wav,
                     "text": txt,
-                    "voice_name": voice_name,
+                    "voice_name": segment_voice_name,
                     "provider_speed": provider_speed,
                 }
                 manifest_by_cache_key[cache_key] = dict(manifest_segments[str(global_idx)])
@@ -1475,11 +1480,13 @@ class VoiceWorkflow:
                     "text": txt,
                     "wav_path": seg_wav,
                     "cache_key": cache_key,
+                    "voice_name": segment_voice_name,
                 }
             )
 
         if pending_jobs:
-            if voice_provider == "piper":
+            pending_providers = {self._voice_provider(str(job["voice_name"])) for job in pending_jobs}
+            if pending_providers == {"piper"}:
                 configured_workers = int(os.getenv("CAPCAP_PIPER_TTS_WORKERS", self.PIPER_TTS_WORKERS) or self.PIPER_TTS_WORKERS)
                 # Keep the default responsive: two workers for ordinary
                 # projects, up to four for a long queue, never more than the
@@ -1492,7 +1499,7 @@ class VoiceWorkflow:
                     self.engine_runtime.synthesize_segment(
                         text=pending_jobs[0]["text"],
                         wav_path=pending_jobs[0]["wav_path"],
-                        voice=voice_name,
+                        voice=pending_jobs[0]["voice_name"],
                         speed=provider_speed,
                         tmp_dir=tmp_dir,
                         on_progress=on_progress,
@@ -1501,7 +1508,7 @@ class VoiceWorkflow:
                         "cache_key": str(pending_jobs[0]["cache_key"]),
                         "wav_path": str(pending_jobs[0]["wav_path"]),
                         "text": str(pending_jobs[0]["text"]),
-                        "voice_name": voice_name,
+                        "voice_name": pending_jobs[0]["voice_name"],
                         "provider_speed": provider_speed,
                     }
                     manifest_by_cache_key[str(pending_jobs[0]["cache_key"])] = dict(manifest_segments[str(pending_jobs[0]["global_idx"])])
@@ -1510,14 +1517,15 @@ class VoiceWorkflow:
                     cache_hits += 1
                 except Exception:
                     pass
-            elif voice_provider == "edge":
+            elif pending_providers == {"edge"}:
                 worker_count = 1
             else:
                 worker_count = max(1, min(self.MAX_TTS_WORKERS, len(pending_jobs)))
-            print(
-                "[Voice Workflow] TTS synth jobs: "
-                f"pending={len(pending_jobs)}, cache_hits={cache_hits}, workers={worker_count}, native_speed={provider_speed:.2f}"
-            )
+            if log:
+                print(
+                    "[Voice Workflow] TTS synth jobs: "
+                    f"pending={len(pending_jobs)}, cache_hits={cache_hits}, workers={worker_count}, native_speed={provider_speed:.2f}"
+                )
             if on_progress:
                 on_progress(f"Synthesizing {len(pending_jobs)} subtitle segments (using {worker_count} workers)...")
             if not pending_jobs:
@@ -1531,7 +1539,7 @@ class VoiceWorkflow:
                         self.engine_runtime.synthesize_segment,
                         text=job["text"],
                         wav_path=job["wav_path"],
-                        voice=voice_name,
+                        voice=job["voice_name"],
                         speed=provider_speed,
                         tmp_dir=tmp_dir,
                         on_progress=on_progress,
@@ -1566,12 +1574,12 @@ class VoiceWorkflow:
                         "cache_key": str(job["cache_key"]),
                         "wav_path": seg_wav,
                         "text": txt,
-                        "voice_name": voice_name,
+                        "voice_name": job["voice_name"],
                         "provider_speed": provider_speed,
                     }
                     manifest_by_cache_key[str(job["cache_key"])] = dict(manifest_segments[str(job["global_idx"])])
                     wavs[idx] = seg_wav
-        else:
+        elif log:
             print(f"[Voice Workflow] TTS synth jobs: pending=0, cache_hits={cache_hits}, workers=0, native_speed={provider_speed:.2f}")
 
         manifest["segments"] = manifest_segments
@@ -1588,6 +1596,7 @@ class VoiceWorkflow:
         voice_speed: float = 1.0,
         index_offset: int = 0,
         on_progress: callable = None,
+        quiet: bool = False,
     ) -> list[str]:
         os.makedirs(tmp_dir, exist_ok=True)
         safe_voice_speed = self._clamp_requested_speed(float(voice_speed))
@@ -1598,12 +1607,14 @@ class VoiceWorkflow:
             ai_rewrite_dubbing=False,
             source_language="auto",
             style_instruction="",
+            log=not quiet,
         )
-        print(
-            "[Voice Workflow] Priming TTS cache: "
-            f"segments={len(prepared_segments)}, voice={voice_name}, provider={voice_provider}, "
-            f"index_offset={int(index_offset)}"
-        )
+        if not quiet:
+            print(
+                "[Voice Workflow] Priming TTS cache: "
+                f"segments={len(prepared_segments)}, voice={voice_name}, provider={voice_provider}, "
+                f"index_offset={int(index_offset)}"
+            )
         provider_speed = self._provider_native_speed(
             provider=voice_provider,
             requested_speed=safe_voice_speed,
@@ -1616,6 +1627,7 @@ class VoiceWorkflow:
             voice_provider=voice_provider,
             on_progress=on_progress,
             index_offset=index_offset,
+            log=not quiet,
         )
 
     def run(
