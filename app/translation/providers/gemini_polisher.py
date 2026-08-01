@@ -4,7 +4,7 @@ import time
 from openai import OpenAI
 
 from ..errors import TranslationConfigError, TranslationProviderError, TranslationValidationError
-from ..srt_utils import parse_numbered_lines, validate_texts
+from ..srt_utils import parse_numbered_line_items, validate_texts
 
 
 class GeminiPolisherProvider:
@@ -35,6 +35,7 @@ class GeminiPolisherProvider:
         style_instruction: str = "",
         timeout: int = 120,
         max_retries: int = 2,
+        max_tokens: int = 4096,
     ) -> tuple[list[str], list[str], str]:
         if not self.is_configured():
             raise TranslationConfigError("OPENAI_API_KEY is not set in .env")
@@ -58,24 +59,32 @@ class GeminiPolisherProvider:
                         {"role": "user", "content": user_msg},
                     ],
                     temperature=0.2,
-                    max_tokens=4096,
+                    max_tokens=max(1024, int(max_tokens or 4096)),
                     timeout=timeout,
                 )
                 text = response.choices[0].message.content.strip()
                 if not text:
                     raise Exception("Empty response text")
 
-                lines = parse_numbered_lines(text)
+                numbered_items = parse_numbered_line_items(text)
                 expected = len(source_texts)
-                if len(lines) > expected:
-                    lines = lines[:expected]
-                if len(lines) < expected:
-                    lines.extend([""] * (expected - len(lines)))
+                expected_ids = list(range(1, expected + 1))
+                actual_ids = [number for number, _line in numbered_items]
+                if actual_ids != expected_ids:
+                    raise TranslationValidationError(
+                        f"Malformed or incomplete numbered output: expected IDs 1..{expected}, got {actual_ids[:8]}..."
+                    )
+                lines = [line for _number, line in numbered_items]
                 if not validate_texts(lines, expected):
                     raise TranslationValidationError(
                         f"Expected {expected} lines, got {len(lines)}"
                     )
                 return lines, [], "openai"
+            except TranslationValidationError:
+                # Retrying the exact same oversized request cannot restore a
+                # truncated numbered response.  The orchestrator can instead
+                # recover by switching immediately to ordered batches.
+                raise
             except Exception as e:
                 last_error = str(e)
                 if attempt < max_retries:
@@ -112,7 +121,10 @@ class GeminiPolisherProvider:
             f"Quality: Natural, spoken {target_lang}. Short sentences. "
             "Preserve names, numbers, brands, products exactly. "
             f"Adapt idioms naturally to {target_lang}, not literal. "
-            "Keep each line readable as a single subtitle cue."
+            "Keep each line readable as a single subtitle cue. "
+            "Treat this numbered batch as one continuous scene: keep names, terms, "
+            "formality, and speaker tone consistent across all cues. "
+            "Never merge, omit, reorder, or split cue numbers."
         )
         if dubbing_mode:
             rules = (
@@ -123,7 +135,9 @@ class GeminiPolisherProvider:
                 f"Quality: Natural spoken {target_lang}. Very concise. "
                 "Fit the timing constraints strictly. "
                 "Preserve names, numbers, brands, products exactly. "
-                "Each line must be speakable within the given duration."
+                "Each line must be speakable within the given duration. "
+                "Keep names, terms, and speaker tone consistent across the whole batch. "
+                "Never merge, omit, reorder, or split cue numbers."
             )
 
         system_msg = f"{header}\n{rules}"

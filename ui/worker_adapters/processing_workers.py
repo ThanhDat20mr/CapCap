@@ -77,13 +77,14 @@ class TranscriptionWorker(QThread):
 
 
 class TranslationWorker(QThread):
-    finished = Signal(str, str)
+    finished = Signal(str, str, str)
 
-    def __init__(self, srt_text, model_path, src_lang, enable_polish):
+    def __init__(self, srt_text, model_path, src_lang, target_lang, enable_polish):
         super().__init__()
         self.srt_text = srt_text
         self.model_path = model_path
         self.src_lang = src_lang
+        self.target_lang = target_lang
         self.enable_polish = enable_polish
 
     def run(self):
@@ -93,18 +94,97 @@ class TranslationWorker(QThread):
                 orch = TranslationOrchestrator()
                 provider_type, polisher = orch._resolve_ai_provider()
                 print(f"[Translate] Using AI: {orch._describe_ai_provider(provider_type)}")
+                result = orch.translate_srt(
+                    self.srt_text,
+                    src_lang=self.src_lang,
+                    target_lang=self.target_lang,
+                    enable_polish=self.enable_polish,
+                )
+                if not result.success:
+                    raise RuntimeError("; ".join(result.errors) or "Translation failed.")
+                translated_srt = orch.result_to_srt(result)
+                fallback_notice = "\n".join(result.warnings or []) if result.used_fallback else ""
             except Exception:
-                pass
-            engine = EngineRuntime()
-            translated_srt = engine.translate_srt(
-                self.srt_text,
-                model_path=self.model_path,
-                src_lang=self.src_lang,
-                enable_polish=self.enable_polish,
-            )
-            self.finished.emit(translated_srt, "")
+                raise
+            self.finished.emit(translated_srt, "", fallback_notice)
         except Exception as exc:
             print(f"Translation Thread Error: {exc}")
+            self.finished.emit("", str(exc), "")
+
+
+class OllamaStatusWorker(QThread):
+    """Probe the local Ollama server without blocking the Settings dialog."""
+    finished = Signal(bool, str)
+
+    def __init__(self, base_url: str):
+        super().__init__()
+        self.base_url = str(base_url or "http://localhost:11434/v1")
+
+    def run(self):
+        try:
+            import requests
+
+            endpoint = self.base_url.rstrip("/")
+            if endpoint.endswith("/v1"):
+                endpoint = endpoint[:-3]
+            response = requests.get(f"{endpoint}/api/tags", timeout=2.5)
+            response.raise_for_status()
+            self.finished.emit(True, "Connected")
+        except Exception as exc:
+            self.finished.emit(False, f"Not connected: {exc}")
+
+
+class OcrTranslatorCaptureWorker(QThread):
+    """One-shot OCR capture used by the editor utility, never by ASR."""
+    finished = Signal(str, str)
+
+    def __init__(self, video_path, position_seconds, normalized_rect):
+        super().__init__()
+        self.video_path = video_path
+        self.position_seconds = float(position_seconds or 0.0)
+        self.normalized_rect = tuple(normalized_rect or ())
+
+    def run(self):
+        try:
+            from ocr_processor import extract_ocr_text_from_video_region
+            text = extract_ocr_text_from_video_region(
+                self.video_path, self.position_seconds, self.normalized_rect
+            )
+            self.finished.emit(text, "")
+        except Exception as exc:
+            self.finished.emit("", str(exc))
+
+
+class OcrTranslatorTranslationWorker(QThread):
+    """Translate a captured OCR value with the configured app provider."""
+    finished = Signal(str, str)
+
+    def __init__(self, text, source_lang, target_lang):
+        super().__init__()
+        self.text = str(text or "")
+        self.source_lang = str(source_lang or "auto")
+        self.target_lang = str(target_lang or "vi")
+
+    def run(self):
+        try:
+            engine = EngineRuntime()
+            result = engine.translate_segments(
+                [{"start": 0.0, "end": 1.0, "text": self.text}],
+                src_lang=self.source_lang,
+                target_lang=self.target_lang,
+                enable_polish=False,
+                optimize_subtitles=False,
+            )
+            first = (result or [None])[0]
+            if isinstance(first, dict):
+                translated = first.get("text", "")
+            else:
+                translated = getattr(first, "text", "")
+            translated = str(translated or "").strip()
+            if not translated:
+                raise RuntimeError("The translator returned no text.")
+            self.finished.emit(translated, "")
+        except Exception as exc:
             self.finished.emit("", str(exc))
 
 

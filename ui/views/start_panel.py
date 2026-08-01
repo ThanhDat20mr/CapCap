@@ -234,6 +234,9 @@ def build_start_group(gui, left_layout):
     # Generation milestones remain visible while users work through the
     # configuration pages below.
     gui.workflow_stage_badges = {}
+    # Keep the label widgets too: the Translate label is updated with the
+    # provider that actually completed the most recent translation.
+    gui.workflow_stage_labels = {}
     stage_box = QFrame()
     stage_box.setObjectName("statusCard")
     stage_layout = QVBoxLayout(stage_box)
@@ -251,6 +254,7 @@ def build_start_group(gui, left_layout):
         row.addWidget(status)
         stage_layout.addLayout(row)
         gui.workflow_stage_badges[key] = status
+        gui.workflow_stage_labels[key] = label
     workflow_shell_layout.addWidget(stage_box)
 
     gui.device_mode_label = QLabel()

@@ -414,6 +414,7 @@ class PipelineController:
             self.gui.current_project_state = state
             self.gui.load_project_context(state)
             self.gui.refresh_ui_state()
+            self._notify_translation_fallback_if_used()
         except Exception as e:
             self.gui.log(f"[Pipeline] Error reloading state: {e}")
 
@@ -429,6 +430,26 @@ class PipelineController:
             self.gui.log(f"[Pipeline] Reached requested stage: {self.target_stage}.")
         else:
             self.pipeline_advance("translation")
+
+    def _notify_translation_fallback_if_used(self):
+        """Show a UI notice when an AI translation request used Google fallback."""
+        selected_provider = str(os.getenv("OPENAI_PROVIDER") or "google").strip().lower()
+        if selected_provider == "google" or not self.gui.is_ai_polish_enabled():
+            return
+        models = list(getattr(self.gui, "current_translated_segment_models", []) or [])
+        providers = {
+            str(getattr(model, "metadata", {}).get("translation_provider", "") or "").strip().lower()
+            for model in models
+        }
+        if "google-web" not in providers:
+            return
+        signature = f"{getattr(self, 'prepare_run_id', 0)}:{selected_provider}"
+        if getattr(self, "_fallback_notification_signature", "") == signature:
+            return
+        self._fallback_notification_signature = signature
+        notice = "AI Provider is unavailable. Translation completed using Google Translate instead."
+        self.gui.log(f"[Translation] {notice}")
+        QMessageBox.information(self.gui, "Translation Fallback", notice)
 
     def pipeline_advance(self, completed_step: str):
         """Manages transitions between major pipeline segments."""

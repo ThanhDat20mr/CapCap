@@ -1,14 +1,16 @@
 import os
 import shutil
+import subprocess
 import threading
 import traceback
 from pathlib import Path
 
-from runtime_paths import models_path, workspace_root
+from runtime_paths import bin_path, models_path, workspace_root
 from services.resource_download_service import ResourceDownloadService
 
 
 _WHISPER_MODEL_CACHE: dict[tuple[str, str, str], object] = {}
+_WHISPER_BATCHED_PIPELINE_CACHE: dict[int, object] = {}
 _WHISPER_MODEL_LOCK = threading.Lock()
 _WHISPER_TRANSCRIBE_LOCK = threading.Lock()
 _OPENMP_WORKAROUND_APPLIED = False
@@ -122,6 +124,11 @@ def _workspace_root():
 
 def _candidate_cuda_bin_dirs() -> list[str]:
     candidates = []
+    # In a PyInstaller build the canonical bundled pack lives under
+    # _internal/bin. Keep it first so Faster-Whisper uses that single copy.
+    bundled_cuda_bin = bin_path("cuda12_fw")
+    if bundled_cuda_bin:
+        candidates.append(str(bundled_cuda_bin))
     workspace_cuda_bin = _workspace_root() / "bin" / "cuda12_fw"
     if workspace_cuda_bin.exists():
         candidates.append(str(workspace_cuda_bin))
@@ -293,6 +300,10 @@ def _load_whisper_model(model_name):
             if load_error[0]:
                 raise load_error[0]
             model = load_result[0]
+            # WhisperModel does not publicly expose its selected device. Keep
+            # the resolved runtime with the cached instance so batched GPU
+            # inference cannot accidentally run after a CPU fallback.
+            setattr(model, "_capcap_runtime_device", runtime["device"])
             _WHISPER_MODEL_CACHE[cache_key] = model
             return model
         except Exception as exc:
@@ -326,6 +337,7 @@ def _load_whisper_model(model_name):
                 if fb_error[0]:
                     raise fb_error[0]
                 model = fb_result[0]
+                setattr(model, "_capcap_runtime_device", "cpu")
                 _WHISPER_MODEL_CACHE[fallback_key] = model
                 return model
             raise
@@ -339,10 +351,71 @@ def load_whisper_model(model_path):
 def unload_whisper_models():
     with _WHISPER_MODEL_LOCK:
         _WHISPER_MODEL_CACHE.clear()
+        _WHISPER_BATCHED_PIPELINE_CACHE.clear()
         print("[Whisper] All cached models unloaded")
 
 
-def transcribe_audio_with_model(model, audio_path, *, language="auto", task="transcribe"):
+def _gpu_memory_mb() -> int:
+    """Best-effort VRAM query used only to select a conservative batch size."""
+    try:
+        output = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+        return max(0, int(str(output).splitlines()[0].strip()))
+    except Exception:
+        return 0
+
+
+def _whisper_gpu_batch_size() -> int:
+    """Return the configured GPU batch size, or a VRAM-safe auto value."""
+    if str(os.getenv("CAPCAP_WHISPER_GPU_BATCHED", "1") or "1").strip().lower() in {"0", "false", "no", "off"}:
+        return 0
+    raw = str(os.getenv("CAPCAP_WHISPER_GPU_BATCH_SIZE", "auto") or "auto").strip().lower()
+    if raw in {"0", "off", "false", "no"}:
+        return 0
+    if raw not in {"", "auto", "default"}:
+        try:
+            return max(1, min(32, int(raw)))
+        except ValueError:
+            pass
+    # RTX 2060-class cards (about 6 GB) use 8; unknown/low-VRAM cards use 4.
+    return 8 if _gpu_memory_mb() >= 5500 else 4
+
+
+def _is_cuda_memory_error(exc: Exception) -> bool:
+    detail = str(exc).lower()
+    return any(token in detail for token in (
+        "out of memory", "cudaerror_memoryallocation", "cuda memory", "memory allocation", "cudnn_status_alloc_failed",
+    ))
+
+
+def _transcribe_with_vad_fallback(transcribe_fn, audio_path: str, kwargs: dict):
+    try:
+        return transcribe_fn(audio_path, **kwargs)
+    except Exception as exc:
+        error_text = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+        if "onnxruntime" not in error_text.lower() and "onnxruntimeerror" not in error_text.lower():
+            raise
+        print(f"[Whisper] VAD failed with ONNX Runtime, retrying without VAD: {error_text}")
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs["vad_filter"] = False
+        return transcribe_fn(audio_path, **fallback_kwargs)
+
+
+def _get_batched_whisper_pipeline(model):
+    key = id(model)
+    pipeline = _WHISPER_BATCHED_PIPELINE_CACHE.get(key)
+    if pipeline is None:
+        from faster_whisper import BatchedInferencePipeline
+        pipeline = BatchedInferencePipeline(model=model)
+        _WHISPER_BATCHED_PIPELINE_CACHE[key] = pipeline
+    return pipeline
+
+
+def transcribe_audio_with_model(model, audio_path, *, language="auto", task="transcribe", use_batched: bool = True):
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio not found at {audio_path}")
 
@@ -356,16 +429,50 @@ def transcribe_audio_with_model(model, audio_path, *, language="auto", task="tra
     }
 
     with _WHISPER_TRANSCRIBE_LOCK:
-        try:
-            segments, _info = model.transcribe(audio_path, **transcribe_kwargs)
-        except Exception as exc:
-            error_text = "".join(traceback.format_exception_only(type(exc), exc)).strip()
-            if "onnxruntime" not in error_text.lower() and "onnxruntimeerror" not in error_text.lower():
-                raise
-            print(f"[Whisper] VAD failed with ONNX Runtime, retrying without VAD: {error_text}")
-            fallback_kwargs = dict(transcribe_kwargs)
-            fallback_kwargs["vad_filter"] = False
-            segments, _info = model.transcribe(audio_path, **fallback_kwargs)
+        batch_size = (
+            _whisper_gpu_batch_size()
+            if use_batched and getattr(model, "_capcap_runtime_device", "") == "cuda"
+            else 0
+        )
+        if batch_size > 1:
+            try:
+                pipeline = _get_batched_whisper_pipeline(model)
+                while batch_size > 1:
+                    try:
+                        print(f"[Whisper] Batched GPU inference enabled (batch_size={batch_size}).")
+                        segments, _info = _transcribe_with_vad_fallback(
+                            pipeline.transcribe,
+                            audio_path,
+                            {**transcribe_kwargs, "batch_size": batch_size},
+                        )
+                        # Both Faster-Whisper paths return lazy segment
+                        # generators. Consume while still inside this retry
+                        # block so CUDA OOM is caught and the global GPU lock
+                        # protects the actual inference work.
+                        raw_segments = list(segments)
+                        break
+                    except Exception as exc:
+                        if not _is_cuda_memory_error(exc):
+                            print(f"[Whisper] Batched GPU inference failed; using standard inference: {exc}")
+                            raise
+                        smaller_batch = batch_size // 2
+                        if smaller_batch <= 1:
+                            print("[Whisper] Batched GPU inference ran out of VRAM; using standard inference.")
+                            raise
+                        print(f"[Whisper] Batched GPU inference ran out of VRAM at batch_size={batch_size}; retrying batch_size={smaller_batch}.")
+                        batch_size = smaller_batch
+                else:
+                    raise RuntimeError("No viable batched GPU inference size")
+            except Exception:
+                # Preserve the existing non-batched path as the reliable
+                # fallback for older faster-whisper builds and limited VRAM.
+                segments, _info = _transcribe_with_vad_fallback(model.transcribe, audio_path, transcribe_kwargs)
+                raw_segments = list(segments)
+        else:
+            if use_batched and getattr(model, "_capcap_runtime_device", "") == "cuda":
+                print("[Whisper] Standard GPU inference (batched inference disabled).")
+            segments, _info = _transcribe_with_vad_fallback(model.transcribe, audio_path, transcribe_kwargs)
+            raw_segments = list(segments)
 
     return [
         {
@@ -384,7 +491,7 @@ def transcribe_audio_with_model(model, audio_path, *, language="auto", task="tra
                 and str(getattr(word, "word", "") or "").strip()
             ],
         }
-        for segment in segments
+        for segment in raw_segments
         if segment.text and segment.text.strip()
     ]
 

@@ -15,10 +15,7 @@
 - Speech-to-text: `faster-whisper` (CPU/GPU), `SenseVoice` (CPU, multilingual), or `RapidOCR` (video subtitle)
 - **Offline speaker diarization** — optional Sherpa-ONNX speaker detection for Whisper and SenseVoice; no PyTorch dependency. Speaker turns are colour-coded on TS1 and retained with the project.
 - OCR subtitle region editor with separate show/hide control
-- AI translation — 5 providers:
-  - **Local GGUF** (default, offline, CPU/GPU, `.gguf` model)
-    - **Normal Quality AI Model** — `Hy-MT2-1.8B-Q4_K_M.gguf`
-    - **High Quality AI Model** — `gemma-4-E4B-it-Q4_K_M.gguf`
+- AI translation — cloud/API providers:
   - **OpenAI** (Google AI Studio, cloud, free tier)
   - **Ollama** (local, no internet, `ollama pull qwen2.5:7b`)
   - **Microsoft Translator** (Azure Cognitive Services, cloud)
@@ -27,7 +24,7 @@
 - Vietnamese and English voice with `Piper` (fully offline) or `edge-tts` (online)
 - Default bundled Piper voice: `ngochuyen`
 - Vocal/instrumental separation via ONNX Runtime (CPU, ~9s for 10s audio)
-- VAD + denoise + loudness normalization for cleaner transcription
+- Adaptive ASR audio normalization — quietly recorded audio is measured and only conservatively boosted before VAD/ASR; source and export audio remain unchanged
 - Guided pipeline: **Prepare → Transcript → Translate → TTS → Export**, with completion badges
 - Generate menu for a guided **Step-by-Step** workflow or the **Full Pipeline**
 - Optional TTS — after translation, choose **TTS** or **Skip** and export translated subtitles with the original audio when no voice-over is needed
@@ -41,6 +38,7 @@
 - **Single-segment Regenerate Voice** — probes the generated `.wav` with ffprobe for the exact duration, updates the segment + layer `_audio_end`, and redraws the timeline immediately so audio bleed is reflected in real time.
 - **Per-track inspectors** — clicking a layer opens a dedicated inspector card for Subtitle, Audio, Blur, Logo, Mask, Text, or Video.
 - **Drag-to-position overlay layers** — Blur, Logo, Mask, Text, and Subtitle layers can be positioned directly on the video preview when their timeline layer is selected.
+- **Manual subtitle segments** — use **+ Layer → Subtitle Segment** to insert a missing TS1 segment at the playhead, then edit it in the Subtitle inspector.
 - **Timed overlay layers** — Blur, Logo, Mask, and Text layers support start/end times, edge dragging on the timeline, direct timing fields, and Split.
 - **TEXT track (T1)** — add multiple editable text layers with content, font family, subtitle-matched font-size presets, text color, optional background color, position, and timing. Text layers are included in Fast Preview and final export.
 - **Logo / Watermark track (L1)** — add multiple images and place them independently on the video; pick colour, opacity, rotation, and timing from the inspector.
@@ -49,16 +47,15 @@
 - **Runtime logs** — Advanced → Logs shows app messages, console output, and error tracebacks. Export a log file for bug reports or clear the current session log.
 - **Blur inspector** — per-region blur radius (1-20), opacity, and pixelate (mosaic) toggle
 - **Vietnamese normalizer dictionary manager** (More → Normalizer Dictionary) — CRUD editor for custom acronym/non-Vietnamese word mappings
-- **GGUF translator improvements** — automatic enable when provider is local, absolute model paths, smarter CJK quality validation, increased token limit
 - **Label mode** — toggles the track label bar visibility
 
 ## Quick Start
 
 1. Open the launcher — select **CPU** or **GPU (Recommended)** mode
-2. GPU mode: Whisper + local AI models use GPU acceleration
+2. GPU mode: Whisper uses GPU acceleration
 3. CPU mode: SenseVoice (CPU-only ASR) + Google Translate by default
 4. Open Settings (More → Settings)
-5. Default translator provider is **Local (GGUF)** (offline, CPU/GPU)
+5. Choose Google Translate, Gemini, OpenAI, or Ollama in Settings
 6. Optionally switch to:
    - **OpenAI** — get [free API key](https://aistudio.google.com/apikey), paste it
    - **Ollama** — install [Ollama](https://ollama.com), run `ollama pull qwen2.5:7b`
@@ -91,7 +88,6 @@ Videos over 2 hours are blocked from opening. Use the **Split Video** button to 
 | RapidOCR | ✅ Works | ✅ Supported |
 | Vocal separation (ONNX) | ✅ Works (~9s) | CPU only |
 | Piper TTS | ✅ Works | CPU only |
-| Local GGUF translation | ✅ Works | ✅ Supported |
 | Cloud API translation | ✅ Works | Same |
 
 **GPU requirements:** NVIDIA GPU + driver installed. CUDA runtime bundled — no CUDA Toolkit download needed.
@@ -136,15 +132,15 @@ The inspector always stays expanded and swaps its card to match the track type y
 - **Blur** (idx 2) — B1 Blur track on/off toggle + per-region controls: `Blur radius` (1-20), `Opacity` (0-100%), `Pixelate` (mosaic) + `Pixel size` (2-60). Multiple regions stack vertically in the timeline so overlapping blurs stay visible.
 - **Video** (idx 3) — V1 Video track filter. Preset + intensity sliders, plus per-channel adjust sliders (brightness, contrast, saturation, temperature, gamma, hue), Apply / Revert.
 - **Default** (idx 4) — fallback card when no track layer is selected.
-- **Logo (L1)** (idx 5) — `Colour` (background swatch), `Opacity` (0-100%), `Rotation` (-180 to 180°). Drag the logo on the video to move; drag a corner to resize; X to delete.
-- **Mask (M1)** (idx 6) — `Colour` (background swatch), `Opacity` (0-100%). Drag the mask on the video to move; drag a corner to resize; X to delete. The colour is **only applied while the video is playing** — moving the mask does not trigger any mpv filter update, so dragging stays smooth. The overlay is locked (`set_editable(False)`) while playing so you cannot accidentally move a region during playback.
+- **Logo (L1)** (idx 5) — `Colour` (background swatch), `Opacity` (0-100%), `Rotation` (-180 to 180°). Drag the logo on the video to move; drag a corner to resize; use the shared timeline **Delete** button to remove it.
+- **Mask (M1)** (idx 6) — `Colour` (background swatch), `Opacity` (0-100%). Drag the mask on the video to move; drag a corner to resize; use the shared timeline **Delete** button to remove it. The colour is **only applied while the video is playing** — moving the mask does not trigger any mpv filter update, so dragging stays smooth. The overlay is locked (`set_editable(False)`) while playing so you cannot accidentally move a region during playback.
 - **Text (T1)** — edit text content, font family, font-size preset, text colour, optional background colour, and start/end timing. Text cannot be empty; it falls back to `Text`.
 
 Behavior notes:
 - By default, TTS reads the same text shown in the subtitle. A separate voice text is only used when you explicitly edit it in the inspector and regenerate voice.
 - The "Show original" checkbox is removed — original text is always shown.
 - Shared timing chips and "Add highlight" button were removed from the inspector; each segment card shows its own timing info.
-- The Logo, Blur, and Mask overlay regions use the same drag/resize/delete UX inherited from the blur overlay.
+- Blur, Logo, Mask, and Text overlays use the same drag/resize interaction. Delete the selected layer with the shared timeline **Delete** button.
 - Timeline track labels (left strip) are clickable: A1 / A2 / TS1 toggle mute, B1 toggles the blur effect, L1 toggles the logo, M1 toggles the mask.
 
 ### Timeline
@@ -173,7 +169,7 @@ Behavior notes:
 | Vocal separation | ONNX Runtime + UVR MDX-NET model, Demucs (Hybrid Transformer, optional) |
 | Audio post-process | FFmpeg (afftdn denoise, loudnorm) |
 | Audio analysis | scipy, librosa, numpy, soundfile |
-| Translation | OpenAI API / Ollama / llama-cpp-python (GGUF) / Microsoft Translator |
+| Translation | Google Translate / Gemini / OpenAI / Ollama / Microsoft Translator / OpenRouter-compatible API |
 | Fallback translate | Google web translate (free, no key) |
 | TTS | Piper (local), edge-tts (online) |
 | Vietnamese normalization | vietnormalizer |
@@ -191,7 +187,7 @@ requirements-base.txt:
 requirements-local.txt:
   faster-whisper, onnxruntime-gpu, scipy, librosa, numpy, soundfile
   edge-tts, piper-tts, vietnormalizer
-  openai, llama-cpp-python, huggingface_hub
+  openai, huggingface_hub
   sherpa-onnx, rapidocr, opencv-python-headless
 ```
 
@@ -202,19 +198,11 @@ requirements-local.txt:
 | `TRANSCRIPTION_ENGINE` | `whisper` | ASR engine: `whisper`, `sensevoice`, or `ocr` |
 | `CAPCAP_DEVICE` | `cuda` | Processing mode set by launcher: `cuda` or `cpu` |
 | `CAPCAP_WHISPER_DEVICE` | (auto-detect) | Force `cpu` to avoid CUDA conflicts |
-| `AI_POLISHER_PROVIDER` | `local` | AI provider: `local` (GGUF), `gemini` (OpenAI API) |
-| `OPENAI_PROVIDER` | `local` | Translator source: `local`, `openai`, `ollama`, or `google` |
+| `AI_POLISHER_PROVIDER` | `gemini` | API translation client (`gemini`, `openai`, or `ollama`) |
+| `OPENAI_PROVIDER` | `google` | Translator source: `gemini`, `openai`, `ollama`, or `google` |
 | `OPENAI_API_KEY` | (none) | API key for OpenAI/Ollama/OpenRouter providers |
 | `OPENAI_MODEL` | `gemma-4-31b-it` | Model name for OpenAI/Ollama/OpenRouter |
 | `OPENAI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai/` | API endpoint URL |
-| `LOCAL_TRANSLATOR_MODEL_TIER` | `normal` | Local GGUF quality: `normal` (Hy-MT2) or `high` (Gemma 4) |
-| `LOCAL_TRANSLATOR_MODEL_PATH` | `models/ai/Hy-MT2-1.8B-Q4_K_M.gguf` | GGUF model path |
-| `LOCAL_TRANSLATOR_GPU_LAYERS` | `0` | GPU layers to offload (0 = CPU-only, -1 = all) |
-| `LOCAL_TRANSLATOR_N_CTX` | `8192` | GGUF context size |
-| `LOCAL_TRANSLATOR_N_THREADS` | `4` | CPU threads for GGUF inference |
-| `LOCAL_TRANSLATOR_MAX_TOKENS` | `2048` | Max output tokens |
-| `LOCAL_TRANSLATOR_TEMPERATURE` | `0.1` | Sampling temperature |
-| `TRANSLATOR_STYLE` | (empty) | Translation style hint: e.g. `natural`, `funny`, `formal` |
 | `OCR_SUBTITLE_REGION` | `bottom` | OCR crop preset: `bottom` or `top` |
 | `OCR_SUBTITLE_RECT` | (empty) | Explicit normalized OCR crop rectangle |
 | `MS_TRANSLATOR_KEY` | (empty) | Azure Translator API key |
@@ -235,18 +223,13 @@ Per-card progress replaces the status pill during an Auto Download. Click **Refr
 
 | Resource | Target | Auto Download |
 |---|---|---|
-| Normal AI Model (Hy-MT2) | `models/ai/Hy-MT2-1.8B-Q4_K_M.gguf` | ❌ manual only |
-| High AI Model (Gemma 4) | `models/ai/gemma-4-E4B-it-Q4_K_M.gguf` | ❌ manual only |
 | Whisper Medium | `models/faster_whisper/medium/` | ✅ |
 | GPU Acceleration Pack (CUDA 12) | `bin/cuda12_fw/` | ✅ |
 | SenseVoice ASR Model | `models/sensevoice/` | ✅ |
 | Local Vietnamese Voices (Piper) | `models/piper/` | ✅ |
 | Local English Voices (Piper) | `models/piper-en/` | ✅ |
-| Speaker Diarization | `models/pyannote/` | manual model files |
+| Speaker Diarization | `models/pyannote/` | bundled |
 
-- **AI Model** (Normal / High)
-  - File: `models/ai/Hy-MT2-1.8B-Q4_K_M.gguf` (default) or `models/ai/gemma-4-E4B-it-Q4_K_M.gguf`
-  - Download manually from the [CapCapResource HF repo](https://huggingface.co/Hacht/CapCapResource).
 - **Whisper Medium**
   - Folder: `models/faster_whisper/medium/`
   - Manual: [`Hacht/CapCapResource/faster_whisper`](https://huggingface.co/Hacht/CapCapResource/tree/main/faster_whisper)
@@ -266,7 +249,7 @@ Per-card progress replaces the status pill during an Auto Download. Click **Refr
   - Download through **Manage Resources** or install the supplied English Piper `.onnx` files with their `.onnx.json` configs.
 - **Speaker Diarization (optional)**
   - Folder: `models/pyannote/`
-  - Requires the supplied Sherpa-ONNX segmentation and speaker-embedding `.onnx` models. It runs locally through ONNX Runtime and is used only when **Speaker Diarization** is enabled for Whisper or SenseVoice.
+  - Includes only the required Sherpa-ONNX segmentation and 3D-Speaker embedding models. It runs locally through ONNX Runtime and is used only when **Speaker Diarization** is enabled for Whisper or SenseVoice.
 
 ## Run From Source
 
@@ -348,7 +331,6 @@ CapCap/
 │   │   └── providers/
 │   │       ├── gemini_polisher.py        # OpenAI-compatible API (Google AI Studio, Ollama)
 │   │       ├── google_web_translator.py  # Free Google web translate fallback
-│   │       ├── local_polisher.py         # Local GGUF provider (CPU + GPU)
 │   │       ├── microsoft_translator.py   # Azure Cognitive Services Translator
 │   │       └── ai_polisher.py            # OpenRouter generic API provider
 │   ├── engines/                      # Engine adapters (whisper, sensevoice, OCR, TTS, etc.)
@@ -409,9 +391,6 @@ CapCap/
 │   ├── vietnormalizer/               # Custom dict CSV files (acronyms, non-VN words)
 │   ├── faster_whisper/               # CTranslate2 Whisper models (cached)
 │   ├── piper/                        # Piper voice models (12+ Vietnamese voices)
-│   └── ai/                           # GGUF translation models
-│       ├── Hy-MT2-1.8B-Q4_K_M.gguf      # Normal quality (default)
-│       └── gemma-4-E4B-it-Q4_K_M.gguf   # High quality
 ├── assets/                           # App assets (icon, preview images)
 ├── .env                              # Environment configuration
 └── .env_example                      # Example environment config
@@ -422,7 +401,6 @@ CapCap/
 GPU can accelerate:
 - `faster-whisper`
 - `RapidOCR`
-- local GGUF translation (if the bundled `llama-cpp-python` build supports GPU offload)
 
 CPU-only paths in the current app:
 - SenseVoice ASR
@@ -455,6 +433,5 @@ Apache License 2.0. See [LICENSE](./LICENSE).
 - [Demucs](https://github.com/facebookresearch/demucs) — Alternative vocal separation (Hybrid Transformer)
 - [piper](https://github.com/rhasspy/piper) — Local text-to-speech
 - [edge-tts](https://github.com/rany2/edge-tts) — Online TTS fallback
-- [llama-cpp-python](https://github.com/abetlen/llama-cpp-python) — GGUF local translation
 - [vietnormalizer](https://github.com/nghimestudio/vietnormalizer) — Vietnamese text normalization
 - [PyInstaller](https://github.com/pyinstaller/pyinstaller) — Windows .exe packaging

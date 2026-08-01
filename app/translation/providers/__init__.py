@@ -4,7 +4,6 @@ __all__ = [
     "AIPolisherProvider",
     "GeminiPolisherProvider",
     "GoogleWebTranslatorProvider",
-    "LocalPolisherProvider",
     "MicrosoftTranslatorProvider",
 ]
 
@@ -12,7 +11,6 @@ _MODULE_MAP = {
     "AIPolisherProvider": ".ai_polisher",
     "GeminiPolisherProvider": ".gemini_polisher",
     "GoogleWebTranslatorProvider": ".google_web_translator",
-    "LocalPolisherProvider": ".local_polisher",
     "MicrosoftTranslatorProvider": ".microsoft_translator",
 }
 

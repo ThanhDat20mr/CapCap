@@ -368,17 +368,8 @@ def _unload_whisper():
         pass
 
 
-def _unload_gguf():
-    try:
-        from translation.providers.local_polisher import LocalPolisherProvider
-        LocalPolisherProvider.unload_cached_model()
-    except Exception:
-        pass
-
-
 def _unload_models():
     _unload_whisper()
-    _unload_gguf()
 
 
 def main() -> None:

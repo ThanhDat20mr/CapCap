@@ -1,6 +1,7 @@
 import os
 import concurrent.futures
 import hashlib
+import re
 import subprocess
 import time
 
@@ -16,6 +17,13 @@ class PrepareWorkflow:
     CHUNK_OVERLAP_SECONDS = 0.5
     CHUNK_SILENCE_NOISE = "-35dB"
     CHUNK_SILENCE_DURATION_SECONDS = 0.35
+    # ASR-only gain control: quiet speech is easy for VAD to misclassify as
+    # silence.  Keep this deliberately conservative so normal recordings are
+    # untouched and background noise is not amplified excessively.
+    ASR_NORMALIZE_TRIGGER_DB = -35.0
+    ASR_NORMALIZE_TARGET_DB = -25.0
+    ASR_NORMALIZE_MAX_GAIN_DB = 12.0
+    ASR_NORMALIZE_PEAK_DB = -2.0
 
     def __init__(self, workspace_root: str):
         self.workspace_root = workspace_root
@@ -25,12 +33,127 @@ class PrepareWorkflow:
         self.segment_regroup_service = SegmentRegroupService()
         self.engine_runtime = EngineRuntime()
 
+    def _prepare_asr_working_audio(self, audio_path: str, project_state) -> str:
+        """Return a cached, gain-adjusted copy only when ASR input is quiet.
+
+        The source/extracted audio is never modified.  This happens before
+        both chunk silence detection and model VAD, which is where soft
+        dialogue could otherwise be discarded.
+        """
+        source = str(audio_path or "").strip()
+        if not source or not os.path.exists(source):
+            return source
+        try:
+            stat = os.stat(source)
+            fingerprint = hashlib.sha256(
+                f"v1|{os.path.abspath(source)}|{stat.st_size}|{stat.st_mtime_ns}|"
+                f"{self.ASR_NORMALIZE_TRIGGER_DB}|{self.ASR_NORMALIZE_TARGET_DB}|"
+                f"{self.ASR_NORMALIZE_MAX_GAIN_DB}|{self.ASR_NORMALIZE_PEAK_DB}".encode("utf-8")
+            ).hexdigest()
+        except OSError:
+            return source
+
+        cached = project_state.settings.get("asr_audio_normalization", {}) or {}
+        if isinstance(cached, dict) and cached.get("signature") == fingerprint:
+            cached_path = str(cached.get("path") or "")
+            if bool(cached.get("applied")) and cached_path and os.path.exists(cached_path):
+                print(
+                    "[ASR Audio] Reusing cached normalized audio "
+                    f"(gain={float(cached.get('gain_db', 0.0)):+.1f} dB)."
+                )
+                return cached_path
+            if not bool(cached.get("applied")):
+                print("[ASR Audio] Reusing level analysis: normalization not needed.")
+                return source
+
+        ffmpeg = str(bin_path("ffmpeg", "ffmpeg.exe"))
+        if not os.path.exists(ffmpeg):
+            print("[ASR Audio] FFmpeg unavailable; skipping level normalization.")
+            return source
+        try:
+            probe = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", source, "-af", "volumedetect", "-f", "null", "-"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            output = f"{probe.stdout}\n{probe.stderr}"
+            mean_match = re.search(r"mean_volume:\s*([-+]?\d+(?:\.\d+)?)\s*dB", output)
+            max_match = re.search(r"max_volume:\s*([-+]?\d+(?:\.\d+)?)\s*dB", output)
+            if not mean_match:
+                print("[ASR Audio] Could not measure audio level; using source audio.")
+                return source
+            mean_db = float(mean_match.group(1))
+            peak_db = float(max_match.group(1)) if max_match else -99.0
+        except Exception as exc:
+            print(f"[ASR Audio] Level analysis failed; using source audio: {exc}")
+            return source
+
+        gain_db = 0.0
+        if mean_db < self.ASR_NORMALIZE_TRIGGER_DB:
+            target_gain = self.ASR_NORMALIZE_TARGET_DB - mean_db
+            peak_limited_gain = self.ASR_NORMALIZE_PEAK_DB - peak_db
+            gain_db = max(0.0, min(target_gain, peak_limited_gain, self.ASR_NORMALIZE_MAX_GAIN_DB))
+
+        profile = {
+            "signature": fingerprint,
+            "source": source,
+            "mean_db": round(mean_db, 2),
+            "peak_db": round(peak_db, 2),
+            "gain_db": round(gain_db, 2),
+            "applied": gain_db >= 0.5,
+            "path": "",
+        }
+        if gain_db < 0.5:
+            print(
+                f"[ASR Audio] Level: mean={mean_db:.1f} dB, peak={peak_db:.1f} dB; "
+                "normalization not needed."
+            )
+        else:
+            normalized_path = self.project_service.build_path(project_state, "audio", "asr_normalized.wav")
+            try:
+                subprocess.run(
+                    [
+                        ffmpeg, "-hide_banner", "-y", "-i", source,
+                        "-af", f"volume={gain_db:.2f}dB",
+                        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", normalized_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                profile["path"] = normalized_path
+                print(
+                    f"[ASR Audio] Quiet input detected: mean={mean_db:.1f} dB, peak={peak_db:.1f} dB; "
+                    f"applying +{gain_db:.1f} dB before ASR."
+                )
+            except Exception as exc:
+                profile["applied"] = False
+                profile["gain_db"] = 0.0
+                print(f"[ASR Audio] Normalization failed; using source audio: {exc}")
+
+        project_state.set_setting("asr_audio_normalization", profile)
+        self.project_service.save_json_artifact(
+            project_state,
+            "asr_audio_profile",
+            os.path.join("analysis", "asr_audio_profile.json"),
+            profile,
+        )
+        self.project_service.save_project(project_state)
+        return str(profile["path"] or source)
+
     def _transcribe_long_audio_chunked(self, *, audio_path: str, project_state, model_path: str, language: str, on_chunk_ready=None):
         overall_started = time.perf_counter()
         chunk_dir = self.project_service.build_path(project_state, "audio", "chunks")
         chunk_cache_dir = self.project_service.build_path(project_state, "analysis", "chunk_results")
         transcription_config = {
             "vad_mode": "silencedetect",
+            # Each item is already a short, speech-focused chunk.  Batched
+            # inference only has one short item to work on here and can alter
+            # Faster-Whisper's VAD segmentation, so use its stable standard
+            # path instead.  This also invalidates any cache produced by the
+            # old experimental batched-per-chunk behavior.
+            "inference_mode": "standard_per_chunk_v2",
             "target_chunk_duration_seconds": self.CHUNK_TARGET_DURATION_SECONDS,
             "max_chunk_duration_seconds": self.CHUNK_MAX_DURATION_SECONDS,
             "overlap_seconds": self.CHUNK_OVERLAP_SECONDS,
@@ -131,7 +254,7 @@ class PrepareWorkflow:
     def _should_enable_asr_translate_streaming(self, *, translator_ai: bool) -> bool:
         if not bool(translator_ai):
             return True
-        provider = str(os.getenv("OPENAI_PROVIDER") or "local").strip().lower()
+        provider = str(os.getenv("OPENAI_PROVIDER") or "google").strip().lower()
         return provider == "openai"
 
     @staticmethod
@@ -429,6 +552,14 @@ class PrepareWorkflow:
                 project_state.set_step_status("separate_audio", "skipped")
                 self.project_service.save_project(project_state)
 
+            # Run level analysis once and only create a separate ASR input
+            # when the working audio is genuinely quiet.  The resulting path
+            # participates in the transcription signature below, so cached
+            # transcript/chunk results remain correct.
+            working_audio_path = self._prepare_asr_working_audio(
+                working_audio_path, project_state
+            )
+
             speaker_turns: list[dict] = []
             diarization_future = None
             diarization_executor = None
@@ -579,7 +710,7 @@ class PrepareWorkflow:
                         streamed_translation_enabled = True
                         print(
                             "[Prepare Workflow] ASR->Translate overlap enabled for chunked Whisper "
-                            f"(translator_ai={bool(translator_ai)}, provider={str(os.getenv('OPENAI_PROVIDER') or 'local').strip().lower()})."
+                            f"(translator_ai={bool(translator_ai)}, provider={str(os.getenv('OPENAI_PROVIDER') or 'google').strip().lower()})."
                         )
                         from services import AsrMergeService
                         asr_merge_service = AsrMergeService()

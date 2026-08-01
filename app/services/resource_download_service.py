@@ -11,10 +11,6 @@ from runtime_paths import app_path, join_root, models_path
 
 
 class ResourceDownloadService:
-    NORMAL_AI_RESOURCE_ID = "ai:local-normal"
-    HIGH_AI_RESOURCE_ID = "ai:local-high"
-    NORMAL_AI_FILENAME = "Hy-MT2-1.8B-Q4_K_M.gguf"
-    HIGH_AI_FILENAME = "gemma-4-E4B-it-Q4_K_M.gguf"
     WHISPER_ZIP_FILES = {
         "base": "models--Systran--faster-whisper-base.zip",
         "small": "models--Systran--faster-whisper-small.zip",
@@ -211,12 +207,6 @@ class ResourceDownloadService:
             return "installed"
         return "partial"
 
-    def _ai_model_filename(self, tier: str = "normal") -> str:
-        return self.HIGH_AI_FILENAME if str(tier or "").strip().lower() == "high" else self.NORMAL_AI_FILENAME
-
-    def _ai_model_local_path(self, tier: str = "normal") -> str:
-        return models_path("ai", self._ai_model_filename(tier))
-
     def _whisper_cache_root(self) -> str:
         return models_path("faster_whisper")
 
@@ -346,28 +336,6 @@ class ResourceDownloadService:
     def list_resources(self) -> list[dict]:
         resources: list[dict] = [
             {
-                "id": self.NORMAL_AI_RESOURCE_ID,
-                "name": "Normal Quality AI Model (Hy-MT2)",
-                "kind": "ai",
-                "status": "installed" if self.is_resource_installed(self.NORMAL_AI_RESOURCE_ID) else "missing",
-                "target_dir": os.path.dirname(self._ai_model_local_path("normal")),
-                "download_url": self._hf_blob_url(self.NORMAL_AI_FILENAME),
-                "expected_filename": self.NORMAL_AI_FILENAME,
-                "auto_download_supported": False,
-                "description": "Local AI model used to translate and refine subtitles.",
-            },
-            {
-                "id": self.HIGH_AI_RESOURCE_ID,
-                "name": "High Quality AI Model (Gemma 4)",
-                "kind": "ai",
-                "status": "installed" if self.is_resource_installed(self.HIGH_AI_RESOURCE_ID) else "missing",
-                "target_dir": os.path.dirname(self._ai_model_local_path("high")),
-                "download_url": self._hf_blob_url(self.HIGH_AI_FILENAME),
-                "expected_filename": self.HIGH_AI_FILENAME,
-                "auto_download_supported": False,
-                "description": "Higher-quality local AI model used to translate and refine subtitles.",
-            },
-            {
                 "id": "whisper:base",
                 "name": "Whisper Base",
                 "kind": "whisper_cpu",
@@ -479,10 +447,6 @@ class ResourceDownloadService:
         return resources
 
     def is_resource_installed(self, resource_id: str) -> bool:
-        if resource_id in {self.NORMAL_AI_RESOURCE_ID, "ai:local-gguf"}:
-            return os.path.exists(self._ai_model_local_path("normal"))
-        if resource_id == self.HIGH_AI_RESOURCE_ID:
-            return os.path.exists(self._ai_model_local_path("high"))
         if resource_id == "ocr:engine":
             return self.is_ocr_ready()
         if resource_id == "cuda:whisper":

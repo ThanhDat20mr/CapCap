@@ -149,6 +149,7 @@ class AsrMergeService:
         except Exception:
             reusable_model = None
 
+        print("[ASR] Pre-chunked audio uses standard Whisper inference (GPU batching disabled for accuracy).")
         for item in pending_items:
             chunk: AudioChunk = item["chunk"]
             if reusable_model is not None and hasattr(whisper_adapter, "transcribe_with_model"):
@@ -156,6 +157,7 @@ class AsrMergeService:
                     reusable_model,
                     chunk.audio_path,
                     language=language,
+                    use_batched=False,
                 )
             else:
                 segments = whisper_adapter.transcribe(
@@ -220,7 +222,9 @@ class AsrMergeService:
                 gpu_item = queue.pop(0)
                 chunk = gpu_item["chunk"]
                 if reusable_model is not None and hasattr(whisper_adapter, "transcribe_with_model"):
-                    gpu_segments = whisper_adapter.transcribe_with_model(reusable_model, chunk.audio_path, language=language)
+                    gpu_segments = whisper_adapter.transcribe_with_model(
+                        reusable_model, chunk.audio_path, language=language, use_batched=False
+                    )
                 else:
                     gpu_segments = whisper_adapter.transcribe(chunk.audio_path, model_path, language=language)
                 _complete(gpu_item, gpu_segments)

@@ -91,7 +91,8 @@ def validate_texts(texts: list[str], expected_len: int) -> bool:
     return all(isinstance(text, str) and text.strip() for text in texts)
 
 
-def parse_numbered_lines(raw: str) -> list[str]:
+def parse_numbered_line_items(raw: str) -> list[tuple[int, str]]:
+    """Parse numbered model output while retaining the original cue IDs."""
     # Strip Gemma chain-of-thought tags
     cleaned = re.sub(r"<thought>.*?</thought>", "", raw, flags=re.DOTALL | re.IGNORECASE)
     cleaned = re.sub(r"</?think>", "", cleaned, flags=re.IGNORECASE)
@@ -125,7 +126,7 @@ def parse_numbered_lines(raw: str) -> list[str]:
                 break
             normalized = candidate
         if normalized:
-            items.append(normalized)
+            items.append((int(match.group(1)), normalized))
 
     if items:
         return items
@@ -148,5 +149,10 @@ def parse_numbered_lines(raw: str) -> list[str]:
                 if not inner or inner == candidate:
                     break
                 candidate = inner
-            fallback_items.append(candidate)
+            fallback_items.append((int(match.group(1)), candidate))
     return fallback_items
+
+
+def parse_numbered_lines(raw: str) -> list[str]:
+    """Backward-compatible text-only parser for numbered model output."""
+    return [text for _number, text in parse_numbered_line_items(raw)]

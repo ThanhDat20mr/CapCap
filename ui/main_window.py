@@ -80,6 +80,9 @@ from runtime_profile import is_remote_profile
 from worker_adapters import (
     ExtractionWorker,
     ResourceDownloadWorker,
+    OcrTranslatorCaptureWorker,
+    OcrTranslatorTranslationWorker,
+    OllamaStatusWorker,
     SegmentAudioPreviewWorker,
     VoiceSamplePreviewWorker,
     VocalSeparationWorker,
@@ -679,6 +682,10 @@ class VideoTranslatorGUI(QMainWindow):
         self._filter_preview_ocr_was_editable = False
         self._suspend_ocr_overlay = False
         self._ocr_overlay_visible = True
+        self._ocr_translator_active = False
+        self._ocr_translator_rect = (0.2, 0.2, 0.6, 0.25)
+        self._ocr_translator_capture_worker = None
+        self._ocr_translator_translation_worker = None
         self._play_video_filter_preview_when_ready = False
         self._filter_thumbnail_target_height = 320
         self._video_filter_preview_dirty = False
@@ -843,7 +850,6 @@ class VideoTranslatorGUI(QMainWindow):
             return
         self._deferred_startup_stage2_done = True
         self.load_voice_preview_catalog()
-        self.ensure_local_translator_auto_configured()
 
     def ensure_media_backend_ready(self):
         if getattr(self, "_media_backend_ready", False):
@@ -2898,72 +2904,6 @@ class VideoTranslatorGUI(QMainWindow):
             except Exception:
                 pass
 
-    def ensure_local_translator_auto_configured(self):
-        provider = str(os.getenv("AI_POLISHER_PROVIDER") or "").strip().lower()
-        if provider != "local":
-            return
-
-        managed_keys = [
-            "LOCAL_TRANSLATOR_N_CTX",
-            "LOCAL_TRANSLATOR_N_THREADS",
-            "LOCAL_TRANSLATOR_N_THREADS_BATCH",
-            "LOCAL_TRANSLATOR_N_BATCH",
-            "LOCAL_TRANSLATOR_N_UBATCH",
-            "LOCAL_TRANSLATOR_GPU_LAYERS",
-            "LOCAL_TRANSLATOR_FLASH_ATTN",
-        ]
-        if all(str(os.getenv(key) or "").strip() for key in managed_keys):
-            return
-
-        LocalPolisherProvider = self._local_polisher_provider_cls()
-        hardware_info = LocalPolisherProvider.detect_runtime_capabilities()
-        recommended = LocalPolisherProvider.recommended_runtime_config(hardware_info)
-        updates = {
-            "LOCAL_TRANSLATOR_N_CTX": str(recommended["n_ctx"]),
-            "LOCAL_TRANSLATOR_N_THREADS": str(recommended["n_threads"]),
-            "LOCAL_TRANSLATOR_N_THREADS_BATCH": str(recommended["n_threads_batch"]),
-            "LOCAL_TRANSLATOR_N_BATCH": str(recommended["n_batch"]),
-            "LOCAL_TRANSLATOR_N_UBATCH": str(recommended["n_ubatch"]),
-            "LOCAL_TRANSLATOR_GPU_LAYERS": str(recommended["gpu_layers"]),
-            "LOCAL_TRANSLATOR_FLASH_ATTN": "true" if recommended["flash_attn"] else "false",
-        }
-
-        env_lines = []
-        if os.path.exists(".env"):
-            with open(".env", "r", encoding="utf-8") as handle:
-                env_lines = handle.readlines()
-
-        new_env_lines = []
-        handled_keys = set()
-        for line in env_lines:
-            match = re.match(r"^([^=]+)=.*", line)
-            if match:
-                key = match.group(1).strip()
-                if key in updates:
-                    new_env_lines.append(f"{key}={updates[key]}\n")
-                    handled_keys.add(key)
-                    continue
-            new_env_lines.append(line)
-
-        for key, value in updates.items():
-            if key not in handled_keys:
-                new_env_lines.append(f"{key}={value}\n")
-
-        with open(".env", "w", encoding="utf-8") as handle:
-            handle.writelines(new_env_lines)
-
-        for key, value in updates.items():
-            os.environ[key] = value
-
-        if hasattr(self, "log"):
-            self.log(f"[Local AI] Auto-optimized for this machine: {LocalPolisherProvider.runtime_status_summary(hardware_info)}")
-
-    @staticmethod
-    def _local_polisher_provider_cls():
-        from translation.providers.local_polisher import LocalPolisherProvider
-
-        return LocalPolisherProvider
-
     @staticmethod
     def _preload_tts_voice_impl(voice_name: str):
         from tts_processor import preload_tts_voice
@@ -4296,10 +4236,16 @@ class VideoTranslatorGUI(QMainWindow):
         return "vi"
 
     def is_ai_polish_enabled(self):
-        provider = (os.getenv("AI_POLISHER_PROVIDER") or "gemini").strip().lower()
-        if provider == "local":
+        # The old "Use AI translation" checkbox was removed when provider
+        # selection moved into Settings.  A configured cloud/API provider is
+        # now the explicit request to use AI; only selecting Google Translate
+        # bypasses the AI branch.  Keeping the legacy checkbox fallback makes
+        # older embedded UI layouts harmless.
+        provider = str(os.getenv("OPENAI_PROVIDER") or "google").strip().lower()
+        if provider in {"gemini", "openai", "ollama"}:
             return True
-        return getattr(self, "translator_ai_cb", None) and self.translator_ai_cb.isChecked()
+        legacy_checkbox = getattr(self, "translator_ai_cb", None)
+        return bool(legacy_checkbox and legacy_checkbox.isChecked())
 
     def is_skip_translation(self):
         # Translation is always part of the fixed Subtitle + Voice workflow.
@@ -4486,9 +4432,35 @@ class VideoTranslatorGUI(QMainWindow):
     def update_progress_checklist(self):
         self.update_workflow_stage_badges()
 
+    def _completed_translation_provider_label(self) -> str:
+        """Return the provider recorded in completed translation segments.
+
+        This intentionally reads the result metadata rather than Settings:
+        an unavailable AI provider can finish a run through Google Translate.
+        """
+        models = list(getattr(self, "current_translated_segment_models", []) or [])
+        provider_counts = {}
+        for model in models:
+            provider = str(getattr(model, "metadata", {}).get("translation_provider", "") or "").strip().lower()
+            if provider:
+                provider_counts[provider] = provider_counts.get(provider, 0) + 1
+        if not provider_counts:
+            return ""
+        provider = max(provider_counts, key=provider_counts.get)
+        names = {
+            "google-web": "Google Translate",
+            "google": "Google Translate",
+            "gemini": "Gemini",
+            "openai": "OpenAI",
+            "ollama": "Ollama",
+            "microsoft": "Microsoft Translator",
+        }
+        return names.get(provider, provider.replace("-", " ").title())
+
     def update_workflow_stage_badges(self):
         """Reflect persisted workflow artifacts in the left-side milestones."""
         badges = getattr(self, "workflow_stage_badges", {}) or {}
+        labels = getattr(self, "workflow_stage_labels", {}) or {}
         if not badges:
             return
         video_path = str(self.video_path_edit.text() if hasattr(self, "video_path_edit") else "").strip()
@@ -4518,6 +4490,10 @@ class VideoTranslatorGUI(QMainWindow):
             "export": (exported, "export"),
         }
         for key, (complete, running_step) in values.items():
+            label = labels.get(key)
+            if label is not None and key == "translate":
+                provider = self._completed_translation_provider_label() if complete else ""
+                label.setText(f"Translate — {provider}" if provider else "Translate")
             badge = badges.get(key)
             if badge is None:
                 continue
@@ -7136,34 +7112,79 @@ class VideoTranslatorGUI(QMainWindow):
         from app.layers.sync_bridge import find_or_create_track
 
         if layer_type == "subtitle":
-            from app.layers.subtitle import SubtitleLayer
-            sub_track = None
-            for track in tl.tracks:
-                if track.type.value == "subtitle":
-                    sub_track = track
-                    break
-            if sub_track is None:
-                return
-            idx = len(sub_track.layers)
-            last_end = max((l.end for l in sub_track.layers), default=0.0)
-            layer = SubtitleLayer(
-                name=f"New Subtitle {idx + 1}",
-                text="New text",
-                start=last_end,
-                end=last_end + 2.0,
-            )
-            layer.z_index = idx
-            sub_track.layers.append(layer)
-            self.timeline._segment_indices[layer.id] = idx
-            self.timeline._duration = max(self.timeline._duration, layer.end)
-            self.timeline._redraw()
-            seg = {"id": idx, "start": layer.start, "end": layer.end, "text": layer.text}
-            if not hasattr(self, "current_segments"):
+            # TS1 is driven from the segment lists, not the legacy Subtitle
+            # track. Insert at the playhead so the normal timeline, preview,
+            # editor, export and project persistence paths all stay aligned.
+            try:
+                start = max(0.0, float(self.media_player.position()) / 1000.0)
+            except Exception:
+                start = 0.0
+            duration = max(0.0, float(getattr(tl, "duration", 0.0) or 0.0))
+            end = start + 2.0
+            if duration > 0.0:
+                end = min(end, duration)
+                if end - start < 0.20:
+                    start = max(0.0, end - 2.0)
+            if end - start < 0.05:
+                end = start + 2.0
+
+            translated_exists = bool(getattr(self, "current_translated_segments", None))
+            if not hasattr(self, "current_segments") or self.current_segments is None:
                 self.current_segments = []
-            self.current_segments.append(seg)
-            if not hasattr(self, "current_translated_segment_models"):
-                self.current_translated_segment_models = []
-            self.current_translated_segment_models.append(seg)
+            if not hasattr(self, "current_translated_segments") or self.current_translated_segments is None:
+                self.current_translated_segments = []
+
+            active_segments = self.current_translated_segments if translated_exists else self.current_segments
+            index = next(
+                (idx for idx, segment in enumerate(active_segments)
+                 if float(segment.get("start", 0.0) or 0.0) > start),
+                len(active_segments),
+            )
+            source_segment = {"start": start, "end": end, "text": "New subtitle", "words": []}
+            translated_segment = {
+                "start": start,
+                "end": end,
+                "text": "New subtitle",
+                "source_text": "New subtitle",
+                "tts_text": "New subtitle",
+                "provider": "manual",
+            }
+            history_entry = {
+                "type": "insert",
+                "index": int(index),
+                "selected_before": int(getattr(self, "_selected_segment_index", -1)),
+                "selected_after": int(index),
+                "current_before": [],
+                "current_after": [copy.deepcopy(source_segment)],
+                "translated_before": [],
+                "translated_after": [copy.deepcopy(translated_segment)] if translated_exists else [],
+            }
+            self.current_segments.insert(min(index, len(self.current_segments)), source_segment)
+            if translated_exists:
+                self.current_translated_segments.insert(min(index, len(self.current_translated_segments)), translated_segment)
+            # Segment insertion changes the source index mapping used by the
+            # optional one-line display cache, so always rebuild it from the
+            # current project data.
+            self._single_line_split_cache = None
+            self.current_segment_models = self._dict_segments_to_models(self.current_segments, translated=False)
+            if translated_exists:
+                self.current_translated_segment_models = self._dict_segments_to_models(self.current_translated_segments, translated=True)
+                self._sync_hidden_translated_text_from_segments()
+            self._sync_hidden_transcript_text_from_segments()
+            self._timeline_timing_undo_stack.append(history_entry)
+            self._timeline_timing_redo_stack = []
+            if len(self._timeline_timing_undo_stack) > 100:
+                self._timeline_timing_undo_stack = self._timeline_timing_undo_stack[-100:]
+            self._refresh_timeline_history_buttons()
+            self.set_selected_segment_index(index, sync_ui=True)
+            self.timeline.set_active_segment_index(index)
+            self.apply_segments_to_timeline()
+            self.persist_current_timeline_project_data()
+            self.schedule_live_subtitle_preview_refresh()
+            self.refresh_ui_state()
+            self.show_subtitle_inspector_details()
+            self.log(f"[Subtitle] Added manual TS1 segment at {start:.2f}s.")
+            return
 
         elif layer_type == "text":
             from app.layers.text import TextLayer
@@ -7261,6 +7282,15 @@ class VideoTranslatorGUI(QMainWindow):
             stagger = idx % 4
             base_y = 0.75 - stagger * 0.06
             base_x = 0.30 + (stagger % 2) * 0.08
+            try:
+                blur_start = max(0.0, float(self.media_player.position()) / 1000.0)
+            except Exception:
+                blur_start = 0.0
+            blur_end = blur_start + 5.0
+            if tl.duration > 0:
+                blur_end = min(float(tl.duration), blur_end)
+                if blur_end - blur_start < 0.20:
+                    blur_start = max(0.0, blur_end - 5.0)
             layer = BlurLayer(
                 name=f"Blur {idx + 1}",
                 position_x=float(base_x),
@@ -7268,8 +7298,8 @@ class VideoTranslatorGUI(QMainWindow):
                 width=0.4,
                 height=0.1,
                 blur_strength=20.0,
-                start=0.0,
-                end=min(tl.duration, 5.0) if tl.duration > 0 else 5.0,
+                start=blur_start,
+                end=blur_end,
             )
             layer.z_index = idx
             blur_track.layers.append(layer)
@@ -7333,6 +7363,13 @@ class VideoTranslatorGUI(QMainWindow):
                     })
                 if hasattr(self.video_view, "set_blur_regions_normalized"):
                     self.video_view.set_blur_regions_normalized(regions)
+                # The Add Layer menu bypasses the legacy Blur button, so it
+                # must explicitly enable the editable overlay.  Merely
+                # checking blur_area_btn does not emit its toggled signal.
+                if hasattr(self.video_view, "set_blur_edit_enabled"):
+                    self.video_view.set_blur_edit_enabled(True)
+                if hasattr(self.video_view, "set_blur_active_index"):
+                    self.video_view.set_blur_active_index(idx)
                 if hasattr(self, "apply_preview_blur_region"):
                     self.apply_preview_blur_region(force=True)
             except Exception:
@@ -7344,6 +7381,11 @@ class VideoTranslatorGUI(QMainWindow):
             try:
                 if hasattr(self, "persist_project_blur_state"):
                     self.persist_project_blur_state()
+            except Exception:
+                pass
+            try:
+                self.timeline._selected_layer_id = layer.id
+                self._show_blur_inspector_for_track(blur_track, layer)
             except Exception:
                 pass
 
@@ -7547,6 +7589,12 @@ class VideoTranslatorGUI(QMainWindow):
             self.current_translated_segment_models = self._dict_segments_to_models(self.current_translated_segments, translated=True)
             self._sync_hidden_translated_text_from_segments()
 
+        # A derived single-line cache is indexed against the pre-edit
+        # subtitle list.  Reusing it after a delete can redraw a segment
+        # which has just been removed, especially when a new segment is
+        # inserted at the same point in the timeline.
+        self._single_line_split_cache = None
+
         self._timeline_timing_undo_stack.append(history_entry)
         self._timeline_timing_redo_stack = []
         if len(self._timeline_timing_undo_stack) > 100:
@@ -7557,6 +7605,26 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "timeline"):
             self.timeline.set_active_segment_index(index)
         self.apply_segments_to_timeline()
+        # Write the edited lists even if a deletion leaves one of them
+        # empty.  The generic persistence method deliberately avoids empty
+        # lists during initial project setup, so explicitly replace the
+        # existing segment artifacts here to prevent a deleted segment from
+        # being restored from disk or project cache later in this session.
+        state = getattr(self, "current_project_state", None)
+        if state is not None:
+            try:
+                self.current_segment_models = self.project_bridge.persist_transcription(
+                    state, self.current_segments or [], self.last_original_srt_path
+                )
+                if self.current_translated_segments is not None:
+                    self.current_translated_segment_models = self.project_bridge.persist_translation(
+                        state,
+                        self.current_segment_models,
+                        self.current_translated_segments or [],
+                        self.last_translated_srt_path,
+                    )
+            except Exception as exc:
+                self.log(f"[Subtitle] Could not update deleted segment cache: {exc}")
         self.persist_current_timeline_project_data()
         self.schedule_live_subtitle_preview_refresh()
         self.refresh_ui_state()
@@ -7938,7 +8006,7 @@ class VideoTranslatorGUI(QMainWindow):
         if not self._timeline_timing_undo_stack:
             return False
         entry = self._timeline_timing_undo_stack.pop()
-        if str(entry.get("type", "timing")) in {"split", "delete", "batch_timing"}:
+        if str(entry.get("type", "timing")) in {"insert", "split", "delete", "batch_timing"}:
             self._apply_timeline_structure_history_entry(entry, use_after=False)
             self._timeline_timing_redo_stack.append(entry)
             self._refresh_timeline_history_buttons()
@@ -7970,7 +8038,7 @@ class VideoTranslatorGUI(QMainWindow):
         if not self._timeline_timing_redo_stack:
             return False
         entry = self._timeline_timing_redo_stack.pop()
-        if str(entry.get("type", "timing")) in {"split", "delete", "batch_timing"}:
+        if str(entry.get("type", "timing")) in {"insert", "split", "delete", "batch_timing"}:
             self._apply_timeline_structure_history_entry(entry, use_after=True)
             self._timeline_timing_undo_stack.append(entry)
             self._refresh_timeline_history_buttons()
@@ -8649,6 +8717,140 @@ class VideoTranslatorGUI(QMainWindow):
         overlay.sync_to_view()
         self.apply_preview_blur_region()
         self.log("[OCR Region] drag inside the video preview to move or resize the OCR crop.")
+
+    def toggle_ocr_translator(self, checked: bool):
+        """Show the independent, on-demand OCR Translator selection."""
+        overlay = getattr(self, "ocr_translator_overlay", None)
+        self._ocr_translator_active = bool(checked)
+        if overlay is None:
+            return
+        if not self._ocr_translator_active:
+            overlay.hide()
+            return
+        video_path = self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else ""
+        if not video_path or not os.path.isfile(video_path):
+            self._ocr_translator_active = False
+            button = getattr(self, "ocr_translator_btn", None)
+            if button is not None:
+                button.blockSignals(True)
+                button.setChecked(False)
+                button.blockSignals(False)
+            QMessageBox.warning(self, "OCR Translator", "Please load a video before capturing visual text.")
+            return
+        overlay.set_normalized_rect(getattr(self, "_ocr_translator_rect", (0.2, 0.2, 0.6, 0.25)))
+        overlay.sync_to_view()
+        # The preview's native mpv surface can finish its layout after the
+        # toolbar signal. Re-sync on the next event-loop pass so the tool
+        # always receives the final visible video geometry.
+        QTimer.singleShot(0, overlay.sync_to_view)
+        self.log("[OCR Translator] Selection active. Drag or resize it, then click Capture.")
+
+    def _on_ocr_translator_rect_changed(self, rect):
+        self._ocr_translator_rect = tuple(rect)
+
+    def close_ocr_translator(self):
+        self._ocr_translator_active = False
+        overlay = getattr(self, "ocr_translator_overlay", None)
+        if overlay is not None:
+            overlay.hide()
+        button = getattr(self, "ocr_translator_btn", None)
+        if button is not None:
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
+
+    def capture_ocr_translator_region(self):
+        if getattr(self, "_ocr_translator_capture_worker", None) is not None:
+            return
+        video_path = self.video_path_edit.text().strip()
+        overlay = getattr(self, "ocr_translator_overlay", None)
+        if not video_path or overlay is None:
+            return
+        position_ms = int(self.media_player.position()) if hasattr(self, "media_player") else 0
+        self._ocr_translator_rect = overlay.normalized_rect()
+        overlay.set_capturing(True)
+        worker = OcrTranslatorCaptureWorker(video_path, position_ms / 1000.0, self._ocr_translator_rect)
+        self._ocr_translator_capture_worker = worker
+        worker.finished.connect(self._on_ocr_translator_capture_finished)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        self.log(f"[OCR Translator] Capturing visual text at {position_ms / 1000.0:.2f}s.")
+
+    def _on_ocr_translator_capture_finished(self, text, error):
+        self._ocr_translator_capture_worker = None
+        overlay = getattr(self, "ocr_translator_overlay", None)
+        if overlay is not None:
+            overlay.set_capturing(False)
+        if error:
+            QMessageBox.warning(self, "OCR Translator", f"Could not capture text.\n\n{error}")
+            return
+        if not str(text or "").strip():
+            QMessageBox.information(self, "OCR Translator", "No text was detected in the selected region.")
+            return
+        self.log("[OCR Translator] Capture complete.")
+        self._show_ocr_translator_dialog(str(text).strip())
+
+    def _show_ocr_translator_dialog(self, original_text):
+        overlay = getattr(self, "ocr_translator_overlay", None)
+        if overlay is not None:
+            overlay.hide()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("OCR Translator")
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setMinimumSize(520, 390)
+        dialog.setStyleSheet(
+            "QDialog { background: #101826; color: #e6eef9; }"
+            "QLabel { color: #b9c8dc; font-weight: 700; }"
+            "QTextEdit { background: #0b1220; color: #edf4ff; border: 1px solid #2b3b52; border-radius: 7px; padding: 7px; }"
+            "QPushButton { background: #24364f; color: #ffffff; border: 1px solid #355271; border-radius: 7px; padding: 7px 12px; font-weight: 700; }"
+            "QPushButton:hover { background: #315070; } QPushButton:disabled { color: #718198; background: #182334; }"
+        )
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(8)
+        layout.addWidget(QLabel("Original OCR Text"))
+        original_edit = QTextEdit(); original_edit.setPlainText(original_text); original_edit.setReadOnly(True)
+        layout.addWidget(original_edit, 1)
+        layout.addWidget(QLabel("Translated Text"))
+        translated_edit = QTextEdit(); translated_edit.setReadOnly(True); translated_edit.setPlaceholderText("Click Translate to translate the captured text.")
+        layout.addWidget(translated_edit, 1)
+        actions = QHBoxLayout()
+        translate_btn = QPushButton("Translate")
+        copy_original_btn = QPushButton("Copy Original")
+        copy_translation_btn = QPushButton("Copy Translation")
+        close_btn = QPushButton("Close")
+        actions.addWidget(translate_btn); actions.addWidget(copy_original_btn); actions.addWidget(copy_translation_btn); actions.addStretch(1); actions.addWidget(close_btn)
+        layout.addLayout(actions)
+
+        def copy_text(edit):
+            QApplication.clipboard().setText(edit.toPlainText())
+
+        def translate():
+            if getattr(self, "_ocr_translator_translation_worker", None) is not None:
+                return
+            translate_btn.setEnabled(False); translate_btn.setText("Translating...")
+            worker = OcrTranslatorTranslationWorker(
+                original_text, self.get_source_language_code(), self.get_target_language_code()
+            )
+            self._ocr_translator_translation_worker = worker
+            def finished(translated, error):
+                self._ocr_translator_translation_worker = None
+                translate_btn.setEnabled(True); translate_btn.setText("Translate")
+                if error:
+                    QMessageBox.warning(dialog, "OCR Translator", f"Translation failed.\n\n{error}")
+                    return
+                translated_edit.setPlainText(translated)
+                self.log("[OCR Translator] Translation complete.")
+            worker.finished.connect(finished)
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
+
+        translate_btn.clicked.connect(translate)
+        copy_original_btn.clicked.connect(lambda: copy_text(original_edit))
+        copy_translation_btn.clicked.connect(lambda: copy_text(translated_edit))
+        close_btn.clicked.connect(dialog.accept)
+        dialog.finished.connect(lambda _result: overlay.sync_to_view() if overlay is not None and self._ocr_translator_active else None)
+        dialog.exec()
 
     def on_preview_blur_region_changed(self):
         if self._blur_effect_enabled():
@@ -10076,10 +10278,16 @@ class VideoTranslatorGUI(QMainWindow):
         # ready. Keep their controls disabled before that point so users
         # cannot create layers against an incomplete video workflow.
         self._optional_layer_controls_ready = bool(can_export and not voice_running)
-        for button_name in ("blur_add_btn", "add_logo_btn", "add_mask_btn", "add_text_btn", "add_layer_btn"):
+        for button_name in ("blur_add_btn", "add_logo_btn", "add_mask_btn", "add_text_btn"):
             button = getattr(self, button_name, None)
             if button is not None:
                 button.setEnabled(self._optional_layer_controls_ready)
+        # Subtitle segments are valid as soon as a transcript/translation is
+        # available. Keep the shared + Layer menu usable for manual fixes
+        # without unlocking the unrelated overlay-layer actions early.
+        if hasattr(self, "add_layer_btn"):
+            has_subtitle_segments = bool(self.current_segments or self.current_translated_segments)
+            self.add_layer_btn.setEnabled(self._optional_layer_controls_ready or has_subtitle_segments)
         if hasattr(self, "blur_add_btn"):
             self.blur_add_btn.setEnabled(
                 self._optional_layer_controls_ready
@@ -10087,6 +10295,8 @@ class VideoTranslatorGUI(QMainWindow):
             )
         if hasattr(self, "ocr_region_btn"):
             self.ocr_region_btn.setEnabled(v_ok)
+        if hasattr(self, "ocr_translator_btn"):
+            self.ocr_translator_btn.setEnabled(v_ok)
         self._sync_blur_controls()
         if hasattr(self, "free_voice_combo"):
             self.free_voice_combo.setEnabled(
@@ -10351,8 +10561,8 @@ class VideoTranslatorGUI(QMainWindow):
     def run_translation(self):
         self.subtitle_controller.run_translation()
 
-    def on_translation_finished(self, translated_srt, error):
-        self.subtitle_controller.on_translation_finished(translated_srt, error)
+    def on_translation_finished(self, translated_srt, error, fallback_notice=""):
+        self.subtitle_controller.on_translation_finished(translated_srt, error, fallback_notice)
 
     def run_rewrite_translation(self):
         self.subtitle_controller.run_rewrite_translation()
@@ -10524,8 +10734,6 @@ class VideoTranslatorGUI(QMainWindow):
         layout.setSizeConstraint(QLayout.SetFixedSize)
 
         remote_mode = is_remote_profile()
-        cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
-        LocalPolisherProvider = self._local_polisher_provider_cls() if not remote_mode else None
         # Transcription Engine Section
         engine_title = QLabel("Subtitle source")
         engine_title.setObjectName("statusHeadline")
@@ -10644,12 +10852,8 @@ class VideoTranslatorGUI(QMainWindow):
         provider_combo.addItem("Gemini (Google AI Studio)", "gemini")
         provider_combo.addItem("OpenAI", "openai")
         provider_combo.addItem("Ollama (Local)", "ollama")
-        if not cpu_mode:
-            provider_combo.addItem("Local (GGUF)", "local")
         current_provider = (os.getenv("OPENAI_PROVIDER") or "google").strip().lower()
-        if current_provider not in {"google", "gemini", "openai", "ollama", "local"}:
-            current_provider = "local"
-        if cpu_mode and current_provider == "local":
+        if current_provider not in {"google", "gemini", "openai", "ollama"}:
             current_provider = "google"
         idx = provider_combo.findData(current_provider)
         if idx >= 0:
@@ -10657,27 +10861,6 @@ class VideoTranslatorGUI(QMainWindow):
         provider_combo.setVisible(not remote_mode)
         provider_layout.addWidget(provider_combo, 1)
         layout.addLayout(provider_layout)
-
-        local_model_layout = QVBoxLayout()
-        local_model_label = QLabel("Local AI Model:")
-        local_model_combo = QComboBox(dialog)
-        local_model_combo.addItem("Normal Quality AI Model (Hy-MT2)", "normal")
-        local_model_combo.addItem("High Quality AI Model (Gemma 4)", "high")
-        current_local_model_tier = (os.getenv("LOCAL_TRANSLATOR_MODEL_TIER") or "").strip().lower()
-        current_local_model_path = (os.getenv("LOCAL_TRANSLATOR_MODEL_PATH") or "").strip().lower()
-        if current_local_model_tier not in {"normal", "high"}:
-            if current_local_model_path.endswith("gemma-4-e4b-it-q4_k_m.gguf"):
-                current_local_model_tier = "high"
-            else:
-                current_local_model_tier = "normal"
-        idx = local_model_combo.findData(current_local_model_tier)
-        if idx >= 0:
-            local_model_combo.setCurrentIndex(idx)
-        local_model_layout.addWidget(local_model_label)
-        local_model_layout.addWidget(local_model_combo)
-        local_model_label.setVisible(not remote_mode and not cpu_mode)
-        local_model_combo.setVisible(not remote_mode and not cpu_mode)
-        layout.addLayout(local_model_layout)
 
         key_section_widget = QWidget(dialog)
         key_layout = QVBoxLayout(key_section_widget)
@@ -10694,7 +10877,7 @@ class VideoTranslatorGUI(QMainWindow):
         model_layout = QVBoxLayout()
         model_label = QLabel("AI Model:")
         model_edit = QLineEdit(dialog)
-        model_edit.setText(os.getenv("OPENAI_MODEL", os.getenv("LOCAL_TRANSLATOR_MODEL_PATH", "models/ai/Hy-MT2-1.8B-Q4_K_M.gguf")))
+        model_edit.setText(os.getenv("OPENAI_MODEL", ""))
         model_layout.addWidget(model_label)
         model_layout.addWidget(model_edit)
         model_label.setVisible(not remote_mode)
@@ -10717,48 +10900,56 @@ class VideoTranslatorGUI(QMainWindow):
         provider_hint.setVisible(not remote_mode)
         layout.addWidget(provider_hint)
 
-        style_label = QLabel("Translation style (optional):")
-        style_label.setObjectName("helperLabel")
-        style_edit = QLineEdit(dialog)
-        style_edit.setPlaceholderText("e.g. natural, funny, more formal")
-        style_edit.setText(os.getenv("TRANSLATOR_STYLE", ""))
-        style_label.setVisible(not remote_mode)
-        style_edit.setVisible(not remote_mode)
-        layout.addWidget(style_label)
-        layout.addWidget(style_edit)
-
-        local_model_note = QLabel(
-            "Normal Quality uses Hy-MT2 and the current lightweight prompt. "
-            "High Quality uses Gemma 4 and the older richer prompt. "
-            "High Quality needs a better GPU or it will run slower on CPU."
-        )
-        local_model_note.setObjectName("helperLabel")
-        local_model_note.setWordWrap(True)
-        local_model_note.setVisible(not remote_mode and not cpu_mode)
-        layout.addWidget(local_model_note)
+        ollama_status_label = QLabel("")
+        ollama_status_label.setObjectName("helperLabel")
+        ollama_status_label.setVisible(False)
+        layout.addWidget(ollama_status_label)
 
         def _toggle_visible(widget, visible):
             widget.setVisible(visible)
+
+        def refresh_ollama_status():
+            if provider_combo.currentData() != "ollama":
+                return
+            active = getattr(self, "_ollama_status_worker", None)
+            if active is not None and active.isRunning():
+                return
+            ollama_status_label.setText("Ollama server: Checking…")
+            ollama_status_label.setStyleSheet("color: #f6c863;")
+            worker = OllamaStatusWorker(base_url_edit.text().strip() or "http://localhost:11434/v1")
+            self._ollama_status_worker = worker
+
+            def on_status(connected, detail):
+                if getattr(self, "_ollama_status_worker", None) is worker:
+                    self._ollama_status_worker = None
+                if provider_combo.currentData() != "ollama":
+                    return
+                if connected:
+                    ollama_status_label.setText("Ollama server: Connected")
+                    ollama_status_label.setStyleSheet("color: #61d6a8;")
+                else:
+                    ollama_status_label.setText(f"Ollama server: {detail}")
+                    ollama_status_label.setStyleSheet("color: #f08a8a;")
+
+            worker.finished.connect(on_status)
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
 
         def update_provider_fields():
             p = provider_combo.currentData()
             is_ai = p != "google"
             is_gemini = p == "gemini"
             is_openai = p == "openai"
-            is_local = p == "local"
+            is_ollama = p == "ollama"
             is_google = p == "google"
-            _toggle_visible(style_label, not remote_mode and is_ai)
-            _toggle_visible(style_edit, not remote_mode and is_ai)
             _toggle_visible(key_section_widget, is_gemini or is_openai)
-            _toggle_visible(local_model_label, not remote_mode and is_local and not cpu_mode)
-            _toggle_visible(local_model_combo, not remote_mode and is_local and not cpu_mode)
-            _toggle_visible(local_model_note, not remote_mode and is_local and not cpu_mode)
-            _toggle_visible(base_url_label, not remote_mode and not is_local and is_ai)
-            _toggle_visible(base_url_edit, not remote_mode and not is_local and is_ai)
-            _toggle_visible(test_btn, not remote_mode and not is_local and is_ai)
-            _toggle_visible(test_status, not remote_mode and not is_local and is_ai)
+            _toggle_visible(base_url_label, not remote_mode and is_ai)
+            _toggle_visible(base_url_edit, not remote_mode and is_ai)
+            _toggle_visible(test_btn, not remote_mode and is_ai)
+            _toggle_visible(test_status, not remote_mode and is_ai)
             _toggle_visible(model_label, not remote_mode and is_ai)
             _toggle_visible(model_edit, not remote_mode and is_ai)
+            _toggle_visible(ollama_status_label, not remote_mode and is_ollama)
             if is_google:
                 provider_hint.setText("Free Google web translate, no API key needed. Lower quality than AI translation.")
                 key_edit.clear()
@@ -10782,26 +10973,13 @@ class VideoTranslatorGUI(QMainWindow):
                 model_label.setText("AI Model:")
                 base_url_edit.setText("http://localhost:11434/v1")
                 key_edit.clear()
-                model_edit.setText("qwen2.5:7b")
-                provider_hint.setText("Requires Ollama installed. Run: ollama pull qwen2.5:7b")
-            else:
-                model_label.setText("Model Path:")
-                base_url_edit.setText("")
-                base_url_edit.setVisible(False)
-                base_url_label.setVisible(False)
-                key_section_widget.setVisible(False)
-                selected_tier = str(local_model_combo.currentData() or "normal").strip().lower()
-                if selected_tier == "high":
-                    model_edit.setText("models/ai/gemma-4-E4B-it-Q4_K_M.gguf")
-                    provider_hint.setText("Place Gemma 4 GGUF into models/ai/. See Manage Resources for the download link. High Quality needs a better GPU.")
-                else:
-                    model_edit.setText("models/ai/Hy-MT2-1.8B-Q4_K_M.gguf")
-                    provider_hint.setText("Place Hy-MT2 GGUF into models/ai/. See Manage Resources for the download link. Normal Quality is the default lighter model.")
-            model_edit.setReadOnly(is_local)
+                model_edit.setText("gemma4:31b-cloud")
+                provider_hint.setText("Requires a running Ollama server. Default model: gemma4:31b-cloud")
+            model_edit.setReadOnly(False)
             dialog.layout().invalidate()
             dialog.adjustSize()
-
-        local_model_combo.currentIndexChanged.connect(update_provider_fields)
+            if is_ollama:
+                QTimer.singleShot(0, refresh_ollama_status)
 
         test_btn = QPushButton("Test Connection", dialog)
         test_btn.setVisible(not remote_mode)
@@ -10923,7 +11101,6 @@ class VideoTranslatorGUI(QMainWindow):
         new_ocr_region = str(region_combo.currentData() or "bottom").strip().lower()
         new_key = key_edit.text().strip()
         new_model = model_edit.text().strip()
-        new_local_model_tier = str(local_model_combo.currentData() or "normal").strip().lower()
         new_provider = str(provider_combo.currentData()).strip()
         new_base_url = base_url_edit.text().strip()
 
@@ -10970,20 +11147,6 @@ class VideoTranslatorGUI(QMainWindow):
                     "OPENAI_API_KEY": "ollama",
                     "OPENAI_MODEL": new_model,
                     "OPENAI_BASE_URL": new_base_url or "http://localhost:11434/v1",
-                }
-            elif new_provider == "local":
-                if new_local_model_tier == "high":
-                    new_model = models_path("ai", "gemma-4-E4B-it-Q4_K_M.gguf")
-                else:
-                    new_model = models_path("ai", "Hy-MT2-1.8B-Q4_K_M.gguf")
-                custom_model = model_edit.text().strip()
-                if custom_model and models_path("ai") not in custom_model:
-                    custom_model = models_path("ai", os.path.basename(custom_model))
-                updates = {
-                    "AI_POLISHER_PROVIDER": "local",
-                    "OPENAI_PROVIDER": "local",
-                    "LOCAL_TRANSLATOR_MODEL_TIER": new_local_model_tier,
-                    "LOCAL_TRANSLATOR_MODEL_PATH": custom_model or new_model,
                 }
             else:
                 updates = {

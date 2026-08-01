@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import time
 
 import cv2
 import numpy as np
@@ -219,20 +220,77 @@ def _is_blank_region(image):
     return True
 
 
-def ocr_frame(engine, image):
+def ocr_frame(engine, image, profiling=None):
+    """OCR one frame and optionally accumulate lightweight aggregate timings."""
+    preprocess_started = time.perf_counter()
     h, w = image.shape[:2]
     if w > MAX_CROP_WIDTH:
         scale = MAX_CROP_WIDTH / w
         new_w = MAX_CROP_WIDTH
         new_h = int(h * scale)
         image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    if profiling is not None:
+        profiling["crop_preprocess"] += time.perf_counter() - preprocess_started
+
+    inference_started = time.perf_counter()
     result = engine(image, use_cls=False, text_score=0.6, box_thresh=0.5)
+    inference_elapsed = time.perf_counter() - inference_started
+    if profiling is not None:
+        profiling["ocr_inference"] += inference_elapsed
+        profiling["ocr_inference_samples"].append(inference_elapsed)
+
+    postprocess_started = time.perf_counter()
     texts = []
     for raw_text in (result.txts or []):
         cleaned = _sanitize_ocr_line(raw_text)
         if cleaned:
             texts.append(cleaned)
+    if profiling is not None:
+        profiling["postprocess"] += time.perf_counter() - postprocess_started
     return texts
+
+
+def extract_ocr_text_from_video_region(video_path, position_seconds, normalized_rect):
+    """Read text from one explicitly requested video-frame region.
+
+    This is intentionally separate from ``transcribe_video_ocr``: it never
+    creates subtitle segments, reads no OCR environment settings, and only
+    performs work when the caller explicitly requests a capture.
+    """
+    if not video_path or not os.path.isfile(video_path):
+        raise RuntimeError("Please load a video before capturing text.")
+    try:
+        rx, ry, rw, rh = [float(value) for value in normalized_rect]
+    except (TypeError, ValueError):
+        raise RuntimeError("The OCR Translator selection is invalid.")
+    rx, ry = max(0.0, min(1.0, rx)), max(0.0, min(1.0, ry))
+    rw, rh = max(0.001, min(1.0 - rx, rw)), max(0.001, min(1.0 - ry, rh))
+
+    cap = _open_video(video_path)
+    try:
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, float(position_seconds)) * 1000.0)
+        ok, frame = cap.read()
+    finally:
+        cap.release()
+    if not ok or frame is None:
+        raise RuntimeError("Could not capture the current video frame.")
+
+    height, width = frame.shape[:2]
+    left, top = int(rx * width), int(ry * height)
+    right, bottom = int((rx + rw) * width), int((ry + rh) * height)
+    crop = frame[max(0, top):min(height, bottom), max(0, left):min(width, right)]
+    if crop.size == 0:
+        raise RuntimeError("The OCR Translator selection is outside the video frame.")
+    if crop.shape[1] > MAX_CROP_WIDTH:
+        scale = MAX_CROP_WIDTH / float(crop.shape[1])
+        crop = cv2.resize(crop, (MAX_CROP_WIDTH, max(1, int(crop.shape[0] * scale))), interpolation=cv2.INTER_LINEAR)
+
+    engine = _load_ocr_engine()
+    result = engine(crop, use_cls=False, text_score=0.45, box_thresh=0.35)
+    # Unlike subtitle OCR, retain short labels and UI text: this utility is
+    # meant for any visible text rather than only spoken subtitles.
+    lines = [" ".join(str(value or "").split()) for value in (result.txts or [])]
+    return "\n".join(line for line in lines if line).strip()
 
 
 def _texts_equal(current_texts, prev_texts):
@@ -242,6 +300,18 @@ def _texts_equal(current_texts, prev_texts):
 
 
 def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=None):
+    workflow_started = time.perf_counter()
+    profiling = {
+        "engine_init": 0.0,
+        "seek_decode": 0.0,
+        "crop_preprocess": 0.0,
+        "change_detection": 0.0,
+        "blank_detection": 0.0,
+        "ocr_inference": 0.0,
+        "ocr_inference_samples": [],
+        "postprocess": 0.0,
+        "temporal": 0.0,
+    }
     duration = 0
     if fps is None:
         try:
@@ -279,7 +349,9 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
     print(f"[OCR] Seeking {total_steps} frames at {fps} fps from video directly...")
     try:
         if ocr_engine is None:
+            engine_started = time.perf_counter()
             ocr_engine = _load_ocr_engine()
+            profiling["engine_init"] = time.perf_counter() - engine_started
 
         segments = []
         prev_texts = None
@@ -289,28 +361,43 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
         empty_streak = 0
         ocr_count = 0
         skip_count = 0
+        unchanged_skip_count = 0
+        blank_skip_count = 0
         step = 0
 
         while True:
             frame_idx = step * frame_step
+            decode_started = time.perf_counter()
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, img = cap.read()
+            profiling["seek_decode"] += time.perf_counter() - decode_started
             if not ret or img is None:
                 break
             timestamp = frame_idx / video_fps
+            crop_started = time.perf_counter()
             cropped = crop_subtitle_region(img, region=region)
+            profiling["crop_preprocess"] += time.perf_counter() - crop_started
+            change_started = time.perf_counter()
             cur_hash = _crop_hash(cropped)
+            unchanged = prev_hash is not None and _hamming_distance(cur_hash, prev_hash) < EXACT_HASH_THRESHOLD
+            profiling["change_detection"] += time.perf_counter() - change_started
 
-            if prev_hash is not None and _hamming_distance(cur_hash, prev_hash) < EXACT_HASH_THRESHOLD:
+            if unchanged:
                 skip_count += 1
+                unchanged_skip_count += 1
                 texts = list(prev_texts) if prev_texts else []
-            elif _is_blank_region(cropped):
-                skip_count += 1
-                texts = []
             else:
-                texts = ocr_frame(ocr_engine, cropped)
-                ocr_count += 1
-                prev_hash = cur_hash
+                blank_started = time.perf_counter()
+                is_blank = _is_blank_region(cropped)
+                profiling["blank_detection"] += time.perf_counter() - blank_started
+                if is_blank:
+                    skip_count += 1
+                    blank_skip_count += 1
+                    texts = []
+                else:
+                    texts = ocr_frame(ocr_engine, cropped, profiling=profiling)
+                    ocr_count += 1
+                    prev_hash = cur_hash
 
             step += 1
 
@@ -318,47 +405,37 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
                 pct = step * 100 // total_steps if total_steps > 0 else 0
                 print(f"[OCR] Frame {step}/{total_steps} ({pct}%, OCR: {ocr_count}, skip: {skip_count})")
 
+            temporal_started = time.perf_counter()
             if not texts:
                 empty_streak += 1
                 if empty_streak >= EMPTY_TOLERANCE and seg_start is not None:
                     end_ts = max(seg_start + frame_interval, timestamp - frame_interval * 0.5)
                     combined = " ".join(seg_text_lines).strip()
                     if combined:
-                        segments.append({
-                            "start": seg_start,
-                            "end": end_ts,
-                            "text": combined,
-                            "words": [],
-                        })
+                        segments.append({"start": seg_start, "end": end_ts, "text": combined, "words": []})
                     seg_start = None
                     seg_text_lines = []
                     prev_texts = None
+                profiling["temporal"] += time.perf_counter() - temporal_started
                 continue
 
             empty_streak = 0
-
             if prev_texts is not None and _texts_equal(texts, prev_texts):
+                profiling["temporal"] += time.perf_counter() - temporal_started
                 continue
-
             if seg_start is not None and seg_text_lines:
                 end_ts = max(seg_start + frame_interval, timestamp - frame_interval * 0.5)
                 combined = " ".join(seg_text_lines).strip()
                 if combined:
-                    segments.append({
-                        "start": seg_start,
-                        "end": end_ts,
-                        "text": combined,
-                        "words": [],
-                    })
-            seg_start = timestamp - frame_interval * 0.5
-            if step == 1:
-                seg_start = 0.0
+                    segments.append({"start": seg_start, "end": end_ts, "text": combined, "words": []})
+            seg_start = 0.0 if step == 1 else timestamp - frame_interval * 0.5
             seg_text_lines = texts
             prev_texts = texts
-
+            profiling["temporal"] += time.perf_counter() - temporal_started
     finally:
         cap.release()
 
+    final_temporal_started = time.perf_counter()
     if seg_start is not None and seg_text_lines:
         combined = " ".join(seg_text_lines).strip()
         if combined:
@@ -373,7 +450,32 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
 
     merged = _merge_adjacent(segments)
     merged = _dedup_identical(merged)
+    profiling["temporal"] += time.perf_counter() - final_temporal_started
     print(f"[OCR] Extracted {len(merged)} subtitle segments from {total_steps} frames (OCR: {ocr_count}, skip: {skip_count})")
+    inference_samples = profiling["ocr_inference_samples"]
+    inference_avg_ms = (sum(inference_samples) / len(inference_samples) * 1000.0) if inference_samples else 0.0
+    inference_p95_ms = float(np.percentile(inference_samples, 95) * 1000.0) if inference_samples else 0.0
+    sampled_frames = step
+    decode_preprocess_avg_ms = (
+        (profiling["seek_decode"] + profiling["crop_preprocess"]) / sampled_frames * 1000.0
+        if sampled_frames else 0.0
+    )
+    print("[OCR Profiling]")
+    print(f"Engine initialization: {profiling['engine_init']:.2f}s")
+    print(f"Seek/decode: {profiling['seek_decode']:.2f}s")
+    print(f"Crop/preprocess: {profiling['crop_preprocess']:.2f}s")
+    print(f"Change detection: {profiling['change_detection']:.2f}s")
+    print(f"Blank detection: {profiling['blank_detection']:.2f}s")
+    print(f"RapidOCR inference: {profiling['ocr_inference']:.2f}s")
+    print(f"Post-processing: {profiling['postprocess']:.2f}s")
+    print(f"Temporal segments/merge: {profiling['temporal']:.2f}s")
+    print(f"Total: {time.perf_counter() - workflow_started:.2f}s")
+    print(
+        "Frames: "
+        f"sampled={sampled_frames}, OCR={ocr_count}, unchanged_skip={unchanged_skip_count}, blank_skip={blank_skip_count}"
+    )
+    print(f"OCR inference: avg={inference_avg_ms:.0f}ms, p95={inference_p95_ms:.0f}ms")
+    print(f"Frame decode/preprocess: avg={decode_preprocess_avg_ms:.0f}ms")
     return merged
 
 

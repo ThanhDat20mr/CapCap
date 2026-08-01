@@ -461,7 +461,6 @@ class _BlurRegionOverlayWindow(QWidget):
     HANDLE_SIZE = 12
     MIN_WIDTH = HANDLE_SIZE * 2
     MIN_HEIGHT = HANDLE_SIZE * 2
-    CLOSE_SIZE = 16
     BLUR_COLOR = QColor(110, 231, 214)
     # Kept as a compatibility alias for region-placement code. Blur is a
     # single effect, so every entry deliberately resolves to one colour.
@@ -676,10 +675,6 @@ class _BlurRegionOverlayWindow(QWidget):
             for key, point in points.items()
         }
 
-    def _close_rect(self, rect: QRectF) -> QRectF:
-        size = float(self.CLOSE_SIZE)
-        return QRectF(rect.right() - size + 2, rect.top() - 2, size, size)
-
     def _hit_test(self, pos: QPointF) -> tuple[int, str]:
         index = self._active_index
         if index < 0 or index >= len(self._regions):
@@ -687,8 +682,6 @@ class _BlurRegionOverlayWindow(QWidget):
         rect = self.region_rect(index)
         if rect.width() <= 0 or rect.height() <= 0:
             return -1, ""
-        if self._close_rect(rect).contains(pos):
-            return index, "close"
         for handle_name, handle_rect in self._handle_rects(rect).items():
             if handle_rect.contains(pos):
                 return index, handle_name
@@ -707,16 +700,6 @@ class _BlurRegionOverlayWindow(QWidget):
             return
         pos = QPointF(event.position())
         hit_index, hit_mode = self._hit_test(pos)
-        if hit_mode == "close":
-            self._regions.pop(hit_index)
-            self._active_index = min(hit_index, len(self._regions) - 1)
-            if callable(self._on_region_changed):
-                self._on_region_changed()
-            if callable(self._on_edit_finished):
-                self._on_edit_finished()
-            self.sync_to_view()
-            event.accept()
-            return
         self._drag_index = hit_index
         self._active_index = hit_index
         self._drag_mode = hit_mode
@@ -815,32 +798,14 @@ class _BlurRegionOverlayWindow(QWidget):
                 painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
                 for handle_rect in self._handle_rects(rect).values():
                     painter.drawEllipse(handle_rect)
-                close_rect = self._close_rect(rect)
-                painter.setBrush(QColor(12, 24, 38, 230))
-                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 235), 1))
-                painter.drawEllipse(close_rect)
-                painter.setPen(QPen(QColor(255, 255, 255, 235), 1.5))
-                pad = 5
-                painter.drawLine(
-                    close_rect.left() + pad,
-                    close_rect.top() + pad,
-                    close_rect.right() - pad,
-                    close_rect.bottom() - pad,
-                )
-                painter.drawLine(
-                    close_rect.right() - pad,
-                    close_rect.top() + pad,
-                    close_rect.left() + pad,
-                    close_rect.bottom() - pad,
-                )
 
 
 class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
     """Logo overlay that reuses the blur overlay's full structure.
 
-    Inherits move, resize, corner-handle drag, and the X close button
-    (which deletes the logo by popping the single region). Renders the
-    logo image inside the rect instead of a colored blur fill.
+    Inherits move, resize, and corner-handle dragging. Renders the logo
+    image inside the rect; deletion is handled by the shared timeline
+    Delete button.
     """
 
     logoMoved = Signal(float, float, float, float)
@@ -963,8 +928,6 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
         if index < 0 or index >= len(self._regions):
             return -1, ""
         rect = self.region_rect(index)
-        if self._close_rect(rect).contains(pos):
-            return index, "close"
         for handle_name, handle_rect in self._handle_rects(rect).items():
             if handle_rect.contains(pos):
                 return index, handle_name
@@ -994,8 +957,8 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
             if pixmap is not None and not pixmap.isNull():
                 painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
                 painter.drawPixmap(rect, pixmap, pixmap.rect())
-            # Reset transform/opacity before drawing chrome (handles,
-            # border, close button) so they remain axis-aligned and
+            # Reset transform/opacity before drawing chrome (handles and
+            # border) so they remain axis-aligned and
             # fully opaque even when the logo is rotated or faded.
             painter.restore()
             pen = QPen(QColor(110, 231, 214, int(255 * max(opacity, 0.4))),
@@ -1008,48 +971,13 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
                 painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
                 for handle_rect in self._handle_rects(rect).values():
                     painter.drawEllipse(handle_rect)
-                close_rect = self._close_rect(rect)
-                painter.setBrush(QColor(12, 24, 38, 230))
-                painter.setPen(QPen(QColor(110, 231, 214), 1))
-                painter.drawEllipse(close_rect)
-                painter.setPen(QPen(QColor(255, 255, 255, 235), 1.5))
-                pad = 5
-                painter.drawLine(close_rect.left() + pad, close_rect.top() + pad, close_rect.right() - pad, close_rect.bottom() - pad)
-                painter.drawLine(close_rect.right() - pad, close_rect.top() + pad, close_rect.left() + pad, close_rect.bottom() - pad)
-
-    def mousePressEvent(self, event):
-        if not self._editable or event.button() != Qt.LeftButton:
-            event.ignore()
-            return
-        pos = QPointF(event.position())
-        index = self._active_index
-        if 0 <= index < len(self._regions):
-            close_rect = self._close_rect(self.region_rect(index))
-            if close_rect.contains(pos):
-                self._regions.pop(index)
-                if index < len(self._logo_items):
-                    self._logo_items.pop(index)
-                self._active_index = min(index, len(self._regions) - 1)
-                if not self._regions and self._sync_timer is not None:
-                    self._sync_timer.stop()
-                self.logoDeleted.emit()
-                if callable(self._on_region_changed):
-                    self._on_region_changed()
-                if callable(self._on_edit_finished):
-                    self._on_edit_finished()
-                self.sync_to_view()
-                self.update()
-                event.accept()
-                return
-        super().mousePressEvent(event)
-
-
 class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
     """Mask overlay that reuses the blur overlay's full structure.
 
-    Inherits move (drag the middle), corner-resize, and the X close
-    button. Renders a single rectangular region with the active mask
-    colour so the user can see what they are editing.
+    Inherits move (drag the middle) and corner-resize. Deletion is handled
+    by the shared timeline Delete button, matching the other layer types.
+    Renders a single rectangular region with the active mask colour so the
+    user can see what they are editing.
 
     The mask mpv filter itself never applies a blur between solid and
     pixelate modes — it draws a coloured rectangle (solid) or
@@ -1115,8 +1043,6 @@ class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
         if index < 0 or index >= len(self._regions):
             return -1, ""
         rect = self.region_rect(index)
-        if self._close_rect(rect).contains(pos):
-            return index, "close"
         for handle_name, handle_rect in self._handle_rects(rect).items():
             if handle_rect.contains(pos):
                 return index, handle_name
@@ -1170,38 +1096,6 @@ class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
                 painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
                 for handle_rect in self._handle_rects(rect).values():
                     painter.drawEllipse(handle_rect)
-                close_rect = self._close_rect(rect)
-                painter.setBrush(QColor(12, 24, 38, 230))
-                painter.setPen(QPen(accent, 1))
-                painter.drawEllipse(close_rect)
-                painter.setPen(QPen(QColor(255, 255, 255, 235), 1.5))
-                pad = 5
-                painter.drawLine(close_rect.left() + pad, close_rect.top() + pad, close_rect.right() - pad, close_rect.bottom() - pad)
-                painter.drawLine(close_rect.right() - pad, close_rect.top() + pad, close_rect.left() + pad, close_rect.bottom() - pad)
-
-    def mousePressEvent(self, event):
-        if not self._editable or event.button() != Qt.LeftButton:
-            event.ignore()
-            return
-        pos = QPointF(event.position())
-        index = self._active_index
-        if 0 <= index < len(self._regions):
-            close_rect = self._close_rect(self.region_rect(index))
-            if close_rect.contains(pos):
-                self._regions.pop(index)
-                self._active_index = min(index, len(self._regions) - 1)
-                self.maskDeleted.emit()
-                if callable(self._on_region_changed):
-                    self._on_region_changed()
-                if callable(self._on_edit_finished):
-                    self._on_edit_finished()
-                self.sync_to_view()
-                self.update()
-                event.accept()
-                return
-        super().mousePressEvent(event)
-
-
 class _TextLayerOverlayWindow(QWidget):
     """Top-level, editable overlay for ordinary text layers."""
     layerSelected = Signal(str)
@@ -1823,9 +1717,9 @@ class MpvVideoView(QWidget):
         """Show the logo overlay at the given normalized position/size.
 
         The overlay reuses the blur overlay structure, so it supports
-        drag-to-move, corner-resize, and an X close button to delete
-        the logo. Connect to logoMoved / logoDeleted to react to
-        changes.
+        drag-to-move and corner-resize. Layer deletion is handled by the
+        shared timeline Delete button. Connect to logoMoved to react to
+        position changes.
         """
         if not hasattr(self, "logo_overlay") or self.logo_overlay is None:
             def _on_logo_region_changed():

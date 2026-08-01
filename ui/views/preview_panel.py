@@ -1,7 +1,9 @@
 import os
 
+import os
+
 from PySide6 import QtCore
-from PySide6.QtCore import QRectF, QSize, Qt
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -342,6 +344,224 @@ class OcrRegionOverlay(QWidget):
         p.end()
 
 
+class OcrTranslatorOverlay(QWidget):
+    """Persistent, on-demand visual-text OCR selection over the preview."""
+    captureRequested = Signal()
+    closeRequested = Signal()
+    rectChanged = Signal(tuple)
+    _HANDLE_SIZE = 10
+    _MIN_W = 48
+    _MIN_H = 32
+
+    def __init__(self):
+        # mpv owns a native child window, so this must be a separate tool
+        # window rather than a child QWidget.  Keep it non-activating so
+        # showing it cannot immediately trigger WindowDeactivate and hide it.
+        super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setWindowFlag(Qt.WindowDoesNotAcceptFocus, True)
+        self.setStyleSheet("background: transparent;")
+        self.setMouseTracking(True)
+        self._target_view = None
+        self._main_window = None
+        self._norm = QRectF(0.2, 0.2, 0.6, 0.25)
+        self._drag_mode = ""
+        self._rect_on_press = QRectF()
+        self._press_pos = QtCore.QPointF()
+        self._drag_offset = QtCore.QPointF()
+        self._capturing = False
+        self.hide()
+
+    def attach_to_view(self, view):
+        self._target_view = view
+        if view:
+            self._main_window = view.window()
+        if self._main_window is not None:
+            self._main_window.installEventFilter(self)
+
+    def normalized_rect(self):
+        r = self._norm
+        return (r.x(), r.y(), r.width(), r.height())
+
+    def set_capturing(self, capturing):
+        """Freeze selection input while the one-shot OCR worker is running."""
+        self._capturing = bool(capturing)
+        self._drag_mode = ""
+        self.setCursor(Qt.BusyCursor if self._capturing else Qt.OpenHandCursor)
+        self.update()
+
+    def set_normalized_rect(self, values):
+        try:
+            x, y, w, h = [float(value) for value in values]
+            self._norm = QRectF(max(0.0, x), max(0.0, y), max(0.01, w), max(0.01, h))
+        except (TypeError, ValueError):
+            return
+        self._set_rect(self._selection_rect(), emit=False)
+
+    def eventFilter(self, obj, event):
+        if obj is self._main_window:
+            if event.type() == QtCore.QEvent.WindowDeactivate:
+                self.hide()
+            elif event.type() in (QtCore.QEvent.WindowActivate, QtCore.QEvent.Resize, QtCore.QEvent.Move, QtCore.QEvent.Show):
+                if bool(getattr(self._main_window, "_ocr_translator_active", False)):
+                    self.sync_to_view()
+        return False
+
+    def sync_to_view(self):
+        if not self._target_view:
+            self.hide()
+            return
+        current_window = self._target_view.window()
+        if current_window is not self._main_window:
+            if self._main_window is not None:
+                self._main_window.removeEventFilter(self)
+            self._main_window = current_window
+            if self._main_window is not None:
+                self._main_window.installEventFilter(self)
+        if self._main_window is None or not bool(getattr(self._main_window, "_ocr_translator_active", False)):
+            self.hide()
+            return
+        top_left = self._target_view.mapToGlobal(QtCore.QPoint(0, 0))
+        self.setGeometry(QtCore.QRect(top_left, self._target_view.size()))
+        self.show()
+        self.raise_()
+        self.update()
+
+    def _content_rect(self):
+        if self._target_view and hasattr(self._target_view, "get_video_content_rect"):
+            rect = self._target_view.get_video_content_rect()
+            if rect.width() > 0 and rect.height() > 0:
+                return QRectF(rect)
+        return QRectF(0, 0, float(self.width()), float(self.height()))
+
+    def _selection_rect(self):
+        content = self._content_rect()
+        return QRectF(
+            content.x() + self._norm.x() * content.width(),
+            content.y() + self._norm.y() * content.height(),
+            self._norm.width() * content.width(), self._norm.height() * content.height(),
+        )
+
+    def _set_rect(self, rect, emit=True):
+        content = self._content_rect()
+        if content.width() <= 0 or content.height() <= 0:
+            return
+        bounded = QRectF(rect)
+        bounded.setWidth(max(self._MIN_W, bounded.width()))
+        bounded.setHeight(max(self._MIN_H, bounded.height()))
+        if bounded.left() < content.left(): bounded.moveLeft(content.left())
+        if bounded.top() < content.top(): bounded.moveTop(content.top())
+        if bounded.right() > content.right(): bounded.moveRight(content.right())
+        if bounded.bottom() > content.bottom(): bounded.moveBottom(content.bottom())
+        self._norm = QRectF(
+            max(0.0, (bounded.x() - content.x()) / content.width()),
+            max(0.0, (bounded.y() - content.y()) / content.height()),
+            min(1.0, bounded.width() / content.width()), min(1.0, bounded.height() / content.height()),
+        )
+        if emit:
+            self.rectChanged.emit(self.normalized_rect())
+        self.update()
+
+    def _handle_rects(self, rect):
+        half = self._HANDLE_SIZE / 2.0
+        return {
+            name: QRectF(point.x() - half, point.y() - half, self._HANDLE_SIZE, self._HANDLE_SIZE)
+            for name, point in {
+                "top_left": rect.topLeft(), "top_right": rect.topRight(),
+                "bottom_left": rect.bottomLeft(), "bottom_right": rect.bottomRight(),
+            }.items()
+        }
+
+    def _capture_button_rect(self, rect):
+        return QRectF(rect.right() - 100, rect.top() + 8, 92, 25)
+
+    def _close_button_rect(self, rect):
+        return QRectF(rect.left() + 8, rect.top() + 8, 25, 25)
+
+    def _hit_test(self, pos):
+        rect = self._selection_rect()
+        if self._capture_button_rect(rect).contains(pos): return "capture"
+        if self._close_button_rect(rect).contains(pos): return "close"
+        for name, handle in self._handle_rects(rect).items():
+            if handle.contains(pos): return name
+        return "move" if rect.contains(pos) else ""
+
+    def mousePressEvent(self, event):
+        if self._capturing:
+            event.accept()
+            return
+        if event.button() != Qt.LeftButton:
+            event.ignore(); return
+        self._drag_mode = self._hit_test(event.position())
+        self._rect_on_press = QRectF(self._selection_rect())
+        self._press_pos = event.position()
+        if self._drag_mode == "move":
+            self._drag_offset = event.position() - self._rect_on_press.topLeft()
+            self.setCursor(Qt.ClosedHandCursor)
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._capturing:
+            event.accept()
+            return
+        if not self._drag_mode:
+            hit = self._hit_test(event.position())
+            self.setCursor(Qt.PointingHandCursor if hit in ("capture", "close") else Qt.OpenHandCursor if hit == "move" else Qt.SizeAllCursor if hit else Qt.ArrowCursor)
+            event.accept(); return
+        if self._drag_mode in ("capture", "close"):
+            event.accept(); return
+        rect = QRectF(self._rect_on_press)
+        if self._drag_mode == "move":
+            rect.moveTopLeft(event.position() - self._drag_offset)
+        else:
+            delta = event.position() - self._press_pos
+            if "left" in self._drag_mode: rect.setLeft(rect.left() + delta.x())
+            if "right" in self._drag_mode: rect.setRight(rect.right() + delta.x())
+            if "top" in self._drag_mode: rect.setTop(rect.top() + delta.y())
+            if "bottom" in self._drag_mode: rect.setBottom(rect.bottom() + delta.y())
+        self._set_rect(rect)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self._capturing:
+            event.accept()
+            return
+        mode = self._drag_mode
+        self._drag_mode = ""
+        self.setCursor(Qt.OpenHandCursor)
+        if mode == "capture" and self._capture_button_rect(self._selection_rect()).contains(event.position()):
+            self.captureRequested.emit()
+        elif mode == "close" and self._close_button_rect(self._selection_rect()).contains(event.position()):
+            self.closeRequested.emit()
+        event.accept()
+
+    def paintEvent(self, event):
+        rect = self._selection_rect()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        color = QColor(168, 85, 247)
+        painter.setPen(QPen(color, 2))
+        painter.setBrush(QColor(color.red(), color.green(), color.blue(), 30))
+        painter.drawRoundedRect(rect, 7, 7)
+        capture_color = QColor(94, 70, 121) if self._capturing else QColor(color.red(), color.green(), color.blue(), 230)
+        painter.setBrush(capture_color)
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(self._capture_button_rect(rect), 5, 5)
+        painter.drawRoundedRect(self._close_button_rect(rect), 5, 5)
+        painter.setPen(QColor("#ffffff"))
+        font = painter.font(); font.setBold(True); font.setPixelSize(11); painter.setFont(font)
+        painter.drawText(self._capture_button_rect(rect), Qt.AlignCenter, "Capturing…" if self._capturing else "Capture")
+        painter.drawText(self._close_button_rect(rect), Qt.AlignCenter, "×")
+        painter.setBrush(color); painter.setPen(QPen(QColor("#121826"), 1))
+        for handle in self._handle_rects(rect).values(): painter.drawEllipse(handle)
+        painter.end()
+
+
 class FramePreviewWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -589,6 +809,8 @@ def build_preview_panel(gui):
     gui.blur_add_btn = QPushButton()
     gui.ocr_region_btn = QPushButton()
     gui.ocr_region_btn.setCheckable(True)
+    gui.ocr_translator_btn = QPushButton("OCR Translate")
+    gui.ocr_translator_btn.setCheckable(True)
     _set_preview_icon_button(gui.play_btn, os.path.join(icons_dir, "play.svg"), "Play or pause preview")
     _set_preview_icon_button(gui.stop_btn, os.path.join(icons_dir, "reset.svg"), "Reset preview to the beginning")
     _set_preview_icon_button(gui.preview_btn, os.path.join(icons_dir, "preview.svg"), "Render a fresh preview using current subtitle and audio")
@@ -605,6 +827,12 @@ def build_preview_panel(gui):
     gui.ocr_region_btn.setFixedSize(38, 38)
     gui.ocr_region_btn.setStyleSheet("QPushButton { color: #6ee7d6; font-weight: bold; font-size: 10px; padding: 0; }")
     gui.ocr_region_btn.hide()
+    gui.ocr_translator_btn.setFixedSize(92, 38)
+    gui.ocr_translator_btn.setToolTip("Capture and translate visual text from the current video frame")
+    gui.ocr_translator_btn.setStyleSheet(
+        "QPushButton { color: #d8b4fe; font-weight: bold; font-size: 11px; padding: 0 6px; }"
+        "QPushButton:checked { background: #3b2557; border-color: #a855f7; color: #ffffff; }"
+    )
 
     gui.preview_speed_combo = QComboBox()
     gui.preview_speed_combo.addItem("0.75x", 0.75)
@@ -663,6 +891,7 @@ def build_preview_panel(gui):
     blur_group.addWidget(gui.add_mask_btn)
     blur_group.addWidget(gui.add_text_btn)
     blur_group.addWidget(gui.ocr_region_btn)
+    blur_group.addWidget(gui.ocr_translator_btn)
 
     speed_group = QHBoxLayout()
     speed_group.setSpacing(6)
@@ -685,12 +914,18 @@ def build_preview_panel(gui):
 
     gui.ocr_region_overlay = OcrRegionOverlay()
     gui.ocr_region_overlay.attach_to_view(gui.video_view)
+    gui.ocr_translator_overlay = OcrTranslatorOverlay()
+    gui.ocr_translator_overlay.attach_to_view(gui.video_view)
 
     def _sync_ocr_overlay():
         overlay = getattr(gui, "ocr_region_overlay", None)
         if overlay is None:
-            return
-        overlay.sync_to_view()
+            pass
+        else:
+            overlay.sync_to_view()
+        translator_overlay = getattr(gui, "ocr_translator_overlay", None)
+        if translator_overlay is not None:
+            translator_overlay.sync_to_view()
 
     gui._sync_ocr_overlay = _sync_ocr_overlay
 
@@ -791,17 +1026,34 @@ def build_preview_panel(gui):
     edit_group.addWidget(gui.timeline_layers_btn)
 
     gui.add_layer_btn = QPushButton("+ Layer")
-    gui.add_layer_btn.setFixedWidth(62)
+    gui.add_layer_btn.setFixedWidth(82)
     gui.add_layer_btn.setToolTip("Add a new layer")
+    # Keep this menu button visually consistent with the dark timeline toolbar.
+    # QMenu buttons can otherwise fall back to the platform's light palette.
+    gui.add_layer_btn.setStyleSheet(
+        "QPushButton { background: #213248; color: #ffffff; border: 1px solid #304b69; "
+        "border-radius: 10px; padding: 8px 10px; font-weight: bold; font-size: 11px; }"
+        "QPushButton:hover { background: #2d4665; border-color: #4575a8; }"
+        "QPushButton:pressed { background: #182a3d; border-color: #6ee7d6; }"
+        "QPushButton:disabled { background: #182636; color: #8ea3bb; border-color: #29405d; }"
+    )
     gui.add_layer_btn.setEnabled(False)
     gui._layer_menu = QMenu(gui.add_layer_btn)
-    gui._layer_menu.addAction("Subtitle", lambda: gui.on_add_timeline_layer("subtitle"))
+    gui._layer_menu.setStyleSheet(
+        "QMenu { background: #142030; color: #dbe5f3; border: 1px solid #2f4868; padding: 5px; }"
+        "QMenu::item { padding: 7px 24px 7px 10px; border-radius: 4px; }"
+        "QMenu::item:selected { background: #203a56; color: #ffffff; }"
+        "QMenu::item:disabled { color: #71839a; }"
+    )
+    gui.add_subtitle_segment_action = gui._layer_menu.addAction(
+        "Subtitle Segment", lambda: gui.on_add_timeline_layer("subtitle")
+    )
     gui._layer_menu.addAction("Text", lambda: gui.on_add_timeline_layer("text"))
-    gui._layer_menu.addAction("Image", lambda: gui.on_add_timeline_layer("image"))
     gui._layer_menu.addAction("Logo / Watermark", lambda: gui.on_add_timeline_layer("logo"))
     gui._layer_menu.addAction("Blur", lambda: gui.on_add_timeline_layer("blur"))
     gui._layer_menu.addAction("Mask", lambda: gui.on_add_timeline_layer("mask"))
     gui.add_layer_btn.setMenu(gui._layer_menu)
+    edit_group.addWidget(gui.add_layer_btn)
 
     view_group = QHBoxLayout()
     view_group.setSpacing(4)

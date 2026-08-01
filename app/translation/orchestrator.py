@@ -1,4 +1,5 @@
 import concurrent.futures
+import math
 import os
 import re
 
@@ -8,10 +9,13 @@ from .providers import (
     AIPolisherProvider,
     GeminiPolisherProvider,
     GoogleWebTranslatorProvider,
-    LocalPolisherProvider,
     MicrosoftTranslatorProvider,
 )
 from .srt_utils import clone_with_texts, parse_srt, split_text_batches, to_srt, validate_texts
+
+
+class AIBatchTranslationError(Exception):
+    """The full-context recovery batches could not be completed."""
 
 
 class TranslationOrchestrator:
@@ -20,7 +24,6 @@ class TranslationOrchestrator:
         self.google_web = GoogleWebTranslatorProvider()
         self.ai_polisher = AIPolisherProvider()
         self.gemini_polisher = GeminiPolisherProvider()
-        self.local_polisher = LocalPolisherProvider()
 
     def translate_segments(
         self,
@@ -31,7 +34,7 @@ class TranslationOrchestrator:
         enable_polish: bool = True,
         optimize_subtitles: bool = False,
         ms_batch_size: int = 50,
-        polish_batch_size: int = 25,
+        polish_batch_size: int = 80,
         style_instruction: str = "",
         batch_callback=None,
     ) -> TranslationResult:
@@ -80,11 +83,20 @@ class TranslationOrchestrator:
                         used_fallback=bool(warnings),
                     )
                 except Exception as exc:
-                    msg = f"AI translation failed, falling back to Google web translate: {exc}"
-                    print(f"[AI Translation] WARNING: {msg}")
+                    if isinstance(exc, AIBatchTranslationError):
+                        msg = "AI batch translation failed. Falling back to Google Translate."
+                    else:
+                        msg = "AI Provider is unavailable. Falling back to Google Translate..."
+                    print(f"[AI Translation] WARNING: {msg} ({exc})")
                     warnings.append(msg)
             else:
-                print(f"[AI Translation] AI Provider ({provider_type}) not configured, using Google web translate.")
+                selected_provider = str(os.getenv("OPENAI_PROVIDER") or "google").strip().lower()
+                if selected_provider != "google":
+                    msg = "AI Provider is unavailable. Falling back to Google Translate..."
+                    print(f"[AI Translation] WARNING: {msg}")
+                    warnings.append(msg)
+                else:
+                    print("[AI Translation] Google Translate selected.")
 
         print(f"[Translation] Starting Google web translate fallback (batch_size={ms_batch_size})...")
         try:
@@ -250,19 +262,20 @@ class TranslationOrchestrator:
         return mapping.get(key, src_lang)
 
     def _resolve_ai_provider(self):
-        provider_type = (os.getenv("AI_POLISHER_PROVIDER") or "gemini").strip().lower()
-        if provider_type == "gemini":
-            return provider_type, self.gemini_polisher
-        if provider_type == "local":
-            return provider_type, self.local_polisher
-        return "gemini", self.gemini_polisher
+        # GeminiPolisherProvider is an OpenAI-compatible client and is also
+        # used for OpenAI and Ollama endpoints configured in Settings.  Return
+        # the selected service name, rather than the shared client name, so
+        # persisted segment metadata accurately records who translated it.
+        provider_type = (os.getenv("OPENAI_PROVIDER") or os.getenv("AI_POLISHER_PROVIDER") or "gemini").strip().lower()
+        if provider_type not in {"gemini", "openai", "ollama"}:
+            provider_type = "gemini"
+        # GeminiPolisherProvider is an OpenAI-compatible client and is also
+        # used for OpenAI and Ollama endpoints configured in Settings.
+        return provider_type, self.gemini_polisher
 
     def _describe_ai_provider(self, provider_type: str) -> str:
-        if provider_type == "gemini":
-            return f"Gemini ({self.gemini_polisher.model_name})"
-        if provider_type == "local":
-            return f"Local GGUF ({os.path.basename(self.local_polisher.model_path)})"
-        return f"Local GGUF ({os.path.basename(self.local_polisher.model_path)})"
+        names = {"gemini": "Gemini", "openai": "OpenAI", "ollama": "Ollama"}
+        return f"{names.get(provider_type, 'AI')} ({self.gemini_polisher.model_name})"
 
     def _run_ai_batches(
         self,
@@ -281,125 +294,78 @@ class TranslationOrchestrator:
         warnings = []
         providers_used = set()
 
-        if provider_type == "local":
-            local_batch_size = max(6, min(int(polish_batch_size or 12), 12))
-            source_batches = list(split_text_batches(source_texts, local_batch_size))
-            translated_batches = list(split_text_batches(translated_texts, local_batch_size)) if translated_texts else [None] * len(source_batches)
-            merged: list[str] = []
-            offset = 0
-            for idx, source_batch in enumerate(source_batches):
-                batch_trans = translated_batches[idx]
-                try:
-                    batch_result, batch_warnings, provider_name = polisher.polish_batch(
-                        source_texts=source_batch,
-                        translated_texts=batch_trans,
-                        src_lang=src_lang,
-                        target_lang=target_lang,
-                        style_instruction=style_instruction,
-                    )
-                    merged.extend(batch_result)
-                    warnings.extend(batch_warnings)
-                    if provider_name:
-                        providers_used.add(provider_name)
-                    self._emit_batch_callback(
-                        batch_callback=batch_callback,
-                        base_segments=base_segments,
-                        start_idx=offset,
-                        translated_texts=batch_result,
-                        provider=provider_type,
-                        polished=True,
-                    )
-                    offset += len(source_batch)
-                except Exception as batch_exc:
-                    single_size = max(1, len(source_batch) // 2)
-                    if single_size < len(source_batch):
-                        print(f"[AI Translation] Batch {idx + 1} failed ({batch_exc}), retrying with smaller batches ({single_size} lines)...")
-                        sub_sources = list(split_text_batches(source_batch, single_size))
-                        sub_trans = list(split_text_batches(batch_trans, single_size)) if batch_trans else [None] * len(sub_sources)
-                        sub_offset = offset
-                        for sub_idx, sub_src in enumerate(sub_sources):
-                            sub_t = sub_trans[sub_idx] if sub_trans else None
-                            try:
-                                sub_result, sub_warnings, sub_provider = polisher.polish_batch(
-                                    source_texts=sub_src,
-                                    translated_texts=sub_t,
-                                    src_lang=src_lang,
-                                    target_lang=target_lang,
-                                    style_instruction=style_instruction,
-                                )
-                                merged.extend(sub_result)
-                                warnings.extend(sub_warnings)
-                                if sub_provider:
-                                    providers_used.add(sub_provider)
-                                self._emit_batch_callback(
-                                    batch_callback=batch_callback,
-                                    base_segments=base_segments,
-                                    start_idx=sub_offset,
-                                    translated_texts=sub_result,
-                                    provider=provider_type,
-                                    polished=True,
-                                )
-                            except Exception:
-                                print(f"[AI Translation] Sub-batch {sub_idx + 1} re-failed, using Google fallback for {len(sub_src)} lines...")
-                                fallback_result = []
-                                for src_line in sub_src:
-                                    try:
-                                        gb = self.google_web.translate_batch([src_line], src_lang=src_lang, target_lang=target_lang)
-                                        merged.extend(gb)
-                                        fallback_result.extend(gb)
-                                    except Exception:
-                                        merged.append(src_line)
-                                        fallback_result.append(src_line)
-                                        warnings.append(f"Google fallback also failed for line: {src_line[:50]}")
-                                self._emit_batch_callback(
-                                    batch_callback=batch_callback,
-                                    base_segments=base_segments,
-                                    start_idx=sub_offset,
-                                    translated_texts=fallback_result,
-                                    provider="google-web-retry",
-                                    polished=False,
-                                )
-                                providers_used.add("google-web-retry")
-                            sub_offset += len(sub_src)
-                        offset += len(source_batch)
-                    else:
-                        print(f"[AI Translation] Batch {idx + 1} failed ({batch_exc}), using Google fallback for {len(source_batch)} lines...")
-                        fallback_result = []
-                        for src_line in source_batch:
-                            try:
-                                gb = self.google_web.translate_batch([src_line], src_lang=src_lang, target_lang=target_lang)
-                                merged.extend(gb)
-                                fallback_result.extend(gb)
-                            except Exception:
-                                merged.append(src_line)
-                                fallback_result.append(src_line)
-                                warnings.append(f"Google fallback also failed for line: {src_line[:50]}")
-                        self._emit_batch_callback(
-                            batch_callback=batch_callback,
-                            base_segments=base_segments,
-                            start_idx=offset,
-                            translated_texts=fallback_result,
-                            provider="google-web-retry",
-                            polished=False,
-                        )
-                        providers_used.add("google-web-retry")
-                        offset += len(source_batch)
-            return merged, sorted(providers_used), warnings
-
-        source_batches = list(split_text_batches(source_texts, max(polish_batch_size, 60)))
-        translated_batches = list(split_text_batches(translated_texts, polish_batch_size)) if translated_texts else [None] * len(source_batches)
-        translated_texts_map = {}
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(source_batches), 10)) as executor:
-            future_to_idx = {}
-            for idx, source_batch in enumerate(source_batches):
-                future = executor.submit(
-                    polisher.polish_batch,
-                    source_texts=source_batch,
-                    translated_texts=translated_batches[idx],
+        # Modern cloud models benefit from enough neighbouring subtitle cues
+        # to keep terminology, names, and tone consistent.  Do not rely only
+        # on a cue count though: long subtitle files can still exceed a
+        # provider's practical context/output budget.  The same boundaries
+        # are used for source and draft text, preventing misaligned rewrites.
+        batches, full_context_request = self._build_ai_batches(
+            source_texts=source_texts,
+            translated_texts=translated_texts,
+            requested_max_segments=polish_batch_size,
+        )
+        if not full_context_request:
+            print(
+                "[AI Translation] Batching: "
+                f"segments={len(source_texts)}, requests={len(batches)}, "
+                f"max_segments={max((len(source) for source, _draft, _tokens in batches), default=0)}"
+            )
+        try:
+            return self._run_ai_batch_requests(
+                polisher=polisher,
+                batches=batches,
+                src_lang=src_lang,
+                target_lang=target_lang,
+                style_instruction=style_instruction,
+                max_workers=1 if full_context_request else min(len(batches), 4),
+            )
+        except TranslationValidationError as exc:
+            if not full_context_request:
+                raise
+            print("[AI Translation] Full-context response incomplete. Retrying with ordered batches.")
+            fallback_batches, _unused_full_context = self._build_ai_batches(
+                source_texts=source_texts,
+                translated_texts=translated_texts,
+                requested_max_segments=polish_batch_size,
+                force_ordered=True,
+            )
+            print(
+                "[AI Translation] Ordered batch retry: "
+                f"requests={len(fallback_batches)}, "
+                f"max_segments={max((len(source) for source, _draft, _tokens in fallback_batches), default=0)}"
+            )
+            try:
+                recovered = self._run_ai_batch_requests(
+                    polisher=polisher,
+                    batches=fallback_batches,
                     src_lang=src_lang,
                     target_lang=target_lang,
                     style_instruction=style_instruction,
+                    max_workers=min(len(fallback_batches), 4),
+                )
+                print("[AI Translation] Batch translation completed successfully.")
+                return recovered
+            except Exception as batch_exc:
+                print(f"[AI Translation] AI batch translation failed. Falling back to Google Translate. ({batch_exc})")
+                raise AIBatchTranslationError(str(batch_exc)) from exc
+
+    @staticmethod
+    def _run_ai_batch_requests(*, polisher, batches, src_lang, target_lang, style_instruction, max_workers):
+        """Submit validated ordered batches and merge their results by index."""
+        warnings = []
+        providers_used = set()
+        translated_texts_map = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
+            future_to_idx = {}
+            for idx, (source_batch, translated_batch, max_tokens) in enumerate(batches):
+                future = executor.submit(
+                    polisher.polish_batch,
+                    source_texts=source_batch,
+                    translated_texts=translated_batch,
+                    src_lang=src_lang,
+                    target_lang=target_lang,
+                    style_instruction=style_instruction,
+                    max_tokens=max_tokens,
                 )
                 future_to_idx[future] = idx
 
@@ -412,12 +378,107 @@ class TranslationOrchestrator:
                     if provider_name:
                         providers_used.add(provider_name)
                 except Exception as exc:
+                    if isinstance(exc, TranslationValidationError):
+                        raise
                     raise Exception(f"Batch {idx + 1} failed: {exc}") from exc
 
         merged = []
-        for idx in range(len(source_batches)):
+        for idx in range(len(batches)):
             merged.extend(translated_texts_map[idx])
         return merged, sorted(providers_used), warnings
+
+    @staticmethod
+    def _build_ai_batches(
+        *,
+        source_texts: list[str],
+        translated_texts: list[str] | None,
+        requested_max_segments: int,
+        force_ordered: bool = False,
+    ) -> tuple[list[tuple[list[str], list[str] | None, int]], bool]:
+        """Create ordered AI batches with both cue and prompt-size limits.
+
+        Prefer one request for the full video whenever its estimated input and
+        numbered response fit a conservative provider-independent budget.
+        This gives the model full narrative context.  Longer videos fall back
+        to ordered context-sized batches.  Environment values are optional
+        escape hatches for self-hosted providers with smaller limits.
+        """
+        if translated_texts is not None and len(source_texts) != len(translated_texts):
+            raise TranslationValidationError("Source and draft subtitle counts do not match.")
+
+        def _env_int(name: str, default: int) -> int:
+            try:
+                return int(os.getenv(name, str(default)))
+            except ValueError:
+                return default
+
+        def _estimate_tokens(text: str) -> int:
+            # CJK glyphs commonly consume approximately one token each;
+            # Latin-script text is generally less dense.  Using the larger
+            # estimate keeps the automatic fallback conservative.
+            text = str(text or "")
+            cjk = sum(
+                1 for char in text
+                if "\u3400" <= char <= "\u9fff" or "\uf900" <= char <= "\ufaff"
+            )
+            return cjk + math.ceil((len(text) - cjk) / 3.5)
+
+        source_token_estimate = sum(_estimate_tokens(text) for text in source_texts)
+        draft_token_estimate = (
+            sum(_estimate_tokens(text) for text in translated_texts)
+            if translated_texts is not None else 0
+        )
+        input_tokens = source_token_estimate + draft_token_estimate + (12 * len(source_texts)) + 220
+        # Translation can expand compact CJK dialogue considerably.  This
+        # leaves response room without assuming a specific destination language.
+        response_tokens = max(512, math.ceil(max(source_token_estimate, draft_token_estimate) * 1.8) + (10 * len(source_texts)))
+        context_limit = max(4096, _env_int("CAPCAP_AI_TRANSLATION_CONTEXT_TOKENS", 24000))
+        output_limit = max(1024, _env_int("CAPCAP_AI_TRANSLATION_MAX_OUTPUT_TOKENS", 8192))
+        if not force_ordered and input_tokens + response_tokens <= context_limit and response_tokens <= output_limit:
+            print(
+                "[AI Translation] Full-context request: "
+                f"input~{input_tokens} tokens, output~{response_tokens} tokens."
+            )
+            return ([(list(source_texts), list(translated_texts) if translated_texts is not None else None,
+                     min(output_limit, max(1024, response_tokens)))], True)
+
+        try:
+            configured_max = int(os.getenv("CAPCAP_AI_TRANSLATION_MAX_SEGMENTS", "80"))
+        except ValueError:
+            configured_max = 80
+        max_segments = max(1, min(int(requested_max_segments or 80), max(1, configured_max)))
+        max_chars = _env_int("CAPCAP_AI_TRANSLATION_MAX_CHARS", 18000)
+        # Draft rewriting sends both source and translated text in the prompt.
+        max_chars = max(2000, max_chars // (2 if translated_texts is not None else 1))
+
+        batches: list[tuple[list[str], list[str] | None, int]] = []
+        current_source: list[str] = []
+        current_drafts: list[str] | None = [] if translated_texts is not None else None
+        current_chars = 0
+        current_response_tokens = 0
+        for index, source in enumerate(source_texts):
+            source = str(source or "")
+            draft = str(translated_texts[index] or "") if translated_texts is not None else ""
+            item_chars = len(source) + len(draft) + 16
+            item_response_tokens = math.ceil(max(_estimate_tokens(source), _estimate_tokens(draft)) * 1.8) + 10
+            if current_source and (
+                len(current_source) >= max_segments
+                or current_chars + item_chars > max_chars
+                or current_response_tokens + item_response_tokens > 3600
+            ):
+                batches.append((current_source, current_drafts, max(1024, min(4096, current_response_tokens + 128))))
+                current_source = []
+                current_drafts = [] if translated_texts is not None else None
+                current_chars = 0
+                current_response_tokens = 0
+            current_source.append(source)
+            if current_drafts is not None:
+                current_drafts.append(draft)
+            current_chars += item_chars
+            current_response_tokens += item_response_tokens
+        if current_source:
+            batches.append((current_source, current_drafts, max(1024, min(4096, current_response_tokens + 128))))
+        return batches, False
 
     def _emit_batch_callback(
         self,

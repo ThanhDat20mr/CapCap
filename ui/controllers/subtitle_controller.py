@@ -109,17 +109,19 @@ class SubtitleController:
 
         model_path = None
         src_lang = self.gui.get_source_language_code()
-        enable_polish = False
-        self.gui.translated_text.setText("Translating with Microsoft Translator... please wait.")
+        enable_polish = bool(self.gui.is_ai_polish_enabled())
+        self.gui.translated_text.setText("Translating with the selected provider... please wait.")
         self.gui.translate_btn.setEnabled(False)
         self.gui.progress_bar.setValue(80)
         self.gui.update_project_step("translate_raw", "running")
 
-        self.gui.translation_thread = TranslationWorker(srt_source, model_path, src_lang, enable_polish)
+        self.gui.translation_thread = TranslationWorker(
+            srt_source, model_path, src_lang, self.gui.get_target_language_code(), enable_polish
+        )
         self.gui.translation_thread.finished.connect(self.gui.on_translation_finished)
         self.gui.translation_thread.start()
 
-    def on_translation_finished(self, translated_srt, error):
+    def on_translation_finished(self, translated_srt, error, fallback_notice=""):
         self.gui.translate_btn.setEnabled(True)
         if error or not translated_srt:
             self.gui.update_project_step("translate_raw", "failed")
@@ -146,10 +148,17 @@ class SubtitleController:
             self.gui.last_translated_srt_path = out_path
             self.gui.processed_artifacts["srt_translated"] = out_path
             self.gui.persist_translation_project_data(self.gui.current_translated_segments, out_path)
-            QMessageBox.information(self.gui, "Finished", f"Process complete! Subtitle saved and loaded for preview:\n{out_path}")
+            message = f"Process complete! Subtitle saved and loaded for preview:\n{out_path}"
+            if fallback_notice:
+                message = "Translation completed using Google Translate (AI Provider unavailable).\n\n" + message
+            QMessageBox.information(self.gui, "Finished", message)
         else:
             self.gui.persist_translation_project_data(self.gui.current_translated_segments)
-            QMessageBox.information(self.gui, "Finished", "Translation complete!")
+            message = "Translation completed using Google Translate (AI Provider unavailable)." if fallback_notice else "Translation complete!"
+            QMessageBox.information(self.gui, "Finished", message)
+
+        if fallback_notice:
+            self.gui.log(f"[Translation] {fallback_notice}")
 
         self.gui.refresh_ui_state()
         self.gui._pipeline_advance("translation")
