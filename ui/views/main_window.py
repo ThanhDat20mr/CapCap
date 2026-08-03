@@ -268,7 +268,6 @@ def _connect_ui_signals(gui):
         gui.ocr_translator_btn.toggled.connect(gui.toggle_ocr_translator)
     if hasattr(gui, "ocr_translator_overlay"):
         gui.ocr_translator_overlay.captureRequested.connect(gui.capture_ocr_translator_region)
-        gui.ocr_translator_overlay.closeRequested.connect(gui.close_ocr_translator)
         gui.ocr_translator_overlay.rectChanged.connect(gui._on_ocr_translator_rect_changed)
     if hasattr(gui, "video_view") and hasattr(gui.video_view, "framingChanged"):
         gui.video_view.framingChanged.connect(gui.on_preview_framing_changed)

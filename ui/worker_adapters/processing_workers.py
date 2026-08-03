@@ -168,21 +168,31 @@ class OcrTranslatorTranslationWorker(QThread):
     def run(self):
         try:
             engine = EngineRuntime()
+            selected_provider = str(os.getenv("OPENAI_PROVIDER") or "google").strip().lower()
+            print(f"[OCR Translator] Translating with selected provider: {selected_provider}")
             result = engine.translate_segments(
                 [{"start": 0.0, "end": 1.0, "text": self.text}],
                 src_lang=self.source_lang,
                 target_lang=self.target_lang,
-                enable_polish=False,
+                # This utility must follow the same selected cloud/API
+                # provider as the main translation pipeline.  Passing False
+                # bypasses it and always takes the Google fallback path.
+                enable_polish=True,
                 optimize_subtitles=False,
+                style_instruction="[mode=ocr_capture]",
             )
             first = (result or [None])[0]
             if isinstance(first, dict):
                 translated = first.get("text", "")
+                actual_provider = first.get("provider", "")
             else:
                 translated = getattr(first, "text", "")
+                actual_provider = getattr(first, "provider", "")
             translated = str(translated or "").strip()
             if not translated:
                 raise RuntimeError("The translator returned no text.")
+            actual_provider = str(actual_provider or selected_provider).strip()
+            print(f"[OCR Translator] Translation completed using: {actual_provider}")
             self.finished.emit(translated, "")
         except Exception as exc:
             self.finished.emit("", str(exc))

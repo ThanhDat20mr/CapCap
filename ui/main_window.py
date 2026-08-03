@@ -4512,13 +4512,15 @@ class VideoTranslatorGUI(QMainWindow):
             badge.setText(text)
             badge.setStyleSheet(f"color: {color}; font-weight: 700;")
 
-        # Step-by-Step is deliberately linear: users can only launch the
-        # next missing stage, while Full Pipeline remains the shortcut that
-        # runs all required stages in order.
+        # Step-by-Step is deliberately linear until translation is complete.
+        # Translation remains repeatable, like TTS: users often adjust the
+        # provider, prompt, or source subtitles and need to run it again
+        # without transcribing the video a second time.
         if hasattr(self, "_generate_transcript_action"):
             self._generate_transcript_action.setEnabled(has_video and not transcript and not self._pipeline_active)
         if hasattr(self, "_generate_translate_action"):
-            self._generate_translate_action.setEnabled(transcript and not translated and not self._pipeline_active)
+            self._generate_translate_action.setEnabled(transcript and not self._pipeline_active)
+            self._generate_translate_action.setText("Re-translate" if translated else "Auto Translate")
         if hasattr(self, "_generate_import_translated_srt_action"):
             self._generate_import_translated_srt_action.setEnabled(transcript and not self._pipeline_active)
         if hasattr(self, "_generate_tts_action"):
@@ -4973,19 +4975,78 @@ class VideoTranslatorGUI(QMainWindow):
     def _segment_editor_display_rows(self):
         base_segments = self.current_segments or []
         translated_segments = self.current_translated_segments or []
+        source_models = self.current_segment_models or []
+        # Segment lists normally remain index-aligned, but imported SRTs and
+        # manual timing edits may add/remove cues on only one side.  Retain a
+        # fast timing lookup so the inspector can still show the matching
+        # source transcript instead of an empty "Original" field.
+        base_by_time = {
+            (
+                round(float(segment.get("start", 0.0)), 3),
+                round(float(segment.get("end", 0.0)), 3),
+            ): segment
+            for segment in base_segments
+            if isinstance(segment, dict)
+        }
+        # Timeline subtitle layers retain their visible `text` separately
+        # from `_seg_dict`.  Keep this as the final recovery source for a
+        # cue whose in-memory dictionary was rebuilt from SRT timing data.
+        timeline_text_by_index = {}
+        timeline_model = getattr(getattr(self, "timeline", None), "_timeline", None)
+        for track in list(getattr(timeline_model, "tracks", []) or []):
+            if str(getattr(getattr(track, "type", ""), "value", getattr(track, "type", ""))).lower() not in {"subtitle", "dub_subtitle"}:
+                continue
+            for layer in list(getattr(track, "layers", []) or []):
+                metadata = getattr(layer, "metadata", {}) or {}
+                try:
+                    segment_index = int(metadata.get("_seg_index", -1))
+                except (TypeError, ValueError):
+                    continue
+                if segment_index >= 0:
+                    timeline_text_by_index[segment_index] = str(
+                        getattr(layer, "text", "") or getattr(layer, "dub_text", "") or ""
+                    )
         row_count = max(len(base_segments), len(translated_segments))
         rows = []
         for idx in range(row_count):
             base = base_segments[idx] if idx < len(base_segments) else {}
             translated = translated_segments[idx] if idx < len(translated_segments) else {}
+            if translated:
+                time_key = (
+                    round(float(translated.get("start", 0.0)), 3),
+                    round(float(translated.get("end", 0.0)), 3),
+                )
+                timed_base = base_by_time.get(time_key)
+                if timed_base is not None:
+                    base = timed_base
             reference = translated or base
+            # Imported/manual translated segments do not always retain a
+            # parallel original item at the same index.  Prefer the actual
+            # transcript, then the source-text metadata retained by the
+            # translation workflow, so the inspector never loses the source
+            # text while the preview/timeline still has a visible cue.
+            model_original = ""
+            if idx < len(source_models):
+                model_original = str(getattr(source_models[idx], "original_text", "") or "")
+            original_text = str(
+                translated.get("source_text", "")
+                or translated.get("original_text", "")
+                or base.get("original_text", "")
+                or base.get("text", "")
+                or model_original
+                or timeline_text_by_index.get(idx, "")
+                or ""
+            )
+            shown_text = str(translated.get("text", "") or original_text)
             rows.append(
                 {
                     "segment_index": idx,
                     "start": float(reference.get("start", 0.0)),
                     "end": float(reference.get("end", 0.0)),
-                    "original": str(base.get("text", "")),
-                    "translated": str(translated.get("text", "")),
+                    "original": original_text,
+                    # Before translation this is the original transcript,
+                    # which is also the text currently shown on screen.
+                    "translated": shown_text,
                     "spoken": str(translated.get("tts_text") or translated.get("dubbing_vi") or translated.get("text", "")),
                     "subtitle_vi": str(translated.get("subtitle_vi") or translated.get("text", "")),
                     "dubbing_vi": str(translated.get("dubbing_vi") or translated.get("tts_text") or translated.get("text", "")),
@@ -6783,7 +6844,18 @@ class VideoTranslatorGUI(QMainWindow):
         orig_lbl = getattr(self, "inspector_original_text_label", None)
         orig_widget = getattr(self, "inspector_shared_original_label", None)
         if orig_lbl is not None:
-            orig_text = str(seg.get("original_text", "") or "") if valid else ""
+            orig_text = ""
+            if valid:
+                row = self._find_segment_editor_row(idx)
+                if row is not None:
+                    orig_text = str(row.get("original", "") or "")
+                if not orig_text:
+                    orig_text = str(
+                        seg.get("source_text", "")
+                        or seg.get("original_text", "")
+                        or seg.get("text", "")
+                        or ""
+                    )
             orig_lbl.setText(orig_text if orig_text else "")
             if orig_widget is not None:
                 orig_widget.setVisible(bool(orig_text))
@@ -8455,10 +8527,6 @@ class VideoTranslatorGUI(QMainWindow):
                 card_layout.addLayout(highlight_action_layout)
                 card_layout.addLayout(highlight_meta_layout)
 
-                for label in card.findChildren(QLabel):
-                    label_text = label.text().strip()
-                    if len(label_text) <= 2 and not label_text.isascii():
-                        label.hide()
                 self.segment_editor_layout.addWidget(card, 0)
                 self._segment_editor_rows.append(
                     {
@@ -8747,17 +8815,6 @@ class VideoTranslatorGUI(QMainWindow):
 
     def _on_ocr_translator_rect_changed(self, rect):
         self._ocr_translator_rect = tuple(rect)
-
-    def close_ocr_translator(self):
-        self._ocr_translator_active = False
-        overlay = getattr(self, "ocr_translator_overlay", None)
-        if overlay is not None:
-            overlay.hide()
-        button = getattr(self, "ocr_translator_btn", None)
-        if button is not None:
-            button.blockSignals(True)
-            button.setChecked(False)
-            button.blockSignals(False)
 
     def capture_ocr_translator_region(self):
         if getattr(self, "_ocr_translator_capture_worker", None) is not None:
@@ -10077,7 +10134,13 @@ class VideoTranslatorGUI(QMainWindow):
             active_index = self._find_active_segment_index(position_ms, segments)
             self.timeline.set_active_segment_index(active_index)
             inspector_visible = self._is_subtitle_inspector_details_visible()
-            if inspector_visible and active_index >= 0 and active_index != getattr(self, "_selected_segment_index", -1):
+            # Playback may update its last position even while paused.  Do
+            # not let that stale position overwrite a subtitle the user has
+            # just selected on TS1 (which commonly reset the inspector to
+            # segment 1 at position 0).  Follow playback only while it is
+            # actually running.
+            is_playing = bool(getattr(self.media_player, "is_playing", lambda: False)())
+            if inspector_visible and is_playing and active_index >= 0 and active_index != getattr(self, "_selected_segment_index", -1):
                 self.set_selected_segment_index(active_index, sync_ui=True)
 
             if inspector_visible:
@@ -11662,6 +11725,17 @@ class VideoTranslatorGUI(QMainWindow):
         if target_stage == "translate" and not has_transcript:
             QMessageBox.information(self, "Step-by-Step", "Complete Transcript before running Translate.")
             return
+        if target_stage == "translate" and has_translation:
+            # A deliberate re-translate must bypass the finished-translation
+            # cache.  Keep the transcript cache intact, so this does not
+            # repeat audio extraction or transcription.
+            state = self.ensure_current_project()
+            if state is not None:
+                state.set_setting("translation_signature", "")
+                state.set_step_status("translate_raw", "pending")
+                state.set_step_status("refine_translation", "pending")
+                self.project_service.save_project(state)
+            self.log("[Translation] Re-translate requested; reusing the existing transcript.")
         if target_stage == "tts" and not has_translation:
             QMessageBox.information(self, "Step-by-Step", "Complete Translate before running Generate Voice / TTS.")
             return

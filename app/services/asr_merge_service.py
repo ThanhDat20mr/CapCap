@@ -388,7 +388,11 @@ class AsrMergeService:
         candidate_segment = candidate["segment"]
         overlap = self._time_overlap(previous_segment, candidate_segment)
         similarity = self._similarity(previous_segment.get("text", ""), candidate_segment.get("text", ""))
-        if overlap <= 0.0 and similarity < 0.7:
+        # Repeated dialogue is valid.  Only the overlapping boundary audio
+        # of adjacent chunks can represent the same utterance; using text
+        # similarity alone discarded real consecutive phrases such as
+        # "confirmed?" / "confirmed" in a single chunk.
+        if overlap <= 0.0:
             merged_entries.append(candidate)
             return
 
@@ -397,17 +401,25 @@ class AsrMergeService:
         previous_duration = max(0.0, float(previous_segment["end"]) - float(previous_segment["start"]))
         candidate_duration = max(0.0, float(candidate_segment["end"]) - float(candidate_segment["start"]))
 
+        # A time overlap alone is not enough: speakers can overlap and an
+        # ASR engine can legitimately emit adjacent partial phrases with
+        # intersecting timestamps. Only collapse a chunk-boundary duplicate
+        # when most of the shorter cue overlaps and its text is essentially
+        # identical after normalization.
+        shorter_duration = min(previous_duration, candidate_duration)
+        substantial_overlap = overlap >= max(0.10, shorter_duration * 0.60)
+        is_boundary_duplicate = substantial_overlap and similarity >= 0.92
+        if not is_boundary_duplicate:
+            merged_entries.append(candidate)
+            return
+
         if previous_in_core != candidate_in_core:
             if candidate_in_core:
                 merged_entries[-1] = candidate
             return
 
-        if similarity >= 0.7:
-            if candidate_duration > previous_duration:
-                merged_entries[-1] = candidate
-            return
-
-        merged_entries.append(candidate)
+        if candidate_duration > previous_duration:
+            merged_entries[-1] = candidate
 
     def normalize_segment_timeline(self, segments: list[dict]) -> list[dict]:
         normalized: list[dict] = []

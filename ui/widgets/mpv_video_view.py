@@ -123,14 +123,14 @@ class _SubtitleOverlayWidget(QWidget):
         pointer = view.mapFromGlobal(self.mapToGlobal(event.position().toPoint()))
         center_x = pointer.x() - self._drag_grab_offset.x() + self.width() / 2.0
         center_y = pointer.y() - self._drag_grab_offset.y() + self.height() / 2.0
-        # Persist the clamped centre itself, rather than only clamping the
-        # visual widget later. Export receives the same normalized centre and
-        # therefore keeps the drag position instead of applying a different
-        # arbitrary edge rule.
-        half_w = self.width() / 2.0
-        half_h = self.height() / 2.0
-        center_x = max(canvas.left() + half_w, min(center_x, canvas.right() - half_w))
-        center_y = max(canvas.top() + half_h, min(center_y, canvas.bottom() - half_h))
+        # The drag position represents the subtitle's anchor/centre, not the
+        # outer edge of its (often wide) wrapping widget.  Constraining by
+        # half the widget width limited wide subtitles to a narrow strip in
+        # the middle of portrait previews.  Keep the anchor anywhere on the
+        # full video canvas and let positioning use that same normalized
+        # centre for preview and export.
+        center_x = max(canvas.left(), min(center_x, canvas.right()))
+        center_y = max(canvas.top(), min(center_y, canvas.bottom()))
         x_percent = int(round(max(0.0, min(100.0, (center_x - canvas.left()) * 100.0 / canvas.width()))))
         y_percent = int(round(max(0.0, min(100.0, (center_y - canvas.top()) * 100.0 / canvas.height()))))
         self.custom_position_enabled = True
@@ -1557,11 +1557,12 @@ class MpvVideoView(QWidget):
                 y_pos = rect.bottom() - item_h - (item.bottom_offset * scale_y)
 
         if item.custom_position_enabled:
-            # Keep the complete interactive subtitle layer inside the video
-            # canvas. This prevents a bottom-edge drag from showing text past
-            # the preview or producing an export position that libass clips.
-            x_pos = max(rect.left(), min(x_pos, rect.right() - item_w))
-            y_pos = max(rect.top(), min(y_pos, rect.bottom() - item_h))
+            # Match the drag anchor rule above: a subtitle may be positioned
+            # anywhere across the canvas, including flush to an edge.  The
+            # wide wrap widget is allowed to extend beyond the canvas so it
+            # does not artificially restrict the anchor to the centre.
+            x_pos = max(rect.left() - item_w / 2.0, min(x_pos, rect.right() - item_w / 2.0))
+            y_pos = max(rect.top() - item_h / 2.0, min(y_pos, rect.bottom() - item_h / 2.0))
         else:
             x_pos = max(left_pad - item_w, min(x_pos, rect.right() + item_w))
             y_min = rect.top() - item_h

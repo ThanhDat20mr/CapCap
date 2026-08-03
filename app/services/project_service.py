@@ -175,6 +175,10 @@ class ProjectService:
         style_instruction: str = "",
     ) -> str:
         payload = {
+            # Translation behavior includes the contextual-reasoning prompt.
+            # Bump this when prompt semantics change so projects do not reuse
+            # older, literal translations from the cache.
+            "translation_prompt_version": 2,
             "src_lang": str(src_lang or "auto").strip().lower(),
             "target_lang": str(target_lang or "vi").strip().lower(),
             "enable_polish": bool(enable_polish),
@@ -247,7 +251,9 @@ class ProjectService:
         """Fingerprint all inputs that affect video-subtitle OCR output."""
         return self._hash_payload(
             {
-                "version": 1,
+                # OCR text filtering and temporal merging are part of the
+                # transcription result, not just a display concern.
+                "version": 2,
                 "video": self._file_signature(video_path),
                 "region": str(region or "bottom").strip().lower(),
                 "subtitle_rect": str(os.getenv("OCR_SUBTITLE_RECT") or "").strip(),

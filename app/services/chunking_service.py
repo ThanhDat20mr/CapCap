@@ -35,7 +35,10 @@ class ChunkingService:
         *,
         silence_noise: str = "-35dB",
         silence_duration: float = 0.35,
-        min_speech_duration: float = 0.25,
+        # Keep very short utterances/interjections in the ASR input.  A
+        # 50ms fragment is still a practical lower limit for chunking, while
+        # the former 250ms cutoff could remove valid short dialogue.
+        min_speech_duration: float = 0.05,
         merge_gap_seconds: float = 0.4,
     ) -> list[dict]:
         if not os.path.exists(audio_path):
@@ -142,12 +145,14 @@ class ChunkingService:
         overlap_seconds: float = 0.5,
         silence_noise: str = "-35dB",
         silence_duration: float = 0.35,
+        min_speech_duration: float = 0.05,
     ) -> list[AudioChunk]:
         total_duration = self.probe_wav_duration(audio_path)
         speech_regions = self.detect_speech_regions(
             audio_path,
             silence_noise=silence_noise,
             silence_duration=silence_duration,
+            min_speech_duration=min_speech_duration,
         )
         if not speech_regions:
             speech_regions = [{"start": 0.0, "end": total_duration}]

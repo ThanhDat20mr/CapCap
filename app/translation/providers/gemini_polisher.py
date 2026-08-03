@@ -99,10 +99,20 @@ class GeminiPolisherProvider:
         is_direct = not translated_texts
         style_part = f" Style: {style_instruction}" if style_instruction else ""
         dubbing_mode = "[mode=dubbing_rewrite]" in str(style_instruction or "").lower()
+        ocr_capture_mode = "[mode=ocr_capture]" in str(style_instruction or "").lower()
 
         if is_direct:
-            lines = [f"{i+1}. {s}" for i, s in enumerate(source_texts)]
-            header = f"Translate these {src_lang}->{target_lang} subtitles directly.{style_part}"
+            if ocr_capture_mode:
+                # A visual OCR capture can contain real line breaks and list
+                # numbers. They are content, not separate subtitle cue IDs.
+                lines = [
+                    f"{i+1}. <OCR_TEXT>{' '.join(str(s or '').splitlines())}</OCR_TEXT>"
+                    for i, s in enumerate(source_texts)
+                ]
+                header = f"Translate these {src_lang}->{target_lang} OCR text blocks.{style_part}"
+            else:
+                lines = [f"{i+1}. {s}" for i, s in enumerate(source_texts)]
+                header = f"Translate these {src_lang}->{target_lang} subtitles with scene-level context.{style_part}"
         else:
             lines = [
                 f"{i+1}. {s} ||| {t}"
@@ -113,6 +123,17 @@ class GeminiPolisherProvider:
             else:
                 header = f"Refine these {src_lang}->{target_lang} subtitle translations.{style_part}"
 
+        context_rules = (
+            "Context reasoning: These are ASR/OCR subtitle cues, so individual lines may be incomplete, "
+            "fragmented, mistranscribed, or missing an implied subject. Read the entire numbered scene before "
+            "translating any cue. Use nearby dialogue to resolve ellipsis, pronouns, names, relationships, "
+            "and likely meaning when the surrounding context makes that meaning clear. Do not translate an "
+            "obvious ASR fragment literally if the scene clearly establishes its intended meaning. "
+            "However, never invent events, names, relationships, or facts that are not supported by the scene. "
+            "Keep explicit source facts strict: do not change gendered pronouns (for example Chinese 他 vs 她), "
+            "names, numbers, or who is speaking about whom. If the evidence is still ambiguous, use concise "
+            "neutral wording rather than guessing. "
+        )
         rules = (
             "IMPORTANT: Output ONLY the translation. Do NOT think, explain, or comment. "
             "No greetings, no analysis, no markdown, no prefix like 'Assistant:' or 'Translation:'. "
@@ -124,8 +145,13 @@ class GeminiPolisherProvider:
             "Keep each line readable as a single subtitle cue. "
             "Treat this numbered batch as one continuous scene: keep names, terms, "
             "formality, and speaker tone consistent across all cues. "
-            "Never merge, omit, reorder, or split cue numbers."
-        )
+        ) + context_rules + "Never merge, omit, reorder, or split cue numbers."
+        if ocr_capture_mode:
+            rules += (
+                " Each <OCR_TEXT> tag is exactly one input item. Its embedded line breaks, "
+                "labels, bullets, and numbers are ordinary text, never new cue numbers. "
+                "Return exactly one numbered translation line for each tag."
+            )
         if dubbing_mode:
             rules = (
                 "IMPORTANT: Output ONLY the rewritten line. Do NOT think, explain, or comment. "
@@ -137,8 +163,7 @@ class GeminiPolisherProvider:
                 "Preserve names, numbers, brands, products exactly. "
                 "Each line must be speakable within the given duration. "
                 "Keep names, terms, and speaker tone consistent across the whole batch. "
-                "Never merge, omit, reorder, or split cue numbers."
-            )
+            ) + context_rules + "Never merge, omit, reorder, or split cue numbers."
 
         system_msg = f"{header}\n{rules}"
         user_msg = "\n".join(lines)

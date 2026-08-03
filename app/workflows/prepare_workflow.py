@@ -159,6 +159,7 @@ class PrepareWorkflow:
             "overlap_seconds": self.CHUNK_OVERLAP_SECONDS,
             "silence_noise": self.CHUNK_SILENCE_NOISE,
             "silence_duration_seconds": self.CHUNK_SILENCE_DURATION_SECONDS,
+            "min_speech_duration_seconds": 0.05,
         }
         self.project_service.save_json_artifact(
             project_state,
@@ -175,6 +176,7 @@ class PrepareWorkflow:
             overlap_seconds=self.CHUNK_OVERLAP_SECONDS,
             silence_noise=self.CHUNK_SILENCE_NOISE,
             silence_duration=self.CHUNK_SILENCE_DURATION_SECONDS,
+            min_speech_duration=0.05,
         )
         chunk_elapsed = time.perf_counter() - chunk_started
         self.project_service.save_json_artifact(
@@ -657,7 +659,10 @@ class PrepareWorkflow:
                 working_audio_path,
                 whisper_model=whisper_model,
                 source_language=source_language,
-                audio_handling_mode=audio_mode_key,
+                # Bump the signature when the chunk merge algorithm changes
+                # so a project cannot reuse an aggressively regrouped
+                # transcript. Raw per-chunk ASR cache entries remain valid.
+                audio_handling_mode=f"{audio_mode_key}|asr-merge-v4",
             )
             cached_transcription_signature = str(project_state.settings.get("transcription_signature", "") or "").strip()
             cached_transcript_path = project_state.artifacts.get("transcript_segments", "")

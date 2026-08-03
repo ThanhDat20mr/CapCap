@@ -15,7 +15,6 @@ MAX_CROP_WIDTH = 960
 EMPTY_TOLERANCE = 2
 EXACT_HASH_THRESHOLD = 5.0
 _OCR_HANDLE_RE = re.compile(r"@\s*[A-Za-z0-9_\-\u3400-\u9fff]{1,24}")
-_OCR_NOISE_RE = re.compile(r"^[A-Za-z0-9@#&*_\-+=/\\|~`'.:;!?()\[\]{}<>]{1,16}$")
 _OCR_WATERMARK_PATTERNS = [
     re.compile(r"[\u3400-\u9fff]{1,6}漫(?:剧|居|刷)"),
     re.compile(r"专店"),
@@ -178,10 +177,6 @@ def _hamming_distance(h1, h2):
     return float(np.sum(np.abs(h1.astype(np.float32) - h2.astype(np.float32))))
 
 
-def _contains_cjk(text: str) -> bool:
-    return bool(re.search(r"[\u3400-\u9fff]", str(text or "")))
-
-
 def _sanitize_ocr_line(text: str) -> str:
     cleaned = " ".join(str(text or "").replace("\n", " ").split()).strip()
     if not cleaned:
@@ -193,19 +188,10 @@ def _sanitize_ocr_line(text: str) -> str:
     if not cleaned:
         return ""
 
-    visible = [ch for ch in cleaned if not ch.isspace()]
-    if not visible:
-        return ""
-    ascii_visible = [ch for ch in visible if ord(ch) < 128]
-
-    if _OCR_NOISE_RE.fullmatch(cleaned):
-        return ""
-    if len(cleaned) <= 2 and not _contains_cjk(cleaned):
-        return ""
-    if ascii_visible and len(ascii_visible) / max(1, len(visible)) >= 0.85:
-        compact_ascii = "".join(ascii_visible)
-        if len(compact_ascii) <= 16:
-            return ""
+    # Preserve short and ASCII text. "OK", names, numbers, single-word
+    # captions and one-character interjections can all be valid on-screen
+    # subtitles. Watermark/handle patterns above remain the only explicit
+    # OCR text suppression.
     return cleaned
 
 
@@ -448,8 +434,10 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
                 "words": [],
             })
 
+    # The temporal loop already keeps identical sampled frames in one cue.
+    # Only exact consecutive OCR output is extended below; do not perform a
+    # second fuzzy/short-text deduplication pass that can hide valid lines.
     merged = _merge_adjacent(segments)
-    merged = _dedup_identical(merged)
     profiling["temporal"] += time.perf_counter() - final_temporal_started
     print(f"[OCR] Extracted {len(merged)} subtitle segments from {total_steps} frames (OCR: {ocr_count}, skip: {skip_count})")
     inference_samples = profiling["ocr_inference_samples"]
@@ -479,63 +467,6 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
     return merged
 
 
-def _dedup_identical(segments):
-    if len(segments) < 2:
-        return segments
-    result = [segments[0]]
-    for seg in segments[1:]:
-        prev = result[-1]
-        gap = seg["start"] - prev["end"]
-        prev_dur = prev["end"] - prev["start"]
-        seg_dur = seg["end"] - seg["start"]
-        both_short = prev_dur < 1.0 and seg_dur < 1.0 and len(prev["text"]) <= 3 and len(seg["text"]) <= 5
-        same_text = seg["text"] == prev["text"]
-        similar = not same_text and gap < 0.5 and _texts_similar(
-            seg["text"].split(), prev["text"].split()
-        )
-        should_merge = (same_text or similar or (both_short and gap < 0.3)) and gap < 2.0
-        if should_merge:
-            prev["end"] = max(prev["end"], seg["end"])
-            if both_short and not same_text:
-                prev["text"] = _sanitize_ocr_line(prev["text"] + seg["text"])
-            elif not same_text and len(seg["text"]) > len(prev["text"]):
-                prev["text"] = seg["text"]
-        else:
-            result.append(seg)
-    return result
-
-
-def _texts_similar(a, b):
-    if not a or not b:
-        return False
-    a_set = set(a)
-    b_set = set(b)
-    overlap = len(a_set & b_set)
-    min_len = min(len(a_set), len(b_set))
-    if min_len > 0 and overlap / min_len >= 0.75:
-        return True
-    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
-    if not shorter:
-        return False
-    matched = 0
-    for sw in shorter:
-        for lw in longer:
-            if sw == lw:
-                matched += 1
-                break
-            if len(sw) < 2 or len(lw) < 2:
-                continue
-            sw_short, lw_long = (sw, lw) if len(sw) <= len(lw) else (lw, sw)
-            if sw_short in lw_long:
-                matched += 1
-                break
-            common = sum(c1 == c2 for c1, c2 in zip(sw, lw))
-            if common / max(len(sw), len(lw)) >= 0.8:
-                matched += 1
-                break
-    return matched / len(shorter) >= 0.7
-
-
 def _merge_adjacent(segments, max_gap=0.5):
     if not segments:
         return []
@@ -548,7 +479,9 @@ def _merge_adjacent(segments, max_gap=0.5):
         if not seg["text"]:
             continue
         gap = seg["start"] - current["end"]
-        if gap <= max_gap and _texts_similar(seg["text"].split(), current["text"].split()):
+        # A fuzzy OCR match may represent a genuinely new subtitle line.
+        # Extend only the exact same text displayed on successive frames.
+        if gap <= max_gap and seg["text"] == current["text"]:
             current["end"] = seg["end"]
         else:
             if current.get("text"):

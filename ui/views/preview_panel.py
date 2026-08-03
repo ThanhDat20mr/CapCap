@@ -347,7 +347,6 @@ class OcrRegionOverlay(QWidget):
 class OcrTranslatorOverlay(QWidget):
     """Persistent, on-demand visual-text OCR selection over the preview."""
     captureRequested = Signal()
-    closeRequested = Signal()
     rectChanged = Signal(tuple)
     _HANDLE_SIZE = 10
     _MIN_W = 48
@@ -477,13 +476,9 @@ class OcrTranslatorOverlay(QWidget):
     def _capture_button_rect(self, rect):
         return QRectF(rect.right() - 100, rect.top() + 8, 92, 25)
 
-    def _close_button_rect(self, rect):
-        return QRectF(rect.left() + 8, rect.top() + 8, 25, 25)
-
     def _hit_test(self, pos):
         rect = self._selection_rect()
         if self._capture_button_rect(rect).contains(pos): return "capture"
-        if self._close_button_rect(rect).contains(pos): return "close"
         for name, handle in self._handle_rects(rect).items():
             if handle.contains(pos): return name
         return "move" if rect.contains(pos) else ""
@@ -508,9 +503,9 @@ class OcrTranslatorOverlay(QWidget):
             return
         if not self._drag_mode:
             hit = self._hit_test(event.position())
-            self.setCursor(Qt.PointingHandCursor if hit in ("capture", "close") else Qt.OpenHandCursor if hit == "move" else Qt.SizeAllCursor if hit else Qt.ArrowCursor)
+            self.setCursor(Qt.PointingHandCursor if hit == "capture" else Qt.OpenHandCursor if hit == "move" else Qt.SizeAllCursor if hit else Qt.ArrowCursor)
             event.accept(); return
-        if self._drag_mode in ("capture", "close"):
+        if self._drag_mode == "capture":
             event.accept(); return
         rect = QRectF(self._rect_on_press)
         if self._drag_mode == "move":
@@ -533,8 +528,6 @@ class OcrTranslatorOverlay(QWidget):
         self.setCursor(Qt.OpenHandCursor)
         if mode == "capture" and self._capture_button_rect(self._selection_rect()).contains(event.position()):
             self.captureRequested.emit()
-        elif mode == "close" and self._close_button_rect(self._selection_rect()).contains(event.position()):
-            self.closeRequested.emit()
         event.accept()
 
     def paintEvent(self, event):
@@ -552,11 +545,9 @@ class OcrTranslatorOverlay(QWidget):
         painter.setBrush(capture_color)
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(self._capture_button_rect(rect), 5, 5)
-        painter.drawRoundedRect(self._close_button_rect(rect), 5, 5)
         painter.setPen(QColor("#ffffff"))
         font = painter.font(); font.setBold(True); font.setPixelSize(11); painter.setFont(font)
         painter.drawText(self._capture_button_rect(rect), Qt.AlignCenter, "Capturing…" if self._capturing else "Capture")
-        painter.drawText(self._close_button_rect(rect), Qt.AlignCenter, "×")
         painter.setBrush(color); painter.setPen(QPen(QColor("#121826"), 1))
         for handle in self._handle_rects(rect).values(): painter.drawEllipse(handle)
         painter.end()
@@ -1162,22 +1153,11 @@ def build_preview_panel(gui):
     inspector_actions_row.addStretch(1)
     inspector_layout.addLayout(inspector_actions_row)
 
-    # --- Shared section: Original text ---
-    gui.inspector_shared_original_label = QWidget()
-    _orig_layout = QHBoxLayout(gui.inspector_shared_original_label)
-    _orig_layout.setContentsMargins(0, 0, 0, 0)
-    _orig_layout.setSpacing(6)
-    _orig_icon = QLabel("\u25B6")
-    _orig_icon.setStyleSheet("color: #6ee7d6; font-size: 10px;")
-    _orig_icon.setFixedWidth(14)
-    _orig_layout.addWidget(_orig_icon)
-    gui.inspector_original_text_label = QLabel("")
-    gui.inspector_original_text_label.setObjectName("helperLabel")
-    gui.inspector_original_text_label.setWordWrap(True)
-    gui.inspector_original_text_label.setStyleSheet("color: #cfe6ff;")
-    _orig_layout.addWidget(gui.inspector_original_text_label, 1)
-    gui.inspector_shared_original_label.hide()
-    inspector_layout.addWidget(gui.inspector_shared_original_label)
+    # The original transcript is shown immediately above the editable
+    # "Text shown on screen" field inside the selected subtitle card.  Do
+    # not add a second shared copy below the toolbar.
+    gui.inspector_shared_original_label = None
+    gui.inspector_original_text_label = None
 
     gui.segment_editor_container = QWidget()
     gui.segment_editor_container.setObjectName("segmentEditorContainer")
