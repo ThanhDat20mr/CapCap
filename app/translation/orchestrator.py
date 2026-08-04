@@ -7,9 +7,8 @@ from .errors import TranslationValidationError
 from .models import TranslationResult
 from .providers import (
     AIPolisherProvider,
-    GeminiPolisherProvider,
     GoogleWebTranslatorProvider,
-    MicrosoftTranslatorProvider,
+    OpenAICompatiblePolisherProvider,
 )
 from .srt_utils import clone_with_texts, parse_srt, split_text_batches, to_srt, validate_texts
 
@@ -20,10 +19,8 @@ class AIBatchTranslationError(Exception):
 
 class TranslationOrchestrator:
     def __init__(self):
-        self.microsoft = MicrosoftTranslatorProvider()
         self.google_web = GoogleWebTranslatorProvider()
         self.ai_polisher = AIPolisherProvider()
-        self.gemini_polisher = GeminiPolisherProvider()
 
     def translate_segments(
         self,
@@ -133,42 +130,6 @@ class TranslationOrchestrator:
                 used_fallback=bool(warnings),
             )
         except Exception as exc:
-            if self.microsoft.is_configured():
-                try:
-                    warnings.append(f"Google web translate failed, falling back to Microsoft: {exc}")
-                    print(f"[Translation] WARNING: Google web translate failed, trying Microsoft Translator: {exc}")
-                    translated_texts = []
-                    offset = 0
-                    for batch in split_text_batches(source_texts, ms_batch_size):
-                        translated_batch = self.microsoft.translate_batch(
-                            batch,
-                            src_lang=normalized_src,
-                            target_lang=target_lang,
-                        )
-                        translated_texts.extend(translated_batch)
-                        self._emit_batch_callback(
-                            batch_callback=batch_callback,
-                            base_segments=segments,
-                            start_idx=offset,
-                            translated_texts=translated_batch,
-                            provider="microsoft",
-                            polished=False,
-                        )
-                        offset += len(batch)
-                    if not validate_texts(translated_texts, len(segments)):
-                        raise TranslationValidationError("Microsoft Translator returned an invalid number of segments.")
-                    print("[Translation] Success: Microsoft translation completed.")
-                    final_segments = clone_with_texts(segments, translated_texts, provider="microsoft", polished=False)
-                    return TranslationResult(
-                        success=True,
-                        segments=final_segments,
-                        warnings=warnings,
-                        stage="translation",
-                        primary_provider="microsoft",
-                        used_fallback=True,
-                    )
-                except Exception as ms_exc:
-                    return TranslationResult(success=False, errors=[str(ms_exc)], warnings=warnings, stage="translation")
             return TranslationResult(success=False, errors=[str(exc)], warnings=warnings, stage="translation")
 
     def rewrite_segments(
@@ -262,20 +223,34 @@ class TranslationOrchestrator:
         return mapping.get(key, src_lang)
 
     def _resolve_ai_provider(self):
-        # GeminiPolisherProvider is an OpenAI-compatible client and is also
-        # used for OpenAI and Ollama endpoints configured in Settings.  Return
-        # the selected service name, rather than the shared client name, so
-        # persisted segment metadata accurately records who translated it.
-        provider_type = (os.getenv("OPENAI_PROVIDER") or os.getenv("AI_POLISHER_PROVIDER") or "gemini").strip().lower()
-        if provider_type not in {"gemini", "openai", "ollama"}:
-            provider_type = "gemini"
-        # GeminiPolisherProvider is an OpenAI-compatible client and is also
-        # used for OpenAI and Ollama endpoints configured in Settings.
-        return provider_type, self.gemini_polisher
+        # All selectable API providers use the same compatible client.  The
+        # provider definition here is the only place needed to add another
+        # OpenAI-compatible service in the future.
+        configured_provider = (os.getenv("OPENAI_PROVIDER") or os.getenv("AI_POLISHER_PROVIDER") or "gemini").strip().lower()
+        provider_type = configured_provider
+        if provider_type == "gemini":  # backward compatibility for saved settings
+            provider_type = "google_ai_studio"
+        definitions = {
+            "google_ai_studio": ("Google AI Studio", "GOOGLE_AI_STUDIO", "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.5-flash"),
+            "openai": ("OpenAI", "OPENAI", "https://api.openai.com/v1/", "gpt-4o-mini"),
+            "ollama": ("Ollama", "OPENAI", "http://localhost:11434/v1", "gemma4:31b-cloud"),
+        }
+        if provider_type not in definitions:
+            provider_type = "google_ai_studio"
+        display_name, env_prefix, base_url, default_model = definitions[provider_type]
+        if configured_provider == "gemini":
+            env_prefix = "OPENAI"
+        return provider_type, OpenAICompatiblePolisherProvider(
+            provider_id=provider_type,
+            display_name=display_name,
+            env_prefix=env_prefix,
+            default_base_url=base_url,
+            default_model=default_model,
+        )
 
     def _describe_ai_provider(self, provider_type: str) -> str:
-        names = {"gemini": "Gemini", "openai": "OpenAI", "ollama": "Ollama"}
-        return f"{names.get(provider_type, 'AI')} ({self.gemini_polisher.model_name})"
+        names = {"google_ai_studio": "Google AI Studio", "openai": "OpenAI", "ollama": "Ollama"}
+        return f"{names.get(provider_type, 'AI')} ({getattr(self._resolve_ai_provider()[1], 'model_name', '')})"
 
     def _run_ai_batches(
         self,

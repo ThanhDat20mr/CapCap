@@ -201,7 +201,10 @@ def _is_blank_region(image):
     if float(lap.var()) < 30.0:
         return True
     bright_ratio = float(np.sum(gray > 180)) / gray.size
-    if bright_ratio > 0.002:
+    # Small, single-character white subtitles can occupy only about 0.1% of a
+    # bottom crop.  The previous 0.2% cutoff labelled those valid subtitle
+    # frames as blank before RapidOCR was allowed to inspect them.
+    if bright_ratio > 0.0005:
         return False
     return True
 
@@ -285,7 +288,7 @@ def _texts_equal(current_texts, prev_texts):
     return all(a == b for a, b in zip(current_texts, prev_texts))
 
 
-def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=None):
+def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=None, start_seconds=0.0, end_seconds=None):
     workflow_started = time.perf_counter()
     profiling = {
         "engine_init": 0.0,
@@ -314,22 +317,51 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
                 duration = 60
         except Exception:
             duration = 60
-        if duration <= 180:
-            fps = 1.5
-        elif duration <= 360:
-            fps = 1.0
-        elif duration <= 600:
-            fps = 0.75
-        else:
-            fps = 0.5
-        print(f"[OCR] Video duration: {duration:.0f}s, auto fps: {fps}")
+        configured_fps = str(os.getenv("OCR_SAMPLING_FPS", "auto") or "auto").strip().lower()
+        if configured_fps not in {"", "auto", "default"}:
+            try:
+                requested_fps = float(configured_fps)
+            except ValueError:
+                requested_fps = 0.0
+            if 0.25 <= requested_fps <= 10.0:
+                fps = requested_fps
+                print(f"[OCR] Video duration: {duration:.0f}s, configured fps: {fps}")
+            else:
+                print(f"[OCR] Ignoring invalid OCR_SAMPLING_FPS={configured_fps!r}; using auto.")
 
+        if fps is None:
+            # Very short clips often contain title cards or subtitle flashes that
+            # last well below one second.  At 1.5 FPS a two-second clip is sampled
+            # only at 0.00, 0.67, and 1.33 seconds, which can miss all of them.
+            # Four FPS adds only a few frames for these clips while giving a
+            # 250 ms sampling interval.
+            sampling_duration = duration
+            if end_seconds is not None:
+                sampling_duration = max(0.0, float(end_seconds) - max(0.0, float(start_seconds or 0.0)))
+            if sampling_duration <= 15:
+                fps = 4.0
+            elif sampling_duration <= 180:
+                fps = 1.5
+            elif sampling_duration <= 360:
+                fps = 1.0
+            elif sampling_duration <= 600:
+                fps = 0.75
+            else:
+                fps = 0.5
+            range_label = f", selected range: {sampling_duration:.0f}s" if end_seconds is not None else ""
+            print(f"[OCR] Video duration: {duration:.0f}s{range_label}, auto fps: {fps}")
+
+    start_seconds = max(0.0, float(start_seconds or 0.0))
+    end_seconds = min(float(duration or 0.0), float(end_seconds)) if end_seconds is not None and duration else end_seconds
     frame_interval = 1.0 / fps
     cap = _open_video(video_path)
     video_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     frame_step = max(1, round(video_fps / fps))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-    total_steps = total_frames // frame_step if total_frames else 0
+    # Include the initial frame at 0 and the final partial sampling interval.
+    total_steps = (total_frames + frame_step - 1) // frame_step if total_frames else 0
+    if end_seconds is not None:
+        total_steps = max(1, int(max(0.0, end_seconds - start_seconds) * fps) + 1)
     if total_steps <= 0:
         total_steps = int(duration * fps) if duration > 0 else 300
     print(f"[OCR] Seeking {total_steps} frames at {fps} fps from video directly...")
@@ -349,7 +381,8 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
         skip_count = 0
         unchanged_skip_count = 0
         blank_skip_count = 0
-        step = 0
+        step = max(0, int(start_seconds * fps))
+        sampled_count = 0
 
         while True:
             frame_idx = step * frame_step
@@ -360,6 +393,9 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
             if not ret or img is None:
                 break
             timestamp = frame_idx / video_fps
+            if end_seconds is not None and timestamp > float(end_seconds):
+                break
+            sampled_count += 1
             crop_started = time.perf_counter()
             cropped = crop_subtitle_region(img, region=region)
             profiling["crop_preprocess"] += time.perf_counter() - crop_started
@@ -387,9 +423,9 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
 
             step += 1
 
-            if step % 30 == 0:
-                pct = step * 100 // total_steps if total_steps > 0 else 0
-                print(f"[OCR] Frame {step}/{total_steps} ({pct}%, OCR: {ocr_count}, skip: {skip_count})")
+            if sampled_count % 30 == 0:
+                pct = sampled_count * 100 // total_steps if total_steps > 0 else 0
+                print(f"[OCR] Frame {sampled_count}/{total_steps} ({pct}%, OCR: {ocr_count}, skip: {skip_count})")
 
             temporal_started = time.perf_counter()
             if not texts:
@@ -426,7 +462,13 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
         combined = " ".join(seg_text_lines).strip()
         if combined:
             video_duration = total_frames / video_fps if total_frames and video_fps else (total_steps * frame_interval)
+            if end_seconds is not None:
+                video_duration = min(video_duration, float(end_seconds))
             end_ts = max(seg_start + frame_interval, video_duration)
+            # A range transcription must never extend its final cue beyond
+            # the range merely to satisfy the normal minimum-duration rule.
+            if end_seconds is not None:
+                end_ts = min(end_ts, float(end_seconds))
             segments.append({
                 "start": seg_start,
                 "end": end_ts,
@@ -443,7 +485,7 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
     inference_samples = profiling["ocr_inference_samples"]
     inference_avg_ms = (sum(inference_samples) / len(inference_samples) * 1000.0) if inference_samples else 0.0
     inference_p95_ms = float(np.percentile(inference_samples, 95) * 1000.0) if inference_samples else 0.0
-    sampled_frames = step
+    sampled_frames = sampled_count
     decode_preprocess_avg_ms = (
         (profiling["seek_decode"] + profiling["crop_preprocess"]) / sampled_frames * 1000.0
         if sampled_frames else 0.0

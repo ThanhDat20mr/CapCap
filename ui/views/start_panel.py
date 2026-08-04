@@ -512,6 +512,20 @@ def build_start_group(gui, left_layout):
         if hasattr(gui, "timeline") and gui.timeline is not None:
             gui.timeline.set_voice_sync_mode(gui.voice_timing_sync_combo.currentText())
     _on_voice_timing_sync_changed()
+    # This is a media-generation policy, not an editor action. Keep it in
+    # Media Workflow so the timeline toolbar stays focused on editing.
+    media_workflow_card, media_workflow_layout = _build_collapsible_section("Media Workflow")
+    timing_card, timing_layout = _section_card()
+    timing_title = QLabel("Voice timing synchronization")
+    timing_title.setObjectName("sectionTitle")
+    timing_hint = QLabel("Controls how generated voice timing follows the subtitle timeline.")
+    timing_hint.setObjectName("helperLabel")
+    timing_hint.setWordWrap(True)
+    timing_layout.addWidget(timing_title)
+    timing_layout.addWidget(timing_hint)
+    timing_layout.addWidget(gui.voice_timing_sync_combo)
+    media_workflow_layout.addWidget(timing_card)
+    media_layout.addWidget(media_workflow_card)
     gui.free_voice_combo.currentIndexChanged.connect(gui.on_selected_voice_changed)
     gui.voice_engine_combo.currentIndexChanged.connect(gui.on_voice_engine_changed)
     gui.preview_voice_btn = QPushButton("Preview Selected Voice")

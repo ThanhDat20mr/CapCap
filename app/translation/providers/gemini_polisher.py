@@ -7,18 +7,20 @@ from ..errors import TranslationConfigError, TranslationProviderError, Translati
 from ..srt_utils import parse_numbered_line_items, validate_texts
 
 
-class GeminiPolisherProvider:
-    def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.model_name = os.getenv("OPENAI_MODEL", "gemma-4-31b-it").strip()
-        self.base_url = os.getenv(
-            "OPENAI_BASE_URL",
-            "https://generativelanguage.googleapis.com/v1beta/openai/",
-        ).strip()
+class OpenAICompatiblePolisherProvider:
+    """Reusable numbered-subtitle provider for OpenAI-compatible services."""
+
+    def __init__(self, *, provider_id: str, display_name: str, env_prefix: str,
+                 default_base_url: str, default_model: str = ""):
+        self.provider_id = provider_id
+        self.display_name = display_name
+        self.api_key = os.getenv(f"{env_prefix}_API_KEY", "").strip()
+        self.model_name = os.getenv(f"{env_prefix}_MODEL", default_model).strip()
+        self.base_url = os.getenv(f"{env_prefix}_BASE_URL", default_base_url).strip()
         self._client = None
 
     def is_configured(self) -> bool:
-        return bool(self.api_key)
+        return bool(self.api_key and self.model_name and self.base_url)
 
     def _get_client(self):
         if self._client is None:
@@ -38,7 +40,7 @@ class GeminiPolisherProvider:
         max_tokens: int = 4096,
     ) -> tuple[list[str], list[str], str]:
         if not self.is_configured():
-            raise TranslationConfigError("OPENAI_API_KEY is not set in .env")
+            raise TranslationConfigError(f"{self.display_name} is not configured. Set its API key and model in Settings.")
 
         system_msg, user_msg = self._build_messages(
             source_texts=source_texts,
@@ -79,7 +81,7 @@ class GeminiPolisherProvider:
                     raise TranslationValidationError(
                         f"Expected {expected} lines, got {len(lines)}"
                     )
-                return lines, [], "openai"
+                return lines, [], self.provider_id
             except TranslationValidationError:
                 # Retrying the exact same oversized request cannot restore a
                 # truncated numbered response.  The orchestrator can instead
@@ -91,7 +93,7 @@ class GeminiPolisherProvider:
                     time.sleep(attempt)
                     continue
 
-        raise TranslationProviderError(f"Gemini failed: {last_error}")
+        raise TranslationProviderError(f"{self.display_name} failed: {last_error}")
 
     def _build_messages(
         self, source_texts, translated_texts, src_lang, target_lang, style_instruction
@@ -124,32 +126,38 @@ class GeminiPolisherProvider:
                 header = f"Refine these {src_lang}->{target_lang} subtitle translations.{style_part}"
 
         context_rules = (
-            "Context reasoning: These are ASR/OCR subtitle cues, so individual lines may be incomplete, "
-            "fragmented, mistranscribed, or missing an implied subject. Read the entire numbered scene before "
-            "translating any cue. Use nearby dialogue to resolve ellipsis, pronouns, names, relationships, "
-            "and likely meaning when the surrounding context makes that meaning clear. Do not translate an "
-            "obvious ASR fragment literally if the scene clearly establishes its intended meaning. "
-            "However, never invent events, names, relationships, or facts that are not supported by the scene. "
-            "Keep explicit source facts strict: do not change gendered pronouns (for example Chinese 他 vs 她), "
-            "names, numbers, or who is speaking about whom. If the evidence is still ambiguous, use concise "
-            "neutral wording rather than guessing. "
+            "Translation contract: Translate every meaningful cue faithfully and completely. Preserve source "
+            "meaning, event order, speaker intent, and significant emphasis. Do not omit, summarize, sanitize, "
+            "intensify, or add information. "
+            "Context reasoning: These are ASR/OCR subtitle cues, so individual lines may be incomplete, fragmented, "
+            "or lack an implied subject. Read the entire numbered scene before translating any cue. Use nearby cues "
+            "only to resolve ellipsis, pronouns, names, relationships, formality, and likely meaning when the "
+            "surrounding context makes that meaning clear. Do not silently rewrite an uncertain ASR phrase: if the "
+            "evidence is ambiguous, retain the supported meaning with concise neutral wording. "
+            "Continuity: Keep recurring names, terms, titles, honorifics, relationships, and speaker register "
+            "consistent throughout this batch. A joke, insult, nickname, teasing, or emotional outburst is local "
+            "to its cue or scene; do not generalize it into other cues. "
+            "Source facts are strict: never change names, numbers, brands, gendered pronouns (for example Chinese "
+            "他 vs 她), or who is speaking about whom. Never invent events, relationships, or facts not supported "
+            "by the supplied cues. "
         )
         rules = (
             "IMPORTANT: Output ONLY the translation. Do NOT think, explain, or comment. "
             "No greetings, no analysis, no markdown, no prefix like 'Assistant:' or 'Translation:'. "
             "Return EXACTLY numbered lines, one per input item. Nothing else.\n"
             "Format: N. translated text\n"
-            f"Quality: Natural, spoken {target_lang}. Short sentences. "
-            "Preserve names, numbers, brands, products exactly. "
-            f"Adapt idioms naturally to {target_lang}, not literal. "
-            "Keep each line readable as a single subtitle cue. "
-            "Treat this numbered batch as one continuous scene: keep names, terms, "
-            "formality, and speaker tone consistent across all cues. "
+            "Priority order: (1) exact numbered output and source-supported facts; "
+            "(2) fidelity and completeness; (3) continuity of names, terminology, and register; "
+            f"(4) natural spoken {target_lang} localization. "
+            f"Adapt idioms and word order naturally to {target_lang}; do not translate mechanically. "
+            "Keep each result readable as one subtitle cue. "
         ) + context_rules + "Never merge, omit, reorder, or split cue numbers."
         if ocr_capture_mode:
             rules += (
                 " Each <OCR_TEXT> tag is exactly one input item. Its embedded line breaks, "
                 "labels, bullets, and numbers are ordinary text, never new cue numbers. "
+                "Treat UI labels, signs, and product text as visual text, not spoken dialogue. Preserve their "
+                "meaning and practical wording; keep brand names and product identifiers unchanged. "
                 "Return exactly one numbered translation line for each tag."
             )
         if dubbing_mode:
@@ -158,11 +166,12 @@ class GeminiPolisherProvider:
                 "No greetings, no analysis, no markdown, no prefix. "
                 "Return EXACTLY numbered lines, one per input item. Nothing else.\n"
                 "Format: N. short spoken line\n"
-                f"Quality: Natural spoken {target_lang}. Very concise. "
+                f"Priority order: source-supported facts and names first; then timing; then natural spoken {target_lang}. "
+                "Translate every meaningful cue without adding or omitting claims. Very concise. "
                 "Fit the timing constraints strictly. "
                 "Preserve names, numbers, brands, products exactly. "
-                "Each line must be speakable within the given duration. "
-                "Keep names, terms, and speaker tone consistent across the whole batch. "
+                "Each line must be speakable within the given duration and retain the source speaker's register. "
+                "Keep names and terminology consistent across the whole batch. "
             ) + context_rules + "Never merge, omit, reorder, or split cue numbers."
 
         system_msg = f"{header}\n{rules}"

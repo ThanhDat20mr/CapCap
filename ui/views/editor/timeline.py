@@ -27,6 +27,9 @@ class EditorTimeline(QGraphicsView):
     zoomChanged = Signal(int)
     layoutChanged = Signal()
     addLayerRequested = Signal()
+    selectionRangeChanged = Signal(float, float)
+    selectionRangeCleared = Signal()
+    selectionModeChanged = Signal(bool)
 
     RULER_HEIGHT = 30
     TRACK_HEADER_W = 0
@@ -61,6 +64,9 @@ class EditorTimeline(QGraphicsView):
         self.pixels_per_second = self.DEFAULT_PPS
         self._duration = 10.0
         self._playhead = 0.0
+        self._selection_range: tuple[float, float] | None = None
+        self._selection_drag = None
+        self._selection_mode = False
         self._playing = False
         self._timeline: Timeline | None = None
         self._track_heights: dict[str, int] = {}
@@ -392,6 +398,39 @@ class EditorTimeline(QGraphicsView):
             viewport.update()
         self.playheadMoved.emit(seconds)
 
+    def selection_range(self):
+        return self._selection_range
+
+    def selection_mode(self) -> bool:
+        return bool(self._selection_mode)
+
+    def set_selection_mode(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if self._selection_mode == enabled:
+            return
+        self._selection_mode = enabled
+        self.selectionModeChanged.emit(enabled)
+        self.viewport().setCursor(Qt.CrossCursor if enabled else Qt.ArrowCursor)
+        self.viewport().update()
+
+    def set_selection_range(self, start: float, end: float) -> None:
+        start, end = sorted((max(0.0, float(start)), min(self._duration, float(end))))
+        if end - start < self.MIN_DUR:
+            self.clear_selection_range()
+            return
+        self._selection_range = (start, end)
+        self.selectionRangeChanged.emit(start, end)
+        self.viewport().update()
+
+    def clear_selection_range(self) -> None:
+        if self._selection_range is None:
+            self.set_selection_mode(False)
+            return
+        self._selection_range = None
+        self.set_selection_mode(False)
+        self.selectionRangeCleared.emit()
+        self.viewport().update()
+
     def set_position(self, ms: int) -> None:
         self.set_playhead(ms / 1000.0)
 
@@ -698,6 +737,7 @@ class EditorTimeline(QGraphicsView):
             y += th
 
         # Playhead spans the full scene height (uses scene coords)
+        self._draw_selection_range(painter, scroll_x)
         self._draw_playhead(painter, scroll_x)
 
         # Draw the sticky ruler LAST so it stays on top of any
@@ -1172,6 +1212,7 @@ class EditorTimeline(QGraphicsView):
         }
         return colors.get(layer_type, QColor("#4a5568"))
 
+
     def _draw_playhead(self, painter: QPainter, scroll_x: int) -> None:
         x = self.TRACK_HEADER_W + int(self._playhead * self.pixels_per_second) - scroll_x
         if x < 0 or x > self.viewport().width():
@@ -1180,8 +1221,24 @@ class EditorTimeline(QGraphicsView):
         painter.drawLine(int(x), 0, int(x), int(self._scene.height()))
         painter.setBrush(QColor("#e04040"))
         painter.setPen(Qt.NoPen)
-        triangle = [QPointF(x - 6, 0), QPointF(x + 6, 0), QPointF(x, 8)]
-        painter.drawPolygon(triangle)
+        painter.drawPolygon([QPointF(x - 6, 0), QPointF(x + 6, 0), QPointF(x, 8)])
+
+    def _draw_selection_range(self, painter: QPainter, scroll_x: int) -> None:
+        if not self._selection_range:
+            return
+        start, end = self._selection_range
+        x1 = self.TRACK_HEADER_W + int(start * self.pixels_per_second) - scroll_x
+        x2 = self.TRACK_HEADER_W + int(end * self.pixels_per_second) - scroll_x
+        if x2 < 0 or x1 > self.viewport().width():
+            return
+        height = max(self.RULER_HEIGHT, int(self._scene.height()))
+        painter.fillRect(max(0, x1), 0, max(1, x2 - x1), height, QColor(74, 140, 255, 45))
+        painter.setPen(QPen(QColor("#71adff"), 2))
+        painter.drawLine(x1, 0, x1, height)
+        painter.drawLine(x2, 0, x2, height)
+        painter.setBrush(QColor("#71adff")); painter.setPen(Qt.NoPen)
+        painter.drawPolygon([QPointF(x1 - 5, 2), QPointF(x1 + 5, 2), QPointF(x1, 10)])
+        painter.drawPolygon([QPointF(x2 - 5, 2), QPointF(x2 + 5, 2), QPointF(x2, 10)])
 
     def _get_effective_layer_end(self, layer) -> float:
         """Get the effective end time for a layer."""
@@ -1264,14 +1321,45 @@ class EditorTimeline(QGraphicsView):
             if in_ruler:
                 t = self._pos_to_time(pos.x(), scroll_x)
                 if t >= 0:
-                    self.set_playhead(t)
-                    self.seekRequested.emit(t)
-                    self.seekRequestedMs.emit(int(t * 1000))
+                    if not self._selection_mode:
+                        self.set_playhead(t)
+                        self.seekRequested.emit(t)
+                        self.seekRequestedMs.emit(int(t * 1000))
+                        self._selection_drag = {"mode": "scrub"}
+                        event.accept()
+                        return
+                    drag_mode = "new"
+                    if self._selection_range:
+                        start, end = self._selection_range
+                        start_x = self.TRACK_HEADER_W + start * self.pixels_per_second - scroll_x
+                        end_x = self.TRACK_HEADER_W + end * self.pixels_per_second - scroll_x
+                        if abs(pos.x() - start_x) <= 8:
+                            drag_mode = "start"
+                        elif abs(pos.x() - end_x) <= 8:
+                            drag_mode = "end"
+                    # Do not seek yet. A plain click is navigation, but a
+                    # drag is range editing; defer the click seek until
+                    # release so a selection never moves the playhead.
+                    self._selection_drag = {
+                        "anchor": t, "initial": self._selection_range,
+                        "mode": drag_mode, "changed": False,
+                    }
+                    event.accept()
+                    return
 
             edge, lid = self._hit_test_edge(pos, scroll_x, scroll_y)
             if lid and edge in ("left", "right"):
-                _, layer = self._find_layer_by_id(lid)
+                track, layer = self._find_layer_by_id(lid)
                 if layer:
+                    if bool(getattr(track, "locked", False)):
+                        event.accept()
+                        return
+                    if bool(getattr(layer, "locked", False)):
+                        self._selected_layer_id = lid
+                        self.layerSelected.emit(lid)
+                        self.viewport().update()
+                        event.accept()
+                        return
                     effective_end = self._get_effective_layer_end(layer)
                     self._drag_state = {
                         "type": f"resize_{edge}",
@@ -1291,6 +1379,10 @@ class EditorTimeline(QGraphicsView):
                     return
 
             elif lid:
+                track, _layer = self._find_layer_by_id(lid)
+                if bool(getattr(track, "locked", False)):
+                    event.accept()
+                    return
                 self._selected_layer_id = lid
                 self.layerSelected.emit(lid)
                 idx = self._segment_indices.get(lid, -1)
@@ -1301,6 +1393,19 @@ class EditorTimeline(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._selection_drag is not None and event.button() == Qt.LeftButton:
+            drag = self._selection_drag
+            self._selection_drag = None
+            if drag.get("mode") == "scrub":
+                event.accept()
+                return
+            if not drag.get("changed", False) and drag.get("mode") == "new":
+                t = float(drag["anchor"])
+                self.set_playhead(t)
+                self.seekRequested.emit(t)
+                self.seekRequestedMs.emit(int(t * 1000))
+            event.accept()
+            return
         if self._drag_state and event.button() == Qt.LeftButton:
             drag = self._drag_state
             self._drag_state = None
@@ -1344,12 +1449,27 @@ class EditorTimeline(QGraphicsView):
 
         if event.buttons() & Qt.LeftButton:
             in_ruler = pos.y() < self.RULER_HEIGHT
-            if in_ruler:
+            if in_ruler and self._selection_drag is not None and self._selection_drag.get("mode") == "scrub":
                 t = self._pos_to_time(pos.x(), scroll_x)
                 if t >= 0:
                     self.set_playhead(t)
                     self.seekRequested.emit(t)
                     self.seekRequestedMs.emit(int(t * 1000))
+            elif in_ruler and self._selection_drag is not None:
+                t = self._pos_to_time(pos.x(), scroll_x)
+                if t >= 0:
+                    anchor = self._selection_drag["anchor"]
+                    mode = self._selection_drag.get("mode", "new")
+                    existing = self._selection_drag.get("initial")
+                    if mode == "start" and existing:
+                        self.set_selection_range(min(t, existing[1] - self.MIN_DUR), existing[1])
+                        self._selection_drag["changed"] = True
+                    elif mode == "end" and existing:
+                        self.set_selection_range(existing[0], max(t, existing[0] + self.MIN_DUR))
+                        self._selection_drag["changed"] = True
+                    elif abs(t - anchor) >= self.MIN_DUR:
+                        self.set_selection_range(anchor, t)
+                        self._selection_drag["changed"] = True
 
         edge, lid = self._hit_test_edge(pos, scroll_x, scroll_y)
         if lid and edge in ("left", "right"):
@@ -1357,6 +1477,17 @@ class EditorTimeline(QGraphicsView):
         else:
             self.setCursor(Qt.ArrowCursor)
         super().mouseMoveEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape:
+            self.clear_selection_range(); event.accept(); return
+        if event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_BracketLeft:
+            current = self._selection_range or (self._playhead, self._playhead + self.MIN_DUR)
+            self.set_selection_range(self._playhead, current[1]); event.accept(); return
+        if event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_BracketRight:
+            current = self._selection_range or (max(0.0, self._playhead - self.MIN_DUR), self._playhead)
+            self.set_selection_range(current[0], self._playhead); event.accept(); return
+        super().keyPressEvent(event)
 
     def wheelEvent(self, event) -> None:
         if event.modifiers() & Qt.ControlModifier:

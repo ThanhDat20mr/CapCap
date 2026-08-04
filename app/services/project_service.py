@@ -178,7 +178,7 @@ class ProjectService:
             # Translation behavior includes the contextual-reasoning prompt.
             # Bump this when prompt semantics change so projects do not reuse
             # older, literal translations from the cache.
-            "translation_prompt_version": 2,
+            "translation_prompt_version": 3,
             "src_lang": str(src_lang or "auto").strip().lower(),
             "target_lang": str(target_lang or "vi").strip().lower(),
             "enable_polish": bool(enable_polish),
@@ -253,11 +253,12 @@ class ProjectService:
             {
                 # OCR text filtering and temporal merging are part of the
                 # transcription result, not just a display concern.
-                "version": 2,
+                "version": 5,
                 "video": self._file_signature(video_path),
                 "region": str(region or "bottom").strip().lower(),
                 "subtitle_rect": str(os.getenv("OCR_SUBTITLE_RECT") or "").strip(),
                 "crop_ratio": str(os.getenv("OCR_CROP_RATIO") or "0.25").strip(),
+                "sampling_fps": str(os.getenv("OCR_SAMPLING_FPS") or "auto").strip().lower(),
             }
         )
 

@@ -58,11 +58,15 @@ class OcrRegionOverlay(QWidget):
     _MIN_H = 10
 
     def __init__(self):
-        super().__init__(None, Qt.FramelessWindowHint | Qt.Tool)
+        # MPV owns a native child surface. Keep this editor above that
+        # surface even when OCR is invoked temporarily from audio mode.
+        super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         self.setAutoFillBackground(False)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_OpaquePaintEvent, False)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setWindowFlag(Qt.WindowDoesNotAcceptFocus, True)
         self.setStyleSheet("background: transparent;")
         self.setMouseTracking(True)
         self._norm = QRectF(0.0, 0.75, 1.0, 0.25)
@@ -109,7 +113,10 @@ class OcrRegionOverlay(QWidget):
                 pass
         else:
             self.setCursor(Qt.OpenHandCursor)
-            self.grabKeyboard()
+            # This is a mouse-only crop editor.  Grabbing the application's
+            # keyboard here routes every keypress away from unrelated inputs
+            # (API-key fields, subtitle editors, dialogs) while it is open.
+            # Escape is intentionally not required to exit the editor.
         self._update_button()
         self.update()
 
@@ -148,10 +155,25 @@ class OcrRegionOverlay(QWidget):
             return
         super().keyPressEvent(event)
 
+    def hideEvent(self, event):
+        # Defensive release for overlays hidden by a mode change, modal, or
+        # completed OCR run rather than through set_editable(False).
+        try:
+            self.releaseKeyboard()
+        except Exception:
+            pass
+        super().hideEvent(event)
+
     def eventFilter(self, obj, event):
         if obj is self._main_window:
             if event.type() == QtCore.QEvent.WindowDeactivate:
-                self.hide()
+                # In alternate range transcription the editor is deliberately
+                # shown as a non-activating top-level tool window above mpv.
+                # Qt can still emit a transient WindowDeactivate while it is
+                # raised; hiding here made the editor disappear immediately
+                # whenever the project source was Whisper/SenseVoice.
+                if not bool(getattr(self._main_window, "_alternate_ocr_range_pending", None)):
+                    self.hide()
             elif event.type() in (QtCore.QEvent.WindowActivate, QtCore.QEvent.Resize, QtCore.QEvent.Move, QtCore.QEvent.Show):
                 if self._is_requested_visible():
                     self.sync_to_view()
@@ -174,7 +196,8 @@ class OcrRegionOverlay(QWidget):
             return
         cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
         engine = os.getenv("TRANSCRIPTION_ENGINE", "sensevoice" if cpu_mode else "whisper").strip().lower()
-        if engine != "ocr":
+        alternate_ocr_active = bool(getattr(self._main_window, "_alternate_ocr_range_pending", None))
+        if engine != "ocr" and not alternate_ocr_active:
             self.hide()
             return
         self._load_rect()
@@ -402,7 +425,11 @@ class OcrTranslatorOverlay(QWidget):
     def eventFilter(self, obj, event):
         if obj is self._main_window:
             if event.type() == QtCore.QEvent.WindowDeactivate:
-                self.hide()
+                # The alternate range-OCR editor is a top-level tool window.
+                # Showing it can briefly deactivate the main window; do not
+                # immediately hide the region editor in that case.
+                if not bool(getattr(self._main_window, "_alternate_ocr_range_pending", None)):
+                    self.hide()
             elif event.type() in (QtCore.QEvent.WindowActivate, QtCore.QEvent.Resize, QtCore.QEvent.Move, QtCore.QEvent.Show):
                 if bool(getattr(self._main_window, "_ocr_translator_active", False)):
                     self.sync_to_view()
@@ -971,6 +998,47 @@ def build_preview_panel(gui):
     gui.timeline_redo_btn.clicked.connect(gui.redo_last_timeline_timing_edit)
     gui.timeline_split_btn.clicked.connect(gui.split_selected_timeline_segment)
     gui.timeline_delete_btn.clicked.connect(gui.delete_selected_timeline_segment)
+    gui.timeline_selection_mode_btn = QPushButton("Select Range")
+    gui.timeline_selection_mode_btn.setCheckable(True)
+    gui.timeline_selection_mode_btn.setFixedWidth(96)
+    gui.timeline_selection_mode_btn.setToolTip("Enable Selection Range Mode")
+    gui.timeline_selection_mode_btn.setStyleSheet(
+        "QPushButton:checked { background:#244b6d; border-color:#71adff; color:#ffffff; }"
+    )
+    gui.timeline_selection_mode_btn.toggled.connect(gui.timeline.set_selection_mode)
+    gui.timeline_clear_selection_btn = QPushButton("Clear Range")
+    gui.timeline_clear_selection_btn.setFixedWidth(96)
+    gui.timeline_clear_selection_btn.setToolTip("Clear the timeline selection range (Esc)")
+    gui.timeline_clear_selection_btn.setEnabled(False)
+    gui.timeline_clear_selection_btn.hide()
+    gui.timeline_clear_selection_btn.clicked.connect(gui.timeline.clear_selection_range)
+    gui.timeline_alt_transcribe_btn = QPushButton("Alt Transcribe")
+    gui.timeline_alt_transcribe_btn.setFixedWidth(118)
+    gui.timeline_alt_transcribe_btn.setToolTip("Retranscribe the Selection Range with custom Whisper or OCR settings")
+    gui.timeline_alt_transcribe_btn.hide()
+    gui.timeline_alt_transcribe_btn.clicked.connect(gui.transcribe_selected_range_alternate)
+    def _on_range_changed(_start, _end):
+        gui.timeline_clear_selection_btn.setEnabled(True)
+        gui.timeline_clear_selection_btn.show()
+        if hasattr(gui, "_update_alt_transcribe_button_label"):
+            gui._update_alt_transcribe_button_label()
+        gui.timeline_alt_transcribe_btn.show()
+    def _on_range_cleared():
+        gui.timeline_clear_selection_btn.setEnabled(False)
+        gui.timeline_clear_selection_btn.hide()
+        gui.timeline_alt_transcribe_btn.hide()
+    gui.timeline.selectionRangeChanged.connect(_on_range_changed)
+    gui.timeline.selectionRangeCleared.connect(_on_range_cleared)
+    def _on_selection_mode_changed(enabled):
+        gui.timeline_selection_mode_btn.blockSignals(True)
+        gui.timeline_selection_mode_btn.setChecked(bool(enabled))
+        gui.timeline_selection_mode_btn.blockSignals(False)
+        gui.timeline_selection_mode_btn.setText("Selecting" if enabled else "Select Range")
+        gui.timeline_selection_mode_btn.setToolTip(
+            "Selection Range Mode active: drag the ruler to create or adjust a range"
+            if enabled else "Enable Selection Range Mode"
+        )
+    gui.timeline.selectionModeChanged.connect(_on_selection_mode_changed)
     gui.timeline_layers_btn = QPushButton("Layers")
     gui.timeline_layers_btn.setFixedWidth(76)
     gui.timeline_layers_btn.setToolTip("Show or hide layers on the timeline only")
@@ -1002,18 +1070,19 @@ def build_preview_panel(gui):
     gui.timeline_zoom_out_btn.clicked.connect(gui.timeline.zoom_out)
     gui.timeline_zoom_in_btn.clicked.connect(gui.timeline.zoom_in)
     gui.timeline_zoom_reset_btn.clicked.connect(gui.timeline.reset_zoom)
-    gui.voice_timing_sync_label = QLabel("Sync")
-    gui.voice_timing_sync_label.setObjectName("helperLabel")
-    gui.voice_timing_sync_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-    gui.voice_timing_sync_combo.setFixedWidth(140)
-    gui.voice_timing_sync_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
     edit_group = QHBoxLayout()
     edit_group.setSpacing(4)
     edit_group.addWidget(gui.timeline_undo_btn)
     edit_group.addWidget(gui.timeline_redo_btn)
+    edit_group.addWidget(_make_sep())
     edit_group.addWidget(gui.timeline_split_btn)
     edit_group.addWidget(gui.timeline_delete_btn)
+    edit_group.addWidget(_make_sep())
+    edit_group.addWidget(gui.timeline_selection_mode_btn)
+    edit_group.addWidget(gui.timeline_clear_selection_btn)
+    edit_group.addWidget(gui.timeline_alt_transcribe_btn)
+    edit_group.addWidget(_make_sep())
     edit_group.addWidget(gui.timeline_layers_btn)
 
     gui.add_layer_btn = QPushButton("+ Layer")
@@ -1044,16 +1113,11 @@ def build_preview_panel(gui):
     gui._layer_menu.addAction("Blur", lambda: gui.on_add_timeline_layer("blur"))
     gui._layer_menu.addAction("Mask", lambda: gui.on_add_timeline_layer("mask"))
     gui.add_layer_btn.setMenu(gui._layer_menu)
+    edit_group.addWidget(_make_sep())
     edit_group.addWidget(gui.add_layer_btn)
 
-    view_group = QHBoxLayout()
-    view_group.setSpacing(4)
-    view_group.addWidget(gui.voice_timing_sync_label)
-    view_group.addWidget(gui.voice_timing_sync_combo)
-
+    timeline_header_layout.addStretch(1)
     timeline_header_layout.addLayout(edit_group)
-    timeline_header_layout.addWidget(_make_sep())
-    timeline_header_layout.addLayout(view_group)
     timeline_layout.addLayout(timeline_header_layout)
 
     timeline_body_layout = QHBoxLayout()
@@ -1067,6 +1131,7 @@ def build_preview_panel(gui):
     gui.track_label_bar.blurToggled.connect(gui.on_track_blur_toggled)
     gui.track_label_bar.logoToggled.connect(gui.on_track_logo_toggled)
     gui.track_label_bar.maskToggled.connect(gui.on_track_mask_toggled)
+    gui.track_label_bar.lockToggled.connect(gui.on_timeline_track_lock_toggled)
 
     def _sync_labels():
         if hasattr(gui, "timeline") and gui.timeline._timeline:

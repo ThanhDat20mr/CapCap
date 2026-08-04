@@ -2,16 +2,14 @@ from importlib import import_module
 
 __all__ = [
     "AIPolisherProvider",
-    "GeminiPolisherProvider",
+    "OpenAICompatiblePolisherProvider",
     "GoogleWebTranslatorProvider",
-    "MicrosoftTranslatorProvider",
 ]
 
 _MODULE_MAP = {
     "AIPolisherProvider": ".ai_polisher",
-    "GeminiPolisherProvider": ".gemini_polisher",
+    "OpenAICompatiblePolisherProvider": ".gemini_polisher",
     "GoogleWebTranslatorProvider": ".google_web_translator",
-    "MicrosoftTranslatorProvider": ".microsoft_translator",
 }
 
 

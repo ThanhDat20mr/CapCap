@@ -3,9 +3,9 @@ from services.gpu_stage_scheduler import GPUStageScheduler
 
 
 class OcrAdapter:
-    def transcribe(self, video_path: str, model_path: str = "", *, language: str = "auto", task: str = "transcribe", region: str = "bottom"):
+    def transcribe(self, video_path: str, model_path: str = "", *, language: str = "auto", task: str = "transcribe", region: str = "bottom", **kwargs):
         with GPUStageScheduler.stage("ocr"):
-            return transcribe_video_ocr(video_path, region=region)
+            return transcribe_video_ocr(video_path, region=region, **kwargs)
 
     def load_model(self, model_path: str = ""):
         return _load_ocr_engine()

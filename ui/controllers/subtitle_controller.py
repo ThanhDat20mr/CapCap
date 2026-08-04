@@ -1,6 +1,8 @@
 import os
+import time
 
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QTextEdit, QVBoxLayout
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QProgressDialog, QTextEdit, QVBoxLayout
 
 from worker_adapters import RewriteTranslationWorker, TranscriptionWorker, TranslationWorker
 from translation import TranslationOrchestrator
@@ -20,6 +22,58 @@ class SubtitleController:
 
     def __init__(self, gui):
         self.gui = gui
+
+    def _show_retranslation_progress(self):
+        """Show elapsed time while a deliberate re-translation is running."""
+        self._close_retranslation_progress()
+        provider = self.gui._selected_ai_provider_label() if hasattr(self.gui, "_selected_ai_provider_label") else "selected provider"
+        dialog = QProgressDialog(
+            f"Re-translating subtitles with {provider}...\nElapsed: 00:00",
+            "Hide",
+            0,
+            0,
+            self.gui,
+        )
+        dialog.setWindowTitle("Re-translating Subtitles")
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumDuration(0)
+        dialog.setMinimumWidth(430)
+        dialog.setValue(0)
+        dialog.setStyleSheet(
+            "QProgressDialog { background-color: #101826; color: #e6eef9; }"
+            "QLabel { color: #e6eef9; }"
+            "QPushButton { background: #22344c; color: #e6eef9; border: 1px solid #36516f; border-radius: 6px; padding: 5px 14px; }"
+        )
+        started = time.monotonic()
+        timer = QTimer(dialog)
+
+        def update_elapsed():
+            elapsed = int(time.monotonic() - started)
+            dialog.setLabelText(
+                f"Re-translating subtitles with {provider}...\n"
+                f"Elapsed: {elapsed // 60:02d}:{elapsed % 60:02d}\n"
+                "Large subtitle projects can take a few minutes."
+            )
+
+        timer.setInterval(1000)
+        timer.timeout.connect(update_elapsed)
+        timer.start()
+        self.gui._retranslation_progress_dialog = dialog
+        self.gui._retranslation_progress_timer = timer
+        dialog.show()
+
+    def _close_retranslation_progress(self):
+        timer = getattr(self.gui, "_retranslation_progress_timer", None)
+        if timer is not None:
+            timer.stop()
+        self.gui._retranslation_progress_timer = None
+        dialog = getattr(self.gui, "_retranslation_progress_dialog", None)
+        self.gui._retranslation_progress_dialog = None
+        if dialog is not None:
+            dialog.hide()
+            dialog.deleteLater()
 
     def run_transcription(self):
         audio_src = self.gui.audio_source_edit.text()
@@ -82,9 +136,18 @@ class SubtitleController:
 
         self.gui.refresh_ui_state()
         self.gui.schedule_auto_frame_preview()
+        # The OCR crop is only an editor aid. Do not leave it covering the
+        # preview after a normal OCR transcript has completed.
+        if self.gui.get_transcription_engine() == "ocr":
+            self.gui.toggle_ocr_overlay_visibility(False)
+            self.gui.log("[OCR Region] Hidden after OCR transcription completed.")
         self.gui._pipeline_advance("transcription")
 
     def run_translation(self):
+        existing = getattr(self.gui, "translation_thread", None)
+        if existing is not None and existing.isRunning():
+            self.gui.log("[Translation] A translation request is already running.")
+            return
         srt_source = self.gui.transcript_text.toPlainText()
         if not srt_source or not srt_source.strip():
             QMessageBox.warning(self.gui, "Error", "No transcription available to translate!")
@@ -110,10 +173,15 @@ class SubtitleController:
         model_path = None
         src_lang = self.gui.get_source_language_code()
         enable_polish = bool(self.gui.is_ai_polish_enabled())
+        is_retranslation = bool(
+            self.gui.current_translated_segments or self.gui.translated_text.toPlainText().strip()
+        )
         self.gui.translated_text.setText("Translating with the selected provider... please wait.")
         self.gui.translate_btn.setEnabled(False)
         self.gui.progress_bar.setValue(80)
         self.gui.update_project_step("translate_raw", "running")
+        if is_retranslation:
+            self._show_retranslation_progress()
 
         self.gui.translation_thread = TranslationWorker(
             srt_source, model_path, src_lang, self.gui.get_target_language_code(), enable_polish
@@ -122,6 +190,7 @@ class SubtitleController:
         self.gui.translation_thread.start()
 
     def on_translation_finished(self, translated_srt, error, fallback_notice=""):
+        self._close_retranslation_progress()
         self.gui.translate_btn.setEnabled(True)
         if error or not translated_srt:
             self.gui.update_project_step("translate_raw", "failed")

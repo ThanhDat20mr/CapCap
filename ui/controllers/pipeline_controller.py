@@ -370,6 +370,15 @@ class PipelineController:
         self.gui.prepare_workflow_thread.start()
 
     def _on_prepare_step_started(self, step_id, message=""):
+        # The Prepare workflow runs in a separate local process, so mirror
+        # its active phase into the GUI's in-memory project state.  This lets
+        # Stop mark the correct phase failed instead of leaving a stale
+        # completed artifact to drive the sidebar badge.
+        if step_id == "translation":
+            try:
+                self.gui.update_project_step("translate_raw", "running")
+            except Exception:
+                pass
         if not self.progress_dialog:
             return
         labels = {
@@ -414,6 +423,13 @@ class PipelineController:
             self.gui.current_project_state = state
             self.gui.load_project_context(state)
             self.gui.refresh_ui_state()
+            # The OCR crop is an editing aid. Once its transcript is ready,
+            # return the preview to its normal unobstructed state. The crop
+            # geometry remains available through the OCR button for later
+            # adjustment, and this does not affect OCR Translator overlays.
+            if self.gui.get_transcription_engine() == "ocr":
+                self.gui.toggle_ocr_overlay_visibility(False)
+                self.gui.log("[OCR Region] Hidden after OCR transcription completed.")
             self._notify_translation_fallback_if_used()
         except Exception as e:
             self.gui.log(f"[Pipeline] Error reloading state: {e}")

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
                              QFrame, QProgressBar, QMessageBox,
                              QScrollArea,
                              QColorDialog, QTabWidget, QDialog, QSizePolicy, QInputDialog, QLayout)
-from PySide6.QtCore import Qt, QUrl, QTimer, QSettings, QEvent, Signal
+from PySide6.QtCore import Qt, QUrl, QTimer, QSettings, QEvent, Signal, QPoint, QRect
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontInfo, QIcon, QKeySequence, QPixmap, QTextCursor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
@@ -89,6 +89,7 @@ from worker_adapters import (
     VoiceOverWorker,
     TimelineThumbnailWorker,
     TimelineWaveformWorker,
+    AlternateRangeTranscriptionWorker,
 )
 
 # Import our backend modules
@@ -620,6 +621,9 @@ class VideoTranslatorGUI(QMainWindow):
         self.pipeline_controller = PipelineController(self)
         self.preview_controller = PreviewController(self)
         self.current_project_state = None
+        # Do not inherit a legacy global Subtitle Source from .env.  Opening
+        # a project below will replace this with that project's own setting.
+        os.environ["TRANSCRIPTION_ENGINE"] = _default_asr_engine()
         self.current_segment_models = []
         self.current_translated_segment_models = []
         self.selected_whisper_model_name = "auto"
@@ -1009,6 +1013,53 @@ class VideoTranslatorGUI(QMainWindow):
         if combo is None:
             return "fast"
         return str(combo.currentData() or "fast").strip().lower() or "fast"
+
+    def get_transcription_engine(self) -> str:
+        """Return the recognition source for the open project, never a stale global preference."""
+        state = getattr(self, "current_project_state", None)
+        settings = getattr(state, "settings", {}) if state is not None else {}
+        value = str(settings.get("transcription_engine", "") or "").strip().lower()
+        return value if value in {"whisper", "sensevoice", "ocr"} else _default_asr_engine()
+
+    def set_project_transcription_engine(self, engine: str) -> None:
+        """Apply a project-local source choice and clear incompatible range state."""
+        engine = str(engine or "").strip().lower()
+        if engine not in {"whisper", "sensevoice", "ocr"}:
+            engine = _default_asr_engine()
+        previous = self.get_transcription_engine()
+        os.environ["TRANSCRIPTION_ENGINE"] = engine
+        state = getattr(self, "current_project_state", None)
+        if state is not None:
+            state.set_setting("transcription_engine", engine)
+            self.project_service.save_project(state)
+        if engine != previous:
+            timeline = getattr(self, "timeline", None)
+            if timeline is not None:
+                timeline.clear_selection_range()
+            self._alternate_ocr_range_pending = None
+            overlay = getattr(self, "ocr_region_overlay", None)
+            if overlay is not None:
+                overlay.set_editable(False)
+                overlay.hide()
+            button = getattr(self, "timeline_alt_transcribe_btn", None)
+            if button is not None:
+                self._update_alt_transcribe_button_label()
+            self.log(f"[Subtitle Source] Changed to {engine}; cleared Selection Range.")
+        self.update_speaker_diarization_availability()
+        self._update_ocr_overlay()
+
+    def _alternate_transcription_engine(self) -> str:
+        return "whisper" if self.get_transcription_engine() == "ocr" else "ocr"
+
+    def _update_alt_transcribe_button_label(self) -> None:
+        button = getattr(self, "timeline_alt_transcribe_btn", None)
+        if button is None or getattr(self, "_alternate_range_transcription_worker", None) is not None:
+            return
+        if bool(getattr(self, "_alternate_ocr_range_pending", None)):
+            button.setText("Run OCR")
+            return
+        button.setText("Alt Transcribe")
+        button.setToolTip("Transcribe the Selection Range with custom Whisper or OCR settings")
 
     def _resolve_active_voice_name(self, *, persist_new_clone: bool = False) -> str:
         free_value = str(self.free_voice_combo.currentData() or "").strip() if hasattr(self, "free_voice_combo") else ""
@@ -3336,6 +3387,9 @@ class VideoTranslatorGUI(QMainWindow):
             with open(timeline_path, "w", encoding="utf-8") as f:
                 json.dump(timeline_data, f, ensure_ascii=False, indent=2)
             state.set_artifact("timeline", timeline_path)
+            # Selection Range is an ephemeral editing aid. Never restore it
+            # when reopening a project, where an old range can be confusing.
+            state.settings.pop("timeline_selection_range", None)
         
         self.project_service.save_project(state)
 
@@ -3412,6 +3466,11 @@ class VideoTranslatorGUI(QMainWindow):
         if not state:
             return
         self._allow_post_pipeline_preview_assets = False
+        # Subtitle Source is stored only with this project.  Old projects
+        # without a value start from the normal default instead of inheriting
+        # the last global .env selection.
+        project_engine = str(getattr(state, "settings", {}).get("transcription_engine", "") or "").strip().lower()
+        os.environ["TRANSCRIPTION_ENGINE"] = project_engine if project_engine in {"whisper", "sensevoice", "ocr"} else _default_asr_engine()
         audio_handling_mode = str(getattr(state, "settings", {}).get("audio_handling_mode", "") or "").strip().lower()
         if audio_handling_mode and hasattr(self, "audio_handling_combo"):
             combo_index = self.audio_handling_combo.findData(audio_handling_mode)
@@ -3481,6 +3540,11 @@ class VideoTranslatorGUI(QMainWindow):
             if hasattr(self, "audio_tab_btn"):
                 self.audio_tab_btn.setEnabled(True)
         self._sync_timeline_mute_to_gui()
+        # OCR geometry is project-scoped, but the visible editor is not. A
+        # reopened project should return to an unobstructed preview; users can
+        # explicitly reopen the crop editor with the OCR button when needed.
+        if not bool(getattr(self, "_alternate_ocr_range_pending", None)):
+            self._ocr_overlay_visible = False
         self._update_ocr_overlay()
         # Clear any stale layer selection from the previous project so
         # the inspector does not stay pinned to a track that no longer
@@ -3754,19 +3818,20 @@ class VideoTranslatorGUI(QMainWindow):
         if overlay is None:
             return
         is_ocr = os.getenv("TRANSCRIPTION_ENGINE", _default_asr_engine()).strip().lower() == "ocr"
+        alternate_ocr_active = bool(getattr(self, "_alternate_ocr_range_pending", None))
         btn = getattr(self, "ocr_region_btn", None)
         if btn:
             btn.setVisible(is_ocr)
             btn.blockSignals(True)
             btn.setChecked(bool(getattr(self, "_ocr_overlay_visible", True)))
             btn.blockSignals(False)
-        if not is_ocr:
+        if not is_ocr and not alternate_ocr_active:
             overlay._requested_visible = False
             overlay.hide()
             overlay.set_editable(False)
         else:
-            overlay._requested_visible = bool(getattr(self, "_ocr_overlay_visible", True))
-            if bool(getattr(self, "_ocr_overlay_visible", True)):
+            overlay._requested_visible = bool(alternate_ocr_active or getattr(self, "_ocr_overlay_visible", True))
+            if bool(alternate_ocr_active or getattr(self, "_ocr_overlay_visible", True)):
                 overlay.set_editable(True)
                 overlay.sync_to_view()
             else:
@@ -4242,7 +4307,7 @@ class VideoTranslatorGUI(QMainWindow):
         # bypasses the AI branch.  Keeping the legacy checkbox fallback makes
         # older embedded UI layouts harmless.
         provider = str(os.getenv("OPENAI_PROVIDER") or "google").strip().lower()
-        if provider in {"gemini", "openai", "ollama"}:
+        if provider in {"gemini", "google_ai_studio", "openai", "ollama"}:
             return True
         legacy_checkbox = getattr(self, "translator_ai_cb", None)
         return bool(legacy_checkbox and legacy_checkbox.isChecked())
@@ -4450,10 +4515,10 @@ class VideoTranslatorGUI(QMainWindow):
         names = {
             "google-web": "Google Translate",
             "google": "Google Translate",
-            "gemini": "Gemini",
+            "gemini": "Google AI Studio",
+            "google_ai_studio": "Google AI Studio",
             "openai": "OpenAI",
             "ollama": "Ollama",
-            "microsoft": "Microsoft Translator",
         }
         return names.get(provider, provider.replace("-", " ").title())
 
@@ -4472,9 +4537,13 @@ class VideoTranslatorGUI(QMainWindow):
         # PrepareWorkflow writes a compatibility SRT even when translation is
         # intentionally skipped. Only a completed translation artifact/step
         # unlocks the next Step-by-Step action.
+        translation_status = str(steps.get("translate_raw", "")).lower()
+        # A retained translation artifact is useful for legacy projects, but
+        # it must not make the phase look completed while a new translation
+        # is running or after the user stopped it.
         translated = (
-            str(steps.get("translate_raw", "")).lower() == "done"
-            or bool(artifacts.get("translation_final"))
+            False if translation_status in {"running", "failed"}
+            else translation_status == "done" or bool(artifacts.get("translation_final"))
         )
         tts_skipped = bool(state and state.settings.get("tts_skipped", False))
         voice = not tts_skipped and bool(
@@ -5481,6 +5550,8 @@ class VideoTranslatorGUI(QMainWindow):
             for layer in track.layers:
                 if layer.id != layer_id:
                     continue
+                if bool(getattr(layer, "locked", False)):
+                    return
                 layer_type = str(getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))).lower()
                 is_logo = layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo"
                 if layer_type not in {"blur", "mask", "text"} and not is_logo:
@@ -5529,11 +5600,15 @@ class VideoTranslatorGUI(QMainWindow):
         self._timed_layer_preview_signature = None
         self.refresh_timed_layer_preview()
         layer_type = str(getattr(layer.type, "value", layer.type)).lower()
+        can_modify_layer = not bool(getattr(track, "locked", False)) and not bool(getattr(layer, "locked", False))
         if hasattr(self, "timeline_split_btn"):
             self.timeline_split_btn.setEnabled(
-                layer_type in {"subtitle", "dub_subtitle", "blur", "mask", "text"}
+                can_modify_layer and (layer_type in {"subtitle", "dub_subtitle", "blur", "mask", "text"}
                 or (layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo")
+                )
             )
+        if hasattr(self, "timeline_delete_btn"):
+            self.timeline_delete_btn.setEnabled(can_modify_layer)
         if layer_type == "subtitle":
             self._show_subtitle_inspector_for_layer(layer_id)
         elif layer_type == "dub_subtitle":
@@ -7734,11 +7809,18 @@ class VideoTranslatorGUI(QMainWindow):
         self.refresh_ui_state()
 
     def split_selected_timeline_segment(self):
+        selection = getattr(self.timeline, "selection_range", lambda: None)() if hasattr(self, "timeline") else None
+        # A selected overlay always owns Split. The selection supplies cut
+        # times only; it must never redirect the command to TS1.
+        if self._split_selected_overlay_layer(selection):
+            return
+        if selection:
+            start, end = selection
+            if self._split_selected_subtitle_by_range(start, end):
+                return
         # Overlay layers use the same Split action as subtitle/audio blocks.
         # Copying the layer preserves its style, transform and visibility;
         # only its identity and timing are changed.
-        if self._split_selected_overlay_layer():
-            return
         segments = list(self.get_active_segments() or [])
         if not segments:
             return
@@ -7803,7 +7885,355 @@ class VideoTranslatorGUI(QMainWindow):
         self.schedule_live_subtitle_preview_refresh()
         self.refresh_ui_state()
 
-    def _split_selected_overlay_layer(self) -> bool:
+    def transcribe_selected_range_alternate(self):
+        timeline = getattr(self, "timeline", None)
+        selection = timeline.selection_range() if timeline else None
+        if not selection:
+            QMessageBox.information(self, "Transcribe Selected Range", "Please create a Selection Range first.")
+            return
+        if getattr(self, "_alternate_range_transcription_worker", None) is not None:
+            return
+        video_path = self.video_path_edit.text().strip()
+        if not video_path or not os.path.isfile(video_path):
+            QMessageBox.warning(self, "Transcribe Selected Range", "Please load a video first.")
+            return
+        pending = getattr(self, "_alternate_ocr_range_pending", None)
+        pending_overlay = getattr(self, "ocr_region_overlay", None)
+        # A hidden range-OCR editor is not actionable. It can happen after a
+        # window switch or an older pending state, and must not bypass the
+        # configuration dialog on the next Alt Transcribe click.
+        if pending and (pending_overlay is None or not pending_overlay.isVisible()):
+            self.log("[Range OCR] Cleared a stale pending OCR region request.")
+            self._alternate_ocr_range_pending = None
+            pending = None
+            self._update_alt_transcribe_button_label()
+        if pending:
+            config = dict(pending)
+            self._alternate_ocr_range_pending = None
+            overlay = getattr(self, "ocr_region_overlay", None)
+            if overlay is not None:
+                overlay.set_editable(False)
+                overlay.hide()
+            self._update_alt_transcribe_button_label()
+        else:
+            config = self._show_range_transcription_dialog(selection)
+            if config is None:
+                return
+
+        start, end = float(config["start"]), float(config["end"])
+        engine_name = str(config["engine"])
+        mode = str(config["mode"])
+        if engine_name == "whisper" and not self.ensure_required_resources("Range Transcription", include_whisper=True):
+            return
+        if engine_name == "ocr" and not pending:
+            overlay = getattr(self, "ocr_region_overlay", None)
+            if overlay is None:
+                QMessageBox.warning(self, "Range OCR", "The OCR region editor is unavailable.")
+                return
+            self._alternate_ocr_range_pending = dict(config)
+            overlay._requested_visible = True
+            overlay.set_editable(True)
+
+            def _show_range_ocr_editor():
+                view = getattr(overlay, "_target_view", None)
+                if view is None:
+                    return
+                overlay.setGeometry(QRect(view.mapToGlobal(QPoint(0, 0)), view.size()))
+                overlay.show()
+                overlay.raise_()
+                overlay.update()
+
+            _show_range_ocr_editor()
+            QTimer.singleShot(0, _show_range_ocr_editor)
+            self._update_alt_transcribe_button_label()
+            self.log(
+                f"[Range OCR] Region editor opened for {start:.3f}s–{end:.3f}s; "
+                f"fps={config['ocr_fps'] or 'Settings default'}. Adjust it, then click Run OCR."
+            )
+            return
+
+        model = str(config.get("whisper_model", "")) if engine_name == "whisper" else ""
+        language = str(config.get("language", "auto"))
+        ocr_fps = config.get("ocr_fps") if engine_name == "ocr" else None
+        ocr_region = str(config.get("ocr_region", "bottom"))
+        settings_summary = (
+            f"model={model}, language={language}" if engine_name == "whisper"
+            else f"region={ocr_region}, fps={ocr_fps or 'Settings default'}"
+        )
+        self.log(
+            f"[Range Transcription] Running {engine_name} for {start:.3f}s–{end:.3f}s "
+            f"({mode}; {settings_summary})."
+        )
+        worker = AlternateRangeTranscriptionWorker(
+            video_path, start, end, engine_name, model, language,
+            ocr_region=ocr_region, ocr_fps=ocr_fps,
+        )
+        # Keep the QThread parented and referenced until its native finished
+        # signal fires.  Clearing the only reference from the worker's custom
+        # result signal could destroy the QThread while run() was unwinding.
+        worker.setParent(self)
+        self._alternate_range_transcription_worker = worker
+        action_button = getattr(self, "timeline_alt_transcribe_btn", None)
+        if action_button is not None:
+            action_button.setEnabled(False)
+            action_button.setText("Running…")
+        def finished(segments, error):
+            if action_button is not None:
+                action_button.setEnabled(True)
+                self._update_alt_transcribe_button_label()
+            if error:
+                QMessageBox.warning(self, "Transcribe Selected Range", f"{engine_name.title()} failed.\n\n{error}")
+                return
+            if not segments:
+                QMessageBox.information(
+                    self, "Transcribe Selected Range",
+                    "No subtitle text was detected in this range. Existing subtitle segments were not changed.",
+                )
+                return
+            self._apply_alternate_range_transcript(segments, start, end, mode)
+        def cleanup_worker():
+            if getattr(self, "_alternate_range_transcription_worker", None) is worker:
+                self._alternate_range_transcription_worker = None
+            # finished() runs while the worker reference is still retained,
+            # so its label refresh intentionally does nothing. Refresh once
+            # the native QThread has actually finished and been released.
+            self._update_alt_transcribe_button_label()
+            worker.deleteLater()
+        worker.completed.connect(finished)
+        worker.finished.connect(cleanup_worker)
+        worker.start()
+
+    def _show_range_transcription_dialog(self, selection):
+        """Collect recognition options without changing the project's main source."""
+        start, end = (float(selection[0]), float(selection[1]))
+        overlaps = any(
+            float(seg.get("end", 0.0)) > start and float(seg.get("start", 0.0)) < end
+            for seg in list(self.current_segments or [])
+        )
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Transcribe Selected Range")
+        dialog.setMinimumWidth(420)
+        dialog.setStyleSheet(
+            "QDialog { background: #101b2d; color: #e6eef9; } "
+            "QLabel { color: #d7e4f5; } QComboBox { min-height: 28px; }"
+        )
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+        layout.addWidget(QLabel(f"Range: {start:.3f}s – {end:.3f}s", dialog))
+
+        engine_label = QLabel("Engine", dialog)
+        engine_combo = QComboBox(dialog)
+        engine_combo.addItem("Whisper", "whisper")
+        engine_combo.addItem("OCR", "ocr")
+        default_engine = self._alternate_transcription_engine()
+        engine_index = engine_combo.findData(default_engine)
+        engine_combo.setCurrentIndex(engine_index if engine_index >= 0 else 0)
+        layout.addWidget(engine_label)
+        layout.addWidget(engine_combo)
+
+        mode_label = QLabel("Existing subtitle segments", dialog)
+        mode_combo = QComboBox(dialog)
+        mode_combo.addItem("Replace overlapping segments (recommended)", "replace")
+        mode_combo.addItem("Append new segments", "append")
+        mode_combo.setCurrentIndex(0 if overlaps else 1)
+        layout.addWidget(mode_label)
+        layout.addWidget(mode_combo)
+
+        whisper_box = QWidget(dialog)
+        whisper_layout = QVBoxLayout(whisper_box)
+        whisper_layout.setContentsMargins(0, 0, 0, 0)
+        whisper_layout.setSpacing(6)
+        whisper_layout.addWidget(QLabel("Whisper model", whisper_box))
+        whisper_model_combo = QComboBox(whisper_box)
+        whisper_model_combo.addItem("Base", "base")
+        whisper_model_combo.addItem("Small (Fast)", "small")
+        if os.environ.get("CAPCAP_DEVICE", "cuda").strip().lower() == "cuda":
+            whisper_model_combo.addItem("Medium (Quality)", "medium")
+        current_model = str(self.get_whisper_model_name() or "small").strip().lower()
+        model_index = whisper_model_combo.findData(current_model)
+        whisper_model_combo.setCurrentIndex(model_index if model_index >= 0 else 0)
+        whisper_layout.addWidget(whisper_model_combo)
+        whisper_layout.addWidget(QLabel("Language", whisper_box))
+        language_combo = QComboBox(whisper_box)
+        source_language = str(self.get_source_language_code() or "auto")
+        language_combo.addItem(f"Project language ({source_language})", source_language)
+        if source_language != "auto":
+            language_combo.addItem("Auto detect", "auto")
+        for label, code in (("Chinese", "zh"), ("English", "en"), ("Vietnamese", "vi"), ("Japanese", "ja"), ("Korean", "ko")):
+            if code != source_language:
+                language_combo.addItem(label, code)
+        whisper_layout.addWidget(language_combo)
+        layout.addWidget(whisper_box)
+
+        ocr_box = QWidget(dialog)
+        ocr_layout = QVBoxLayout(ocr_box)
+        ocr_layout.setContentsMargins(0, 0, 0, 0)
+        ocr_layout.setSpacing(6)
+        ocr_layout.addWidget(QLabel("OCR sampling rate", ocr_box))
+        ocr_fps_combo = QComboBox(ocr_box)
+        ocr_fps_combo.addItem("Use Settings default", "settings")
+        ocr_fps_combo.addItem("1 FPS (lighter)", "1")
+        ocr_fps_combo.addItem("1.5 FPS", "1.5")
+        ocr_fps_combo.addItem("2 FPS", "2")
+        ocr_fps_combo.addItem("3 FPS", "3")
+        ocr_fps_combo.addItem("4 FPS (short flashes)", "4")
+        current_fps = str(os.getenv("OCR_SAMPLING_FPS") or "auto").strip().lower()
+        fps_index = ocr_fps_combo.findData(current_fps)
+        ocr_fps_combo.setCurrentIndex(fps_index if fps_index >= 0 else 0)
+        ocr_layout.addWidget(ocr_fps_combo)
+        ocr_hint = QLabel("After continuing, adjust the current OCR region on the preview, then click Run OCR.", ocr_box)
+        ocr_hint.setWordWrap(True)
+        ocr_hint.setObjectName("helperLabel")
+        ocr_layout.addWidget(ocr_hint)
+        layout.addWidget(ocr_box)
+
+        def update_engine_options():
+            is_whisper = engine_combo.currentData() == "whisper"
+            whisper_box.setVisible(is_whisper)
+            ocr_box.setVisible(not is_whisper)
+            dialog.adjustSize()
+
+        engine_combo.currentIndexChanged.connect(update_engine_options)
+        update_engine_options()
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel_button = QPushButton("Cancel", dialog)
+        run_button = QPushButton("Continue", dialog)
+        buttons.addWidget(cancel_button)
+        buttons.addWidget(run_button)
+        layout.addLayout(buttons)
+        cancel_button.clicked.connect(dialog.reject)
+        run_button.clicked.connect(dialog.accept)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+
+        engine_name = str(engine_combo.currentData() or "whisper")
+        fps_value = str(ocr_fps_combo.currentData() or "settings")
+        return {
+            "start": start,
+            "end": end,
+            "engine": engine_name,
+            "mode": str(mode_combo.currentData() or "replace"),
+            "whisper_model": str(whisper_model_combo.currentData() or "small"),
+            "language": str(language_combo.currentData() or "auto"),
+            "ocr_region": str(os.getenv("OCR_SUBTITLE_REGION") or "bottom").strip().lower(),
+            "ocr_fps": None if fps_value == "settings" else float(fps_value),
+        }
+
+    def _apply_alternate_range_transcript(self, segments, start, end, mode):
+        fresh = [
+            {"start": max(float(start), float(seg.get("start", start))), "end": min(float(end), float(seg.get("end", end))), "text": str(seg.get("text", "")).strip()}
+            for seg in list(segments or []) if str(seg.get("text", "")).strip()
+        ]
+        if mode == "replace":
+            self.current_segments = self._replace_subtitle_segments_in_range(
+                self.current_segments, fresh, start, end,
+            )
+            if self.current_translated_segments:
+                self.current_translated_segments = self._replace_subtitle_segments_in_range(
+                    self.current_translated_segments, [dict(seg) for seg in fresh], start, end,
+                )
+        else:
+            self.current_segments = sorted(self.current_segments + fresh, key=lambda seg: float(seg.get("start", 0.0)))
+            if self.current_translated_segments:
+                self.current_translated_segments = sorted(
+                    self.current_translated_segments + [dict(seg) for seg in fresh],
+                    key=lambda seg: float(seg.get("start", 0.0)),
+                )
+        self.current_segment_models = self._dict_segments_to_models(self.current_segments, translated=False)
+        self.current_translated_segment_models = self._dict_segments_to_models(self.current_translated_segments, translated=True)
+        self._sync_hidden_transcript_text_from_segments()
+        self._sync_hidden_translated_text_from_segments()
+        self.apply_segments_to_timeline()
+        self.persist_current_timeline_project_data()
+        self.schedule_live_subtitle_preview_refresh()
+        self.refresh_ui_state()
+        self.log(f"[Range Transcription] Added {len(fresh)} alternate-engine segment(s).")
+
+    @staticmethod
+    def _replace_subtitle_segments_in_range(existing, replacement, start, end):
+        """Replace only the selected interval, retaining cue portions outside it."""
+        retained = []
+        for source in list(existing or []):
+            segment = dict(source)
+            segment_start = float(segment.get("start", 0.0))
+            segment_end = float(segment.get("end", 0.0))
+            overlaps = segment_end > start and segment_start < end
+            if not overlaps:
+                retained.append(segment)
+                continue
+            # A cue can cross either selection boundary. Keep the unaffected
+            # temporal portion instead of deleting the entire cue.
+            if segment_start < start:
+                before = dict(segment)
+                before["end"] = float(start)
+                if float(before["end"]) > float(before["start"]):
+                    retained.append(before)
+            if segment_end > end:
+                after = dict(segment)
+                after["start"] = float(end)
+                if float(after["end"]) > float(after["start"]):
+                    retained.append(after)
+        return sorted(retained + [dict(item) for item in list(replacement or [])], key=lambda seg: float(seg.get("start", 0.0)))
+
+    def _split_selected_subtitle_by_range(self, range_start: float, range_end: float) -> bool:
+        """Split only the selected TS1 cue at the selection boundaries."""
+        selected_id = str(getattr(getattr(self, "timeline", None), "_selected_layer_id", "") or "")
+        if selected_id:
+            for track in self.timeline._timeline.tracks:
+                if any(layer.id == selected_id for layer in track.layers) and bool(getattr(track, "locked", False)):
+                    QMessageBox.information(self, "Layer Locked", "Unlock this timeline layer before splitting it.")
+                    return True
+        index = int(getattr(self, "_selected_segment_index", -1))
+        if not (0 <= index < len(self.get_active_segments() or [])):
+            QMessageBox.information(self, "Split by Selection", "Select a subtitle segment before splitting it.")
+            return True
+        boundaries = (float(range_start), float(range_end))
+        history = {"type": "range_split", "current_before": copy.deepcopy(self.current_segments), "translated_before": copy.deepcopy(self.current_translated_segments)}
+        changed = False
+        for attr, translated in (("current_segments", False), ("current_translated_segments", True)):
+            source = list(getattr(self, attr, []) or [])
+            if not (0 <= index < len(source)):
+                continue
+            rebuilt = list(source)
+            pieces = [source[index]]
+            for boundary in boundaries:
+                next_pieces = []
+                for piece in pieces:
+                    start = float(piece.get("start", 0.0)); end = float(piece.get("end", 0.0))
+                    if start + 0.01 < boundary < end - 0.01:
+                        first, second = self._build_split_segment_pair(piece, boundary)
+                        next_pieces.extend((first, second)); changed = True
+                    else:
+                        next_pieces.append(piece)
+                pieces = next_pieces
+            if changed:
+                rebuilt[index:index + 1] = pieces
+                setattr(self, attr, rebuilt)
+                if translated:
+                    self.current_translated_segment_models = self._dict_segments_to_models(rebuilt, translated=True)
+                    self._sync_hidden_translated_text_from_segments()
+                else:
+                    self.current_segment_models = self._dict_segments_to_models(rebuilt, translated=False)
+                    self._sync_hidden_transcript_text_from_segments()
+        if not changed:
+            QMessageBox.information(self, "Split by Selection", "No subtitle segment crosses the selection boundaries.")
+            return False
+        history["current_after"] = copy.deepcopy(self.current_segments)
+        history["translated_after"] = copy.deepcopy(self.current_translated_segments)
+        self._timeline_timing_undo_stack.append(history)
+        self._timeline_timing_redo_stack = []
+        self._refresh_timeline_history_buttons()
+        self.apply_segments_to_timeline()
+        self.persist_current_timeline_project_data()
+        self.schedule_live_subtitle_preview_refresh()
+        self.refresh_ui_state()
+        self.log(f"[Timeline] Split subtitle segments at selection {range_start:.3f}s–{range_end:.3f}s.")
+        return True
+
+    def _split_selected_overlay_layer(self, selection=None) -> bool:
         """Split a selected Blur, Logo, Mask, or Text layer at the playhead."""
         timeline = getattr(self, "timeline", None)
         if timeline is None or not getattr(timeline, "_timeline", None):
@@ -7821,30 +8251,44 @@ class VideoTranslatorGUI(QMainWindow):
                 break
         if selected_layer is None:
             return False
+        if bool(getattr(selected_track, "locked", False)):
+            QMessageBox.information(self, "Layer Locked", "Unlock this timeline layer before splitting it.")
+            return True
+        if bool(getattr(selected_layer, "locked", False)):
+            QMessageBox.information(self, "Layer Locked", "Unlock this layer before splitting it.")
+            return True
         layer_type = str(getattr(getattr(selected_layer, "type", ""), "value", getattr(selected_layer, "type", ""))).lower()
         is_logo = layer_type == "image" and str(getattr(selected_track, "name", "")) == "L1 Logo"
         if layer_type not in {"blur", "mask", "text"} and not is_logo:
             return False
-        split_time = float(self.media_player.position()) / 1000.0
+        split_times = list(selection or (float(self.media_player.position()) / 1000.0,))
         start, end = float(selected_layer.start), float(selected_layer.end)
         min_duration = max(0.1, float(getattr(timeline, "MIN_DUR", 0.1)))
-        if not (start + min_duration < split_time < end - min_duration):
+        split_times = sorted({float(t) for t in split_times if start + min_duration < float(t) < end - min_duration})
+        if not split_times:
             QMessageBox.information(
                 self,
                 "Split Layer",
-                "Move the playhead inside the selected layer before splitting.",
+                "Place the playhead or selection boundary inside the selected layer before splitting.",
             )
             return True
-        new_layer = copy.deepcopy(selected_layer)
-        new_layer.id = uuid4().hex[:12]
-        new_layer.name = f"{str(getattr(selected_layer, 'name', 'Layer')).strip() or 'Layer'} 2"
-        new_layer.start = split_time
-        new_layer.end = end
-        new_layer.z_index = int(getattr(selected_layer, "z_index", 0)) + 1
-        selected_layer.end = split_time
         index = selected_track.layers.index(selected_layer)
-        selected_track.layers.insert(index + 1, new_layer)
+        before_layers = copy.deepcopy(selected_track.layers)
+        pieces = []
+        piece_start = start
+        for part_index, split_time in enumerate(split_times + [end]):
+            piece = copy.deepcopy(selected_layer)
+            piece.id = selected_layer.id if part_index == 0 else uuid4().hex[:12]
+            piece.name = str(getattr(selected_layer, "name", "Layer") or "Layer") if part_index == 0 else f"{str(getattr(selected_layer, 'name', 'Layer') or 'Layer')} {part_index + 1}"
+            piece.start, piece.end = piece_start, split_time
+            piece_start = split_time
+            pieces.append(piece)
+        selected_track.layers[index:index + 1] = pieces
+        new_layer = pieces[-1]
         timeline._selected_layer_id = new_layer.id
+        self._timeline_timing_undo_stack.append({"type": "overlay_split", "track_id": selected_track.id, "before_layers": before_layers, "after_layers": copy.deepcopy(selected_track.layers)})
+        self._timeline_timing_redo_stack = []
+        self._refresh_timeline_history_buttons()
         timeline._redraw()
         self.persist_current_timeline_project_data()
         self.on_timeline_layer_selected(new_layer.id)
@@ -7880,6 +8324,33 @@ class VideoTranslatorGUI(QMainWindow):
             empty = menu.addAction("No layer tracks")
             empty.setEnabled(False)
 
+    def on_timeline_track_lock_toggled(self, track_name: str, locked: bool):
+        timeline = getattr(self, "timeline", None)
+        if timeline is None or not timeline._timeline:
+            return
+        for track in timeline._timeline.tracks:
+            if track.name == track_name:
+                track.locked = bool(locked)
+                timeline._redraw()
+                self.persist_current_timeline_project_data()
+                self.refresh_ui_state()
+                self.log(f"[Timeline] {'Locked' if locked else 'Unlocked'} track: {track.name}")
+                return
+
+    def toggle_selected_timeline_layer_lock(self, layer_id: str = ""):
+        timeline = getattr(self, "timeline", None)
+        selected_id = str(layer_id or getattr(timeline, "_selected_layer_id", "") or "") if timeline else ""
+        if not timeline or not timeline._timeline or not selected_id:
+            return
+        for track in timeline._timeline.tracks:
+            for layer in track.layers:
+                if layer.id == selected_id:
+                    layer.locked = not bool(getattr(layer, "locked", False))
+                    timeline._redraw()
+                    self.persist_current_timeline_project_data()
+                    self.log(f"[Timeline] {'Locked' if layer.locked else 'Unlocked'} layer: {layer.name or layer.id}")
+                    return
+
     def delete_selected_timeline_segment(self):
         # If a layer is currently selected in the timeline, remove it
         # from its track. Handles blur (with overlay sync), image/logo,
@@ -7897,9 +8368,41 @@ class VideoTranslatorGUI(QMainWindow):
                             break
                     if layer is None:
                         continue
+                    if bool(getattr(track, "locked", False)):
+                        QMessageBox.information(self, "Layer Locked", "Unlock this timeline layer before deleting it.")
+                        return
+                    if bool(getattr(layer, "locked", False)):
+                        QMessageBox.information(self, "Layer Locked", "Unlock this layer before deleting it.")
+                        return
                     layer_type = str(
                         getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))
                     ).lower()
+                    # TS1 is a projection of the canonical subtitle lists.
+                    # Removing only its visual DubSubtitleLayer leaves the
+                    # source segment intact; a later resize calls
+                    # apply_segments_to_timeline() and recreates that "deleted"
+                    # cue. Route it through the canonical segment deletion
+                    # branch below instead.
+                    is_subtitle_layer = (
+                        layer_type == "dub_subtitle"
+                        or str(getattr(getattr(track, "type", ""), "value", getattr(track, "type", ""))).lower() == "dub_subtitle"
+                    )
+                    if is_subtitle_layer:
+                        if bool(getattr(track, "locked", False)) or bool(getattr(layer, "locked", False)):
+                            QMessageBox.information(self, "Layer Locked", "Unlock this timeline layer before deleting it.")
+                            return
+                        segment_index = int(getattr(self.timeline, "_segment_indices", {}).get(layer.id, -1))
+                        if segment_index < 0 and isinstance(getattr(layer, "metadata", None), dict):
+                            try:
+                                segment_index = int(layer.metadata.get("_seg_index", -1))
+                            except (TypeError, ValueError):
+                                segment_index = -1
+                        if segment_index < 0:
+                            QMessageBox.warning(self, "Delete Segment", "Could not identify the selected subtitle segment.")
+                            return
+                        self.timeline._selected_layer_id = ""
+                        self._selected_segment_index = segment_index
+                        return self.delete_selected_timeline_segment()
                     # Use the layer-specific removal paths where they own
                     # preview state.  The Delete timeline button therefore
                     # removes the selected layer rather than merely deleting
@@ -8034,6 +8537,11 @@ class VideoTranslatorGUI(QMainWindow):
             self.current_translated_segment_models = self._dict_segments_to_models(self.current_translated_segments, translated=True)
             self._sync_hidden_translated_text_from_segments()
 
+        # The optional one-line display cache is indexed against the old
+        # subtitle list. It must never survive a deletion, otherwise a later
+        # timing edit can redraw a stale cue from that cache.
+        self._single_line_split_cache = None
+
         self._timeline_timing_undo_stack.append(delete_history_entry)
         self._timeline_timing_redo_stack = []
         if len(self._timeline_timing_undo_stack) > 100:
@@ -8044,6 +8552,25 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "timeline"):
             self.timeline.set_active_segment_index(target_selection)
         self.apply_segments_to_timeline()
+        # `persist_current_timeline_project_data()` intentionally skips empty
+        # lists during project initialization. A user deletion is different:
+        # write the exact post-delete lists, including [] so a removed final
+        # cue can never be restored from the project artifacts.
+        state = getattr(self, "current_project_state", None)
+        if state is not None:
+            try:
+                self.current_segment_models = self.project_bridge.persist_transcription(
+                    state, self.current_segments or [], self.last_original_srt_path,
+                )
+                if self.current_translated_segments is not None:
+                    self.current_translated_segment_models = self.project_bridge.persist_translation(
+                        state,
+                        self.current_segment_models,
+                        self.current_translated_segments or [],
+                        self.last_translated_srt_path,
+                    )
+            except Exception as exc:
+                self.log(f"[Subtitle] Could not update deleted segment cache: {exc}")
         self.persist_current_timeline_project_data()
         self.schedule_live_subtitle_preview_refresh()
         self.refresh_ui_state()
@@ -8062,6 +8589,10 @@ class VideoTranslatorGUI(QMainWindow):
             updated = True
         if not updated:
             return
+        # Timing changes invalidate the optional derived one-line display
+        # list. Otherwise it can retain deleted cues and overwrite the fresh
+        # canonical subtitle state on the next redraw.
+        self._single_line_split_cache = None
         self.set_selected_segment_index(index, sync_ui=True)
         self.apply_segments_to_timeline()
         self.persist_current_timeline_project_data()
@@ -8078,6 +8609,16 @@ class VideoTranslatorGUI(QMainWindow):
         if not self._timeline_timing_undo_stack:
             return False
         entry = self._timeline_timing_undo_stack.pop()
+        if str(entry.get("type", "")) == "range_split":
+            self._apply_range_split_history(entry, use_after=False)
+            self._timeline_timing_redo_stack.append(entry)
+            self._refresh_timeline_history_buttons()
+            return True
+        if str(entry.get("type", "")) == "overlay_split":
+            self._apply_overlay_split_history(entry, use_after=False)
+            self._timeline_timing_redo_stack.append(entry)
+            self._refresh_timeline_history_buttons()
+            return True
         if str(entry.get("type", "timing")) in {"insert", "split", "delete", "batch_timing"}:
             self._apply_timeline_structure_history_entry(entry, use_after=False)
             self._timeline_timing_redo_stack.append(entry)
@@ -8110,6 +8651,16 @@ class VideoTranslatorGUI(QMainWindow):
         if not self._timeline_timing_redo_stack:
             return False
         entry = self._timeline_timing_redo_stack.pop()
+        if str(entry.get("type", "")) == "range_split":
+            self._apply_range_split_history(entry, use_after=True)
+            self._timeline_timing_undo_stack.append(entry)
+            self._refresh_timeline_history_buttons()
+            return True
+        if str(entry.get("type", "")) == "overlay_split":
+            self._apply_overlay_split_history(entry, use_after=True)
+            self._timeline_timing_undo_stack.append(entry)
+            self._refresh_timeline_history_buttons()
+            return True
         if str(entry.get("type", "timing")) in {"insert", "split", "delete", "batch_timing"}:
             self._apply_timeline_structure_history_entry(entry, use_after=True)
             self._timeline_timing_undo_stack.append(entry)
@@ -8137,6 +8688,33 @@ class VideoTranslatorGUI(QMainWindow):
             self._timeline_timing_undo_stack.append(current_entry)
         self._refresh_timeline_history_buttons()
         return True
+
+    def _apply_overlay_split_history(self, entry, *, use_after: bool):
+        timeline = getattr(self, "timeline", None)
+        if timeline is None or not timeline._timeline:
+            return
+        track_id = str(entry.get("track_id", ""))
+        for track in timeline._timeline.tracks:
+            if track.id == track_id:
+                track.layers = copy.deepcopy(entry.get("after_layers" if use_after else "before_layers", []))
+                timeline._selected_layer_id = track.layers[-1].id if track.layers else ""
+                timeline._redraw()
+                self.persist_current_timeline_project_data()
+                self.refresh_ui_state()
+                return
+
+    def _apply_range_split_history(self, entry, *, use_after: bool):
+        suffix = "after" if use_after else "before"
+        self.current_segments = copy.deepcopy(entry.get(f"current_{suffix}", []))
+        self.current_translated_segments = copy.deepcopy(entry.get(f"translated_{suffix}", []))
+        self.current_segment_models = self._dict_segments_to_models(self.current_segments, translated=False)
+        self.current_translated_segment_models = self._dict_segments_to_models(self.current_translated_segments, translated=True)
+        self._sync_hidden_transcript_text_from_segments()
+        self._sync_hidden_translated_text_from_segments()
+        self.apply_segments_to_timeline()
+        self.persist_current_timeline_project_data()
+        self.schedule_live_subtitle_preview_refresh()
+        self.refresh_ui_state()
 
     def step_selected_segment(self, direction: int):
         rows = self._segment_editor_display_rows()
@@ -10379,12 +10957,16 @@ class VideoTranslatorGUI(QMainWindow):
             self.preview_voice_btn.setEnabled(bool(self.voice_catalog_entries_all))
         has_timeline_segments = bool(self.get_active_segments())
         selected_overlay_is_splittable = False
+        selected_layer_locked = False
+        has_selected_timeline_layer = False
         selected_layer_id = str(getattr(getattr(self, "timeline", None), "_selected_layer_id", "") or "")
         if selected_layer_id and getattr(getattr(self, "timeline", None), "_timeline", None):
             for track in self.timeline._timeline.tracks:
                 for layer in track.layers:
                     if layer.id != selected_layer_id:
                         continue
+                    has_selected_timeline_layer = True
+                    selected_layer_locked = bool(getattr(track, "locked", False)) or bool(getattr(layer, "locked", False))
                     layer_type = str(getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))).lower()
                     selected_overlay_is_splittable = layer_type in {"blur", "mask", "text"} or (
                         layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo"
@@ -10393,9 +10975,14 @@ class VideoTranslatorGUI(QMainWindow):
                 if selected_overlay_is_splittable:
                     break
         if hasattr(self, "timeline_split_btn"):
-            self.timeline_split_btn.setEnabled(has_timeline_segments or selected_overlay_is_splittable)
+            self.timeline_split_btn.setEnabled(
+                (has_timeline_segments or selected_overlay_is_splittable)
+                and (not has_selected_timeline_layer or not selected_layer_locked)
+            )
         if hasattr(self, "timeline_delete_btn"):
-            self.timeline_delete_btn.setEnabled(has_timeline_segments)
+            self.timeline_delete_btn.setEnabled(
+                has_timeline_segments and (not has_selected_timeline_layer or not selected_layer_locked)
+            )
 
         self._update_generate_button_menu(has_data=has_translated_text or has_timeline_segments)
         self.update_workflow_stage_badges()
@@ -10806,7 +11393,7 @@ class VideoTranslatorGUI(QMainWindow):
         engine_combo.addItem("Audio (SenseVoice) - Speed", "sensevoice")
         engine_combo.addItem("Audio (Whisper) - Quality", "whisper")
         engine_combo.addItem("Video (OCR)", "ocr")
-        current_engine = (os.getenv("TRANSCRIPTION_ENGINE") or _default_asr_engine()).strip().lower()
+        current_engine = self.get_transcription_engine()
         idx = engine_combo.findData(current_engine)
         if idx >= 0:
             engine_combo.setCurrentIndex(idx)
@@ -10826,6 +11413,23 @@ class VideoTranslatorGUI(QMainWindow):
         region_combo.setVisible(current_engine == "ocr")
         layout.addWidget(region_label)
         layout.addWidget(region_combo)
+
+        sampling_label = QLabel("OCR sampling rate:")
+        sampling_label.setToolTip("Higher rates catch shorter subtitle flashes but process more video frames.")
+        sampling_label.setVisible(current_engine == "ocr")
+        sampling_combo = QComboBox(dialog)
+        sampling_combo.addItem("Auto (recommended)", "auto")
+        sampling_combo.addItem("1 FPS (lighter)", "1")
+        sampling_combo.addItem("1.5 FPS", "1.5")
+        sampling_combo.addItem("2 FPS", "2")
+        sampling_combo.addItem("3 FPS", "3")
+        sampling_combo.addItem("4 FPS (short flashes)", "4")
+        current_sampling_fps = str(os.getenv("OCR_SAMPLING_FPS") or "auto").strip().lower()
+        idx = sampling_combo.findData(current_sampling_fps)
+        sampling_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        sampling_combo.setVisible(current_engine == "ocr")
+        layout.addWidget(sampling_label)
+        layout.addWidget(sampling_combo)
 
         # Whisper Section
         is_whisper = current_engine == "whisper"
@@ -10912,11 +11516,13 @@ class VideoTranslatorGUI(QMainWindow):
         provider_layout.addWidget(provider_label)
         provider_combo = QComboBox(dialog)
         provider_combo.addItem("Google Translate (free, no key)", "google")
-        provider_combo.addItem("Gemini (Google AI Studio)", "gemini")
+        provider_combo.addItem("Google AI Studio", "google_ai_studio")
         provider_combo.addItem("OpenAI", "openai")
         provider_combo.addItem("Ollama (Local)", "ollama")
         current_provider = (os.getenv("OPENAI_PROVIDER") or "google").strip().lower()
-        if current_provider not in {"google", "gemini", "openai", "ollama"}:
+        if current_provider == "gemini":
+            current_provider = "google_ai_studio"
+        if current_provider not in {"google", "google_ai_studio", "openai", "ollama"}:
             current_provider = "google"
         idx = provider_combo.findData(current_provider)
         if idx >= 0:
@@ -10925,13 +11531,25 @@ class VideoTranslatorGUI(QMainWindow):
         provider_layout.addWidget(provider_combo, 1)
         layout.addLayout(provider_layout)
 
+        def _provider_values(provider):
+            if provider == "google_ai_studio":
+                legacy = str(os.getenv("OPENAI_PROVIDER") or "").strip().lower() == "gemini"
+                return (
+                    os.getenv("GOOGLE_AI_STUDIO_API_KEY", "") or (os.getenv("OPENAI_API_KEY", "") if legacy else ""),
+                    os.getenv("GOOGLE_AI_STUDIO_MODEL", "") or (os.getenv("OPENAI_MODEL", "") if legacy else ""),
+                    os.getenv("GOOGLE_AI_STUDIO_BASE_URL", "") or (os.getenv("OPENAI_BASE_URL", "") if legacy else ""),
+                )
+            return (os.getenv("OPENAI_API_KEY", ""), os.getenv("OPENAI_MODEL", ""), os.getenv("OPENAI_BASE_URL", ""))
+
+        initial_key, initial_model, initial_base_url = _provider_values(current_provider)
+
         key_section_widget = QWidget(dialog)
         key_layout = QVBoxLayout(key_section_widget)
         key_layout.setContentsMargins(0, 0, 0, 0)
         key_label = QLabel("API Key:")
         key_edit = QLineEdit(dialog)
         key_edit.setEchoMode(QLineEdit.Password)
-        key_edit.setText(os.getenv("OPENAI_API_KEY", ""))
+        key_edit.setText(initial_key)
         key_layout.addWidget(key_label)
         key_layout.addWidget(key_edit)
         key_section_widget.setVisible(not remote_mode)
@@ -10940,7 +11558,7 @@ class VideoTranslatorGUI(QMainWindow):
         model_layout = QVBoxLayout()
         model_label = QLabel("AI Model:")
         model_edit = QLineEdit(dialog)
-        model_edit.setText(os.getenv("OPENAI_MODEL", ""))
+        model_edit.setText(initial_model)
         model_layout.addWidget(model_label)
         model_layout.addWidget(model_edit)
         model_label.setVisible(not remote_mode)
@@ -10950,7 +11568,7 @@ class VideoTranslatorGUI(QMainWindow):
         base_url_layout = QVBoxLayout()
         base_url_label = QLabel("API URL:")
         base_url_edit = QLineEdit(dialog)
-        base_url_edit.setText(os.getenv("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"))
+        base_url_edit.setText(initial_base_url)
         base_url_layout.addWidget(base_url_label)
         base_url_layout.addWidget(base_url_edit)
         base_url_label.setVisible(not remote_mode)
@@ -11000,12 +11618,13 @@ class VideoTranslatorGUI(QMainWindow):
 
         def update_provider_fields():
             p = provider_combo.currentData()
+            model_edit.setPlaceholderText("")
             is_ai = p != "google"
-            is_gemini = p == "gemini"
+            is_google_ai_studio = p == "google_ai_studio"
             is_openai = p == "openai"
             is_ollama = p == "ollama"
             is_google = p == "google"
-            _toggle_visible(key_section_widget, is_gemini or is_openai)
+            _toggle_visible(key_section_widget, is_google_ai_studio or is_openai)
             _toggle_visible(base_url_label, not remote_mode and is_ai)
             _toggle_visible(base_url_edit, not remote_mode and is_ai)
             _toggle_visible(test_btn, not remote_mode and is_ai)
@@ -11018,17 +11637,21 @@ class VideoTranslatorGUI(QMainWindow):
                 key_edit.clear()
                 model_edit.clear()
                 base_url_edit.clear()
-            elif is_gemini:
+            elif is_google_ai_studio:
                 model_label.setText("AI Model:")
-                if not base_url_edit.text().strip() or base_url_edit.text().strip() == "https://api.openai.com/v1/":
-                    base_url_edit.setText("https://generativelanguage.googleapis.com/v1beta/openai/")
+                key, model, base_url = _provider_values(p)
+                key_edit.setText(key)
+                model_edit.setText(model)
+                base_url_edit.setText(base_url or "https://generativelanguage.googleapis.com/v1beta/openai/")
                 if not model_edit.text().strip():
-                    model_edit.setText("gemma-4-31b-it")
-                provider_hint.setText("Get an API key at https://aistudio.google.com/apikey")
+                    model_edit.setText("gemini-2.5-flash")
+                provider_hint.setText("Use a Google AI Studio Gemini API key: https://aistudio.google.com/apikey")
             elif is_openai:
                 model_label.setText("AI Model:")
-                if not base_url_edit.text().strip() or base_url_edit.text().strip() == "https://generativelanguage.googleapis.com/v1beta/openai/":
-                    base_url_edit.setText("https://api.openai.com/v1/")
+                key, model, base_url = _provider_values(p)
+                key_edit.setText(key)
+                model_edit.setText(model)
+                base_url_edit.setText(base_url or "https://api.openai.com/v1/")
                 if not model_edit.text().strip():
                     model_edit.setText("gpt-4o-mini")
                 provider_hint.setText("Get an API key at https://platform.openai.com/api-keys")
@@ -11056,15 +11679,31 @@ class VideoTranslatorGUI(QMainWindow):
 
         def test_ai_connection():
             url = base_url_edit.text().strip()
-            key = key_edit.text().strip() or "ollama"
+            provider = provider_combo.currentData()
+            key = key_edit.text().strip() or ("ollama" if provider == "ollama" else "")
             model = model_edit.text().strip()
+            if not url:
+                test_status.setText("Enter a server URL first.")
+                return
+            if not key:
+                test_status.setText("Enter an API key first.")
+                return
+            if not model:
+                test_status.setText("Enter a model name first.")
+                return
             test_status.setText("Testing...")
             test_status.repaint()
             try:
                 from openai import OpenAI
-                client = OpenAI(api_key=key, base_url=url)
-                client.models.list()
-                test_status.setText(f"Connected. Model: {model}")
+                client = OpenAI(api_key=key, base_url=url, timeout=15.0)
+                # A tiny completion validates the endpoint, credential, and the
+                # selected model.  Some compatible APIs do not expose /models.
+                client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": "Reply with OK."}],
+                    max_tokens=8,
+                )
+                test_status.setText(f"Connected: {model}")
             except Exception as e:
                 test_status.setText(f"Failed: {e}")
 
@@ -11081,6 +11720,8 @@ class VideoTranslatorGUI(QMainWindow):
             _toggle_visible(whisper_combo, is_whisper)
             _toggle_visible(region_label, is_ocr)
             _toggle_visible(region_combo, is_ocr)
+            _toggle_visible(sampling_label, is_ocr)
+            _toggle_visible(sampling_combo, is_ocr)
             dialog.layout().invalidate()
             dialog.adjustSize()
 
@@ -11162,6 +11803,7 @@ class VideoTranslatorGUI(QMainWindow):
         new_whisper = str(whisper_combo.currentData() or "small").strip().lower()
         new_engine = str(engine_combo.currentData() or "sensevoice").strip().lower()
         new_ocr_region = str(region_combo.currentData() or "bottom").strip().lower()
+        new_ocr_sampling_fps = str(sampling_combo.currentData() or "auto").strip().lower()
         new_key = key_edit.text().strip()
         new_model = model_edit.text().strip()
         new_provider = str(provider_combo.currentData()).strip()
@@ -11170,9 +11812,12 @@ class VideoTranslatorGUI(QMainWindow):
         self.selected_whisper_model_name = new_whisper
         
         # Transcription engine settings (apply to all modes)
+        # The subtitle source is project-local.  Do not write it into .env,
+        # otherwise opening another project can inherit a stale OCR/Audio
+        # choice from an earlier session.
         _engine_updates = {
-            "TRANSCRIPTION_ENGINE": new_engine,
             "OCR_SUBTITLE_REGION": new_ocr_region,
+            "OCR_SAMPLING_FPS": new_ocr_sampling_fps,
         }
         
         # Write back to .env
@@ -11191,21 +11836,18 @@ class VideoTranslatorGUI(QMainWindow):
                 updates = {
                     "AI_POLISHER_PROVIDER": "google",
                     "OPENAI_PROVIDER": "google",
-                    "OPENAI_API_KEY": "",
-                    "OPENAI_MODEL": "",
-                    "OPENAI_BASE_URL": "",
                 }
-            elif new_provider == "gemini":
+            elif new_provider == "google_ai_studio":
                 updates = {
-                    "AI_POLISHER_PROVIDER": "gemini",
-                    "OPENAI_PROVIDER": "gemini",
-                    "OPENAI_API_KEY": new_key,
-                    "OPENAI_MODEL": new_model or "gemma-4-31b-it",
-                    "OPENAI_BASE_URL": new_base_url or "https://generativelanguage.googleapis.com/v1beta/openai/",
+                    "AI_POLISHER_PROVIDER": "google_ai_studio",
+                    "OPENAI_PROVIDER": "google_ai_studio",
+                    "GOOGLE_AI_STUDIO_API_KEY": new_key,
+                    "GOOGLE_AI_STUDIO_MODEL": new_model or "gemini-2.5-flash",
+                    "GOOGLE_AI_STUDIO_BASE_URL": new_base_url or "https://generativelanguage.googleapis.com/v1beta/openai/",
                 }
             elif new_provider == "ollama":
                 updates = {
-                    "AI_POLISHER_PROVIDER": "gemini",
+                    "AI_POLISHER_PROVIDER": "ollama",
                     "OPENAI_PROVIDER": "ollama",
                     "OPENAI_API_KEY": "ollama",
                     "OPENAI_MODEL": new_model,
@@ -11213,7 +11855,7 @@ class VideoTranslatorGUI(QMainWindow):
                 }
             else:
                 updates = {
-                    "AI_POLISHER_PROVIDER": "gemini",
+                    "AI_POLISHER_PROVIDER": "openai",
                     "OPENAI_PROVIDER": "openai",
                     "OPENAI_API_KEY": new_key,
                     "OPENAI_MODEL": new_model or "gpt-4o-mini",
@@ -11228,6 +11870,10 @@ class VideoTranslatorGUI(QMainWindow):
             match = re.match(r"^([^=]+)=.*", line)
             if match:
                 k = match.group(1).strip()
+                if k == "TRANSCRIPTION_ENGINE":
+                    # Legacy global cache: source selection now belongs to
+                    # the active project and must not survive here.
+                    continue
                 if k in updates:
                     new_env_lines.append(f"{k}={updates[k]}\n")
                     handled_keys.add(k)
@@ -11245,7 +11891,7 @@ class VideoTranslatorGUI(QMainWindow):
         for k, v in updates.items():
             os.environ[k] = v
 
-        self.update_speaker_diarization_availability()
+        self.set_project_transcription_engine(new_engine)
         self.save_user_settings()
         self._update_ocr_overlay()
         QMessageBox.information(self, "Success", "Settings saved and updated!")
@@ -11736,6 +12382,16 @@ class VideoTranslatorGUI(QMainWindow):
                 state.set_step_status("refine_translation", "pending")
                 self.project_service.save_project(state)
             self.log("[Translation] Re-translate requested; reusing the existing transcript.")
+        if target_stage == "translate":
+            # Translate is independent once TS1 exists.  Do not send this
+            # request through PrepareWorkflow: that workflow begins at audio
+            # extraction/transcription and can rerun OCR/ASR when a cache
+            # signature changes.
+            if not self.transcript_text.toPlainText().strip() and self.current_segments:
+                self.transcript_text.setText(self.format_to_srt(self.current_segments))
+            self.log("[Pipeline] Translate requested; using the completed transcript only.")
+            self.run_translation()
+            return
         if target_stage == "tts" and not has_translation:
             QMessageBox.information(self, "Step-by-Step", "Complete Translate before running Generate Voice / TTS.")
             return
@@ -12078,6 +12734,7 @@ class VideoTranslatorGUI(QMainWindow):
             "voice_thread",
             "_voice_sample_preview_thread",
             "transcription_thread",
+            "_alternate_range_transcription_worker",
             "translation_thread",
             "rewrite_translation_thread",
             "prepare_workflow_thread",

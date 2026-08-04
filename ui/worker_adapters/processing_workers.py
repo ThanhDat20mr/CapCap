@@ -76,6 +76,64 @@ class TranscriptionWorker(QThread):
             self.finished.emit([], details or str(exc))
 
 
+class AlternateRangeTranscriptionWorker(QThread):
+    """One-shot alternate-engine transcription for a timeline selection."""
+    # Do not shadow QThread.finished.  The native signal is needed to retain
+    # and safely dispose of the worker only after run() has actually exited.
+    completed = Signal(list, str)
+
+    def __init__(
+        self,
+        video_path,
+        start,
+        end,
+        engine_name,
+        model_path="",
+        language="auto",
+        *,
+        ocr_region="bottom",
+        ocr_fps=None,
+    ):
+        super().__init__()
+        self.video_path, self.start_time, self.end_time = video_path, float(start), float(end)
+        self.engine_name, self.model_path, self.language = engine_name, model_path, language
+        self.ocr_region = str(ocr_region or "bottom")
+        self.ocr_fps = float(ocr_fps) if ocr_fps is not None else None
+
+    def run(self):
+        temp_audio = ""
+        try:
+            engine = EngineRuntime()
+            if self.engine_name == "ocr":
+                segments = engine.transcribe_video_ocr(
+                    self.video_path,
+                    region=self.ocr_region,
+                    fps=self.ocr_fps,
+                    start_seconds=self.start_time,
+                    end_seconds=self.end_time,
+                )
+            else:
+                import tempfile
+                temp_audio = os.path.join(tempfile.gettempdir(), f"capcap_range_{int(self.start_time * 1000)}_{int(self.end_time * 1000)}.wav")
+                ffmpeg = bin_path("ffmpeg", "ffmpeg.exe")
+                subprocess.run([
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", str(self.start_time),
+                    "-t", str(max(0.1, self.end_time - self.start_time)), "-i", self.video_path,
+                    "-vn", "-ac", "1", "-ar", "16000", temp_audio,
+                ], check=True)
+                segments = engine.transcribe_audio(temp_audio, self.model_path, language=self.language)
+                for segment in segments or []:
+                    segment["start"] = float(segment.get("start", 0.0)) + self.start_time
+                    segment["end"] = float(segment.get("end", 0.0)) + self.start_time
+            self.completed.emit(list(segments or []), "")
+        except Exception as exc:
+            self.completed.emit([], str(exc))
+        finally:
+            if temp_audio:
+                try: os.remove(temp_audio)
+                except OSError: pass
+
+
 class TranslationWorker(QThread):
     finished = Signal(str, str, str)
 

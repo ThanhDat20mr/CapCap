@@ -28,6 +28,7 @@ class TrackLabelBar(QFrame):
     blurToggled = Signal(str, bool)  # track_name, is_enabled
     logoToggled = Signal(str, bool)  # track_name, is_shown
     maskToggled = Signal(str, bool)  # track_name, is_shown
+    lockToggled = Signal(str, bool)  # track_name, is_locked
 
     TRACK_HEADER_W = 132
     RULER_HEIGHT = 30
@@ -135,6 +136,14 @@ class TrackLabelBar(QFrame):
             if 0 <= idx < len(self._track_names):
                 name = self._track_names[idx]
                 prefix = name.split(" ")[0] if name else ""
+                if event.position().x() >= self.TRACK_HEADER_W - 28:
+                    new_locked = not bool(self._track_locked[idx] if idx < len(self._track_locked) else False)
+                    if idx < len(self._track_locked):
+                        self._track_locked[idx] = new_locked
+                    self.update()
+                    self.lockToggled.emit(name, new_locked)
+                    event.accept()
+                    return
                 if prefix in MUTE_PREFIXES:
                     new_muted = not self._track_muted[idx]
                     self._track_muted[idx] = new_muted
@@ -188,9 +197,11 @@ class TrackLabelBar(QFrame):
         is_clickable = False
         if 0 <= idx < len(self._track_names):
             prefix = self._track_names[idx].split(" ")[0] if self._track_names[idx] else ""
-            if (prefix in MUTE_PREFIXES or prefix in BLUR_PREFIXES
-                    or prefix in LOGO_PREFIXES or prefix in MASK_PREFIXES):
-                is_clickable = True
+            is_clickable = bool(prefix)
+        if is_clickable and event.position().x() >= self.TRACK_HEADER_W - 28:
+            self.setToolTip("Unlock layer" if self._track_locked[idx] else "Lock layer")
+        else:
+            self.setToolTip("")
         self.setCursor(Qt.PointingHandCursor if is_clickable else Qt.ArrowCursor)
 
     def leaveEvent(self, event):
@@ -352,11 +363,13 @@ class TrackLabelBar(QFrame):
 
             # (ON/OFF label removed - blur state is shown by track dimming)
 
-            # Lock indicator for locked tracks
-            if i < len(self._track_locked) and self._track_locked[i]:
-                painter.setPen(QPen(QColor("#e04040"), 0))
+            # Per-track lock control. It affects only this editable track,
+            # never preview visibility or export.
+            if prefix:
+                locked = bool(self._track_locked[i] if i < len(self._track_locked) else False)
+                painter.setPen(QPen(QColor("#e04040") if locked else QColor("#8394aa"), 0))
                 painter.drawText(self.TRACK_HEADER_W - 24, y + 4, 20, h - 8,
-                                 Qt.AlignRight | Qt.AlignVCenter, "\U0001f512")
+                                 Qt.AlignRight | Qt.AlignVCenter, "🔒" if locked else "🔓")
 
             y += h
 

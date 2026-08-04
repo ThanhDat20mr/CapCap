@@ -417,7 +417,13 @@ class PrepareWorkflow:
                 if not raw_segments:
                     project_state.set_step_status("transcribe", "failed")
                     self.project_service.save_project(project_state)
-                    raise RuntimeError("OCR transcription failed.")
+                    message = (
+                        f"No readable text was detected in the OCR subtitle region ({ocr_region}). "
+                        "This video may have text outside that region. In Settings, change Subtitle position "
+                        "to Full frame or Top, then run Transcript again."
+                    )
+                    print(f"[OCR] {message}")
+                    raise RuntimeError(message)
                 segment_models = self.segment_service.transcript_dicts_to_models(raw_segments)
                 project_state.set_setting("ocr_transcription_signature", ocr_signature)
             transcribe_elapsed = time.perf_counter() - transcribe_started
