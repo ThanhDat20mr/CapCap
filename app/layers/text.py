@@ -7,6 +7,12 @@ from app.layers.base import BaseLayer, LayerType
 from app.layers.transform import Transform
 
 
+# Shared Text-layer preview/export calibration.
+TEXT_LAYER_PADDING_X = 6
+TEXT_LAYER_PADDING_Y = 5
+TEXT_LAYER_EXPORT_SCALE = 0.85
+
+
 @dataclass
 class TextLayer(BaseLayer):
     type: LayerType = field(default=LayerType.TEXT, init=False)

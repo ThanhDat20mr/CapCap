@@ -496,9 +496,13 @@ class PreviewController:
         if not out_path:
             video_path = self.gui.video_path_edit.text().strip()
             video_name = os.path.splitext(os.path.basename(video_path or "subtitle"))[0]
-            out_dir = self.gui.srt_output_folder_edit.text().strip() or os.path.join(self.gui.workspace_root, "output")
-            os.makedirs(out_dir, exist_ok=True)
-            out_path = os.path.join(out_dir, f"{video_name}_vi.srt")
+            # Normal video export must not place subtitle sidecars beside the
+            # chosen video. Keep this generated SRT in the project export
+            # workspace; explicit subtitle export remains available through
+            # the dedicated subtitle download action.
+            out_path = self.gui.get_project_temp_path(
+                "export", f"{video_name}_vi.srt", create_parent=True
+            )
 
         from subtitle_builder import generate_srt
 

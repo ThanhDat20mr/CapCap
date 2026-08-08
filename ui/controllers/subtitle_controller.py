@@ -120,9 +120,8 @@ class SubtitleController:
         video_path = self.gui.video_path_edit.text()
         if video_path:
             file_basename = os.path.splitext(os.path.basename(video_path))[0]
-            out_folder = self.gui.srt_output_folder_edit.text()
-            if not os.path.exists(out_folder):
-                os.makedirs(out_folder, exist_ok=True)
+            out_folder = self.gui.get_project_temp_dir("subtitle")
+            os.makedirs(out_folder, exist_ok=True)
             out_path = os.path.join(out_folder, file_basename + "_original.srt")
             from subtitle_builder import generate_srt
 
@@ -209,7 +208,7 @@ class SubtitleController:
         video_path = self.gui.video_path_edit.text()
         if video_path:
             file_basename = os.path.splitext(os.path.basename(video_path))[0]
-            out_folder = self.gui.srt_output_folder_edit.text().strip() or os.path.join(os.getcwd(), "output")
+            out_folder = self.gui.get_project_temp_dir("subtitle")
             os.makedirs(out_folder, exist_ok=True)
             out_path = os.path.join(out_folder, file_basename + "_vi.srt")
             with open(out_path, "w", encoding="utf-8") as handle:
@@ -480,7 +479,7 @@ class SubtitleController:
             video_path = self.gui.video_path_edit.text().strip()
             if video_path:
                 file_basename = os.path.splitext(os.path.basename(video_path))[0]
-                out_folder = self.gui.srt_output_folder_edit.text().strip() or os.path.join(os.getcwd(), "output")
+                out_folder = self.gui.get_project_temp_dir("subtitle")
                 os.makedirs(out_folder, exist_ok=True)
                 out_path = os.path.join(out_folder, file_basename + "_vi.srt")
         if out_path:
@@ -686,11 +685,27 @@ class SubtitleController:
                         "text": edited_texts[idx],
                         "words": list(base.get("words", [])),
                         "manual_highlights": list(base.get("manual_highlights", [])),
+                        # SRT has no diarization fields.  Keep the existing
+                        # speaker assignment when applying edited/imported
+                        # translated text so timeline colors and speaker
+                        # controls remain stable.
+                        "speaker": str(base.get("speaker", "") or ""),
                     }
                     for idx, base in enumerate(base_segments)
                 ]
         if not segments:
             segments = self.gui.parse_srt_to_segments(srt_text)
+        # Imported/edited SRT files cannot carry diarization metadata.  When
+        # cue order is unchanged, restore the speaker assignment from the
+        # existing project regardless of the timeline-preserve preference.
+        # This keeps speaker colors and per-speaker voice routing intact.
+        if segments:
+            metadata_base = self.gui.current_translated_segments or self.gui.current_segments
+            if metadata_base and len(metadata_base) == len(segments):
+                for idx, segment in enumerate(segments):
+                    speaker = str(metadata_base[idx].get("speaker", "") or "").strip()
+                    if speaker:
+                        segment["speaker"] = speaker
         if not segments:
             if show_message:
                 QMessageBox.warning(

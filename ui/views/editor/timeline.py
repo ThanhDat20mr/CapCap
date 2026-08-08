@@ -77,6 +77,9 @@ class EditorTimeline(QGraphicsView):
         self._drag_state = None
         self._hover_layer_id: str = ""
         self._selected_layer_id: str = ""
+        # Playback may highlight the current subtitle, but a subtitle that
+        # the user explicitly clicks or edits must remain selected.
+        self._manual_subtitle_selection = False
         self._highlighted_speaker: str = ""
         # Presentation-only track hiding. Never write this to Track.visible:
         # preview and export must continue using the real project visibility.
@@ -176,7 +179,9 @@ class EditorTimeline(QGraphicsView):
 
         self._segment_indices.clear()
         for t in self._timeline.tracks:
-            if t.type == LayerType.DUB_SUBTITLE:
+            # Older/restored projects can keep TS1 as a regular Subtitle
+            # track. Both subtitle track types use the same segment metadata.
+            if self._is_subtitle_track(t):
                 for layer in t.layers:
                     # Prefer the original segment index stored in metadata
                     # (set by sync_segments_to_dub_subtitle_layers). Falls
@@ -199,6 +204,21 @@ class EditorTimeline(QGraphicsView):
 
         self._ensure_tracks_populated()
         self._redraw()
+
+    def segment_index_for_layer_id(self, layer_id: str) -> int:
+        """Return the canonical subtitle index for a timeline layer.
+
+        Prefer the current layer metadata over the cache so a selection stays
+        correct while TS1 is being rebuilt after an edit or project restore.
+        """
+        track, layer = self._find_layer_by_id(str(layer_id or ""))
+        if layer is not None and self._is_subtitle_track(track):
+            metadata = getattr(layer, "metadata", {}) or {}
+            try:
+                return int(metadata.get("_seg_index", getattr(layer, "z_index", -1)))
+            except (TypeError, ValueError):
+                pass
+        return int(self._segment_indices.get(str(layer_id or ""), -1))
 
     def set_highlighted_speaker(self, speaker: str = "") -> None:
         self._highlighted_speaker = str(speaker or "").strip()
@@ -306,10 +326,13 @@ class EditorTimeline(QGraphicsView):
             # inspector shows the correct card.
             if current_track is None:
                 self._selected_layer_id = ""
+                self._manual_subtitle_selection = False
             elif current_track.type not in (
                 LayerType.SUBTITLE,
                 LayerType.DUB_SUBTITLE,
             ):
+                return
+            elif self._manual_subtitle_selection:
                 return
         for lid, idx in self._segment_indices.items():
             if idx == index:
@@ -556,6 +579,10 @@ class EditorTimeline(QGraphicsView):
 
     def select_layer(self, layer_id: str) -> None:
         self._selected_layer_id = layer_id
+        track, _layer = self._find_layer_by_id(layer_id)
+        self._manual_subtitle_selection = bool(
+            layer_id and track is not None and self._is_subtitle_track(track)
+        )
         self.viewport().update()
 
     def _redraw(self) -> None:
@@ -698,7 +725,7 @@ class EditorTimeline(QGraphicsView):
             return all(end <= other_start or start >= other_end
                        for other_start, other_end in row_intervals[row_index])
 
-        def assign(layer, preferred=None):
+        def assign(layer, preferred=None, *, force_preferred=False):
             try:
                 start = float(getattr(layer, "start", 0.0))
                 end = float(getattr(layer, "end", 0.0))
@@ -717,7 +744,7 @@ class EditorTimeline(QGraphicsView):
             if preferred is not None and preferred >= 0:
                 while len(row_intervals) <= preferred:
                     row_intervals.append([])
-                if can_use(preferred, start, end):
+                if force_preferred or can_use(preferred, start, end):
                     row_index = preferred
                 else:
                     row_index = -1
@@ -734,8 +761,15 @@ class EditorTimeline(QGraphicsView):
         ordered = sorted(visible_layers, key=lambda layer: float(getattr(layer, "start", 0.0)))
         active_drag = getattr(self, "_drag_state", None) or {}
         selected_id = str(active_drag.get("layer_id", "") or "")
-        # Existing, non-selected layers retain their old rows first. The
-        # selected layer (or a newly inserted layer) adapts to collisions.
+        pinned_row = -1
+        if str(active_drag.get("track_id", "") or "") == str(track_id):
+            try:
+                pinned_row = int(active_drag.get("row_index", -1))
+            except (TypeError, ValueError):
+                pinned_row = -1
+        # Existing, non-selected layers retain their old rows first. A layer
+        # being edited keeps the row it had when the drag began; collisions
+        # are clamped by the drag code instead of moving it to another row.
         stable = [layer for layer in ordered
                   if str(getattr(layer, "id", "")) in previous
                   and str(getattr(layer, "id", "")) != selected_id]
@@ -743,22 +777,70 @@ class EditorTimeline(QGraphicsView):
         for layer in stable:
             assign(layer, previous.get(str(getattr(layer, "id", ""))))
         for layer in adaptive:
-            assign(layer, previous.get(str(getattr(layer, "id", "")))
-                   if str(getattr(layer, "id", "")) != selected_id else None)
+            is_selected = str(getattr(layer, "id", "")) == selected_id
+            assign(
+                layer,
+                pinned_row if is_selected and pinned_row >= 0 else previous.get(str(getattr(layer, "id", ""))),
+                force_preferred=bool(is_selected and pinned_row >= 0),
+            )
         layer_rows = [layer_rows_by_id.get(str(getattr(layer, "id", "")), 0) for layer in ordered]
         self._overlap_row_assignments[str(track_id)] = layer_rows_by_id
         return layer_rows, max(1, len(row_intervals))
 
-    def _clamp_subtitle_resize(self, track, layer, edge: str, value: float) -> float:
-        """Keep an edited subtitle cue inside its current row's neighbors."""
+    def _drag_pinned_row(self, track, layer):
+        """Return the subtitle row captured at drag start, if applicable."""
+        drag = getattr(self, "_drag_state", None) or {}
+        if (
+            str(drag.get("layer_id", "") or "") != str(getattr(layer, "id", "") or "")
+            or str(drag.get("track_id", "") or "") != str(getattr(track, "id", "") or "")
+        ):
+            return None
+        try:
+            row = int(drag.get("row_index", -1))
+        except (TypeError, ValueError):
+            return None
+        return row if row >= 0 else None
+
+    def _layer_row_index(self, track, layer) -> int:
+        """Resolve the current overlap row before an edit begins."""
         if track is None or not self._should_overlap_stack(track):
-            return value
+            return 0
         visible = [item for item in track.layers if item.visible]
         row_map = self._overlap_row_assignments.get(str(track.id), {})
         if str(getattr(layer, "id", "")) not in row_map:
             self._compute_overlap_rows(visible, track_id=track.id)
             row_map = self._overlap_row_assignments.get(str(track.id), {})
-        row = row_map.get(str(getattr(layer, "id", "")))
+        try:
+            return max(0, int(row_map.get(str(getattr(layer, "id", "")), 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _clamp_layer_resize(self, track, layer, edge: str, value: float) -> float:
+        """Keep an edited layer inside its current row's neighbors.
+
+        Resizing is intentionally local: the edited layer stops at the
+        neighboring layer boundary and no other layer is moved, trimmed, or
+        reassigned to another row.
+        """
+        if track is None:
+            return value
+        visible = [item for item in track.layers if item.visible]
+        row_map = self._overlap_row_assignments.get(str(track.id), {})
+        if self._should_overlap_stack(track):
+            if str(getattr(layer, "id", "")) not in row_map:
+                self._compute_overlap_rows(visible, track_id=track.id)
+                row_map = self._overlap_row_assignments.get(str(track.id), {})
+        elif self._uses_layer_rows(track):
+            # Each overlay row is independent, so it has no same-row
+            # neighbors to constrain against.
+            return value
+        else:
+            # A normal single-row track (including legacy layer tracks) uses
+            # one collision row for all visible layers.
+            row_map = {str(getattr(item, "id", "")): 0 for item in visible}
+        row = self._drag_pinned_row(track, layer)
+        if row is None:
+            row = row_map.get(str(getattr(layer, "id", "")))
         if row is None:
             return value
         neighbors = [item for item in visible
@@ -776,6 +858,44 @@ class EditorTimeline(QGraphicsView):
             default=self._duration,
         )
         return min(value, right_boundary)
+
+    def _clamp_subtitle_resize(self, track, layer, edge: str, value: float) -> float:
+        """Backward-compatible alias for subtitle timing callers."""
+        return self._clamp_layer_resize(track, layer, edge, value)
+
+    def _clamp_layer_move(self, track, layer, start: float, end: float) -> float:
+        """Clamp a body drag without moving any neighboring layer."""
+        if track is None:
+            return start
+        visible = [item for item in track.layers if item.visible and item is not layer]
+        row_map = self._overlap_row_assignments.get(str(track.id), {})
+        if self._should_overlap_stack(track):
+            if str(getattr(layer, "id", "")) not in row_map:
+                self._compute_overlap_rows([*visible, layer], track_id=track.id)
+                row_map = self._overlap_row_assignments.get(str(track.id), {})
+            row = self._drag_pinned_row(track, layer)
+            if row is None:
+                row = row_map.get(str(getattr(layer, "id", "")))
+            visible = [item for item in visible
+                       if row_map.get(str(getattr(item, "id", ""))) == row]
+        elif self._uses_layer_rows(track):
+            return start
+        else:
+            # Single-row tracks constrain against every visible neighbor.
+            pass
+        duration = max(self.MIN_DUR, end - start)
+        original_start = float(getattr(layer, "start", start) or start)
+        original_end = float(getattr(layer, "end", end) or end)
+        lower = 0.0
+        upper = self._duration - duration
+        for item in visible:
+            item_start = float(getattr(item, "start", 0.0) or 0.0)
+            item_end = float(getattr(item, "end", item_start) or item_start)
+            if item_end <= original_start + 0.001:
+                lower = max(lower, item_end)
+            elif item_start >= original_end - 0.001:
+                upper = min(upper, item_start - duration)
+        return max(lower, min(start, upper))
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -1387,6 +1507,10 @@ class EditorTimeline(QGraphicsView):
                 t = self._pos_to_time(pos.x(), scroll_x)
                 if t >= 0:
                     if not self._selection_mode:
+                        # A ruler scrub is explicit playback navigation, so
+                        # return control of the subtitle highlight to the
+                        # playhead after a previous manual segment edit.
+                        self._manual_subtitle_selection = False
                         self.set_playhead(t)
                         self.seekRequested.emit(t)
                         self.seekRequestedMs.emit(int(t * 1000))
@@ -1429,14 +1553,17 @@ class EditorTimeline(QGraphicsView):
                     self._drag_state = {
                         "type": f"resize_{edge}",
                         "layer_id": lid,
+                        "track_id": str(getattr(track, "id", "") or ""),
+                        "row_index": self._layer_row_index(track, layer),
                         "start_time": float(layer.start),
                         "end_time": float(effective_end),
                         "layer_start_x": float(self.CONTENT_LEFT_PAD + int(layer.start * self.pixels_per_second) - scroll_x),
                     }
                     self._selected_layer_id = lid
                     self.layerSelected.emit(lid)
-                    idx = self._segment_indices.get(lid, -1)
+                    idx = self.segment_index_for_layer_id(lid)
                     if idx >= 0:
+                        self._manual_subtitle_selection = True
                         self.segmentTimingEditStarted.emit(idx, float(layer.start), float(effective_end))
                         self.segmentSelected.emit(idx)
                     self.viewport().update()
@@ -1444,16 +1571,37 @@ class EditorTimeline(QGraphicsView):
                     return
 
             elif lid:
-                track, _layer = self._find_layer_by_id(lid)
+                track, layer = self._find_layer_by_id(lid)
                 if bool(getattr(track, "locked", False)):
+                    event.accept()
+                    return
+                if bool(getattr(layer, "locked", False)):
+                    self._selected_layer_id = lid
+                    self.layerSelected.emit(lid)
+                    self.viewport().update()
                     event.accept()
                     return
                 self._selected_layer_id = lid
                 self.layerSelected.emit(lid)
-                idx = self._segment_indices.get(lid, -1)
+                idx = self.segment_index_for_layer_id(lid)
                 if idx >= 0:
+                    self._manual_subtitle_selection = True
+                    self.segmentTimingEditStarted.emit(
+                        idx, float(layer.start), float(self._get_effective_layer_end(layer))
+                    )
                     self.segmentSelected.emit(idx)
+                self._drag_state = {
+                    "type": "move",
+                    "layer_id": lid,
+                    "track_id": str(getattr(track, "id", "") or ""),
+                    "row_index": self._layer_row_index(track, layer),
+                    "anchor_time": self._pos_to_time(pos.x(), scroll_x),
+                    "start_time": float(layer.start),
+                    "end_time": float(self._get_effective_layer_end(layer)),
+                }
                 self.viewport().update()
+                event.accept()
+                return
 
         super().mousePressEvent(event)
 
@@ -1476,12 +1624,12 @@ class EditorTimeline(QGraphicsView):
             self._drag_state = None
             self.setCursor(Qt.ArrowCursor)
             lid = drag["layer_id"]
-            _, layer = self._find_layer_by_id(lid)
-            if layer:
+            track, layer = self._find_layer_by_id(lid)
+            if layer and str(getattr(track, "id", "") or "") == str(drag.get("track_id", "") or ""):
                 start = float(layer.start)
                 end = float(self._get_effective_layer_end(layer))
                 self.layerTimingChanged.emit(lid, start, end)
-                idx = self._segment_indices.get(lid, -1)
+                idx = self.segment_index_for_layer_id(lid)
                 if idx >= 0:
                     self.segmentTimingChanged.emit(idx, start, end)
             self.viewport().update()
@@ -1496,17 +1644,27 @@ class EditorTimeline(QGraphicsView):
             t = self._pos_to_time(pos.x(), scroll_x)
             t = max(0.0, min(t, self._duration))
             track, layer = self._find_layer_by_id(drag["layer_id"])
-            if layer:
-                if drag["type"] == "resize_left":
+            if layer and str(getattr(track, "id", "") or "") == str(drag.get("track_id", "") or ""):
+                if drag["type"] == "move":
+                    delta = t - float(drag["anchor_time"])
+                    original_start = float(drag["start_time"])
+                    original_end = float(drag["end_time"])
+                    proposed_start = original_start + delta
+                    new_start = self._clamp_layer_move(
+                        track, layer, proposed_start, proposed_start + (original_end - original_start)
+                    )
+                    layer.start = new_start
+                    layer.end = new_start + (original_end - original_start)
+                elif drag["type"] == "resize_left":
                     new_start = min(t, drag["end_time"] - self.MIN_DUR)
                     new_start = max(0.0, new_start)
-                    new_start = self._clamp_subtitle_resize(track, layer, "left", new_start)
+                    new_start = self._clamp_layer_resize(track, layer, "left", new_start)
                     new_start = min(new_start, drag["end_time"] - self.MIN_DUR)
                     layer.start = new_start
                 elif drag["type"] == "resize_right":
                     new_end = max(t, drag["start_time"] + self.MIN_DUR)
                     new_end = min(new_end, self._duration)
-                    new_end = self._clamp_subtitle_resize(track, layer, "right", new_end)
+                    new_end = self._clamp_layer_resize(track, layer, "right", new_end)
                     new_end = max(new_end, drag["start_time"] + self.MIN_DUR)
                     layer.end = new_end
                 # Timing is being edited in place, so the cached overlap
@@ -1543,6 +1701,8 @@ class EditorTimeline(QGraphicsView):
         edge, lid = self._hit_test_edge(pos, scroll_x, scroll_y)
         if lid and edge in ("left", "right"):
             self.setCursor(Qt.SizeHorCursor)
+        elif lid and edge == "body":
+            self.setCursor(Qt.SizeAllCursor)
         else:
             self.setCursor(Qt.ArrowCursor)
         super().mouseMoveEvent(event)

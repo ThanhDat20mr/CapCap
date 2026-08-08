@@ -60,7 +60,7 @@ class OcrRegionOverlay(QWidget):
     def __init__(self):
         # MPV owns a native child surface. Keep this editor above that
         # surface even when OCR is invoked temporarily from audio mode.
-        super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        super().__init__(None, Qt.FramelessWindowHint | Qt.Tool)
         self.setAutoFillBackground(False)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
@@ -167,13 +167,7 @@ class OcrRegionOverlay(QWidget):
     def eventFilter(self, obj, event):
         if obj is self._main_window:
             if event.type() == QtCore.QEvent.WindowDeactivate:
-                # In alternate range transcription the editor is deliberately
-                # shown as a non-activating top-level tool window above mpv.
-                # Qt can still emit a transient WindowDeactivate while it is
-                # raised; hiding here made the editor disappear immediately
-                # whenever the project source was Whisper/SenseVoice.
-                if not bool(getattr(self._main_window, "_alternate_ocr_range_pending", None)):
-                    self.hide()
+                self.hide()
             elif event.type() in (QtCore.QEvent.WindowActivate, QtCore.QEvent.Resize, QtCore.QEvent.Move, QtCore.QEvent.Show):
                 if self._is_requested_visible():
                     self.sync_to_view()
@@ -379,7 +373,7 @@ class OcrTranslatorOverlay(QWidget):
         # mpv owns a native child window, so this must be a separate tool
         # window rather than a child QWidget.  Keep it non-activating so
         # showing it cannot immediately trigger WindowDeactivate and hide it.
-        super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        super().__init__(None, Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
@@ -425,11 +419,7 @@ class OcrTranslatorOverlay(QWidget):
     def eventFilter(self, obj, event):
         if obj is self._main_window:
             if event.type() == QtCore.QEvent.WindowDeactivate:
-                # The alternate range-OCR editor is a top-level tool window.
-                # Showing it can briefly deactivate the main window; do not
-                # immediately hide the region editor in that case.
-                if not bool(getattr(self._main_window, "_alternate_ocr_range_pending", None)):
-                    self.hide()
+                self.hide()
             elif event.type() in (QtCore.QEvent.WindowActivate, QtCore.QEvent.Resize, QtCore.QEvent.Move, QtCore.QEvent.Show):
                 if bool(getattr(self._main_window, "_ocr_translator_active", False)):
                     self.sync_to_view()

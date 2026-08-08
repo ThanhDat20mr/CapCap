@@ -197,6 +197,7 @@ class ExportWorkflow:
             raise RuntimeError("Failed to burn subtitles into the output video.")
 
     def _extract_overlay_layers(self, state):
+        from app.layers.text import TEXT_LAYER_EXPORT_SCALE
         """Extract timed visual layers from project state for export."""
         mask_regions = []
         logo_layers = []
@@ -326,7 +327,7 @@ class ExportWorkflow:
                                 # the logical source value in the project,
                                 # then apply the calibration only to the ASS
                                 # export size so both views match visually.
-                                "font_size": max(1, int(round(float(layer.get("font_size", 60) or 60) * 0.85))),
+                                "font_size": max(1, int(round(float(layer.get("font_size", 60) or 60) * TEXT_LAYER_EXPORT_SCALE))),
                                     "font_color": str(layer.get("font_color", "#FFFFFF") or "#FFFFFF"),
                                     "background_color": str(layer.get("background_color", "") or ""),
                                     "background_opacity": max(0.0, min(1.0, float(layer.get("background_opacity", 0.5) or 0.0))),
@@ -389,6 +390,7 @@ class ExportWorkflow:
 
     def _build_text_layer_ass(self, ass_path: str, text_layers, temp_dir: str = "", width=None, height=None) -> str:
         """Append editor TextLayer events to a disposable ASS file for export."""
+        from app.layers.text import TEXT_LAYER_PADDING_X
         if not text_layers:
             return ass_path
         try:
@@ -415,7 +417,7 @@ class ExportWorkflow:
                 # Keep this field order exactly aligned with the ASS
                 # Format line (including StrikeOut). A shifted style record
                 # can make libass reject the whole subtitle style section.
-                f"&H000000FF,{self._ass_color_with_opacity(layer['background_color'], layer.get('background_opacity', 0.5)) if layer.get('background_color') else '&H00000000'},{self._ass_color_with_opacity(layer['background_color'], layer.get('background_opacity', 0.5)) if layer.get('background_color') else '&H00000000'},{ -1 if layer['font_bold'] else 0},0,0,0,100,100,0,0,{3 if layer.get('background_color') else 1},3,0,5,0,0,0,0"
+                f"&H000000FF,{self._ass_color_with_opacity(layer['background_color'], layer.get('background_opacity', 0.5)) if layer.get('background_color') else '&H00000000'},{self._ass_color_with_opacity(layer['background_color'], layer.get('background_opacity', 0.5)) if layer.get('background_color') else '&H00000000'},{ -1 if layer['font_bold'] else 0},0,0,0,100,100,0,0,{3 if layer.get('background_color') else 1},{TEXT_LAYER_PADDING_X if layer.get('background_color') else 0},0,5,0,0,0,0"
             )
             text = str(layer["text"]).replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\r\n", "\n").replace("\n", "\\N")
             start, end = float(layer["start"]), float(layer["end"])

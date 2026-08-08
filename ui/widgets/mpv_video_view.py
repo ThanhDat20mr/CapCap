@@ -1140,11 +1140,13 @@ class _TextLayerOverlayWindow(QWidget):
         # Match subtitle rendering: its size is a pixel size on the scaled
         # preview canvas, not a Qt point size (which is DPI-dependent and
         # visibly larger for the same numeric value).
+        from app.layers.text import TEXT_LAYER_PADDING_X, TEXT_LAYER_PADDING_Y
         font = QFont(str(item.get("font_name", "Arial")))
         font.setPixelSize(max(1, int(item.get("font_size", 60))))
         font.setBold(bool(item.get("font_bold", False)))
         metrics = QFontMetrics(font); lines = str(item.get("text", " ")).splitlines() or [" "]
-        width, height = max(metrics.horizontalAdvance(line) for line in lines) + 12, metrics.height() * len(lines) + 10
+        width = max(metrics.horizontalAdvance(line) for line in lines) + TEXT_LAYER_PADDING_X * 2
+        height = metrics.height() * len(lines) + TEXT_LAYER_PADDING_Y * 2
         return QRectF(float(item.get("x", .5)) * self.width() - width / 2, float(item.get("y", .5)) * self.height() - height / 2, width, height), font, metrics, lines
     def paintEvent(self, event):
         painter = QPainter(self); painter.setRenderHint(QPainter.TextAntialiasing)

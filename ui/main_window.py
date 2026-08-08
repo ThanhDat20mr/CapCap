@@ -5991,7 +5991,7 @@ class VideoTranslatorGUI(QMainWindow):
         """Show subtitle inspector and select the matching segment."""
         self._switch_inspector("subtitle")
         if hasattr(self, "timeline") and self.timeline:
-            idx = self.timeline._segment_indices.get(layer_id, -1)
+            idx = self.timeline.segment_index_for_layer_id(layer_id)
             if idx >= 0:
                 self.set_selected_segment_index(idx, sync_ui=True)
 
@@ -5999,7 +5999,7 @@ class VideoTranslatorGUI(QMainWindow):
         """Show the inspector for a dub subtitle layer."""
         self._switch_inspector("subtitle")
         if hasattr(self, "timeline") and self.timeline:
-            idx = self.timeline._segment_indices.get(layer_id, -1)
+            idx = self.timeline.segment_index_for_layer_id(layer_id)
             if idx >= 0:
                 self.set_selected_segment_index(idx, sync_ui=True)
 
@@ -6347,6 +6347,7 @@ class VideoTranslatorGUI(QMainWindow):
     def _refresh_text_layer_preview(self, active_id=""):
         if not hasattr(self, "video_view") or not hasattr(self.video_view, "set_text_layers"):
             return
+        from app.layers.text import TEXT_LAYER_EXPORT_SCALE
         # Use the same source-to-preview calibration as the editable
         # subtitle overlay. TextLayer.font_size is authored at source-video
         # scale (60 px at 100%), while QFont draws in preview pixels.
@@ -6355,7 +6356,7 @@ class VideoTranslatorGUI(QMainWindow):
             _render_w, render_h = self._subtitle_render_dimensions()
         preview_rect = self.video_view.get_preview_canvas_rect()
         preview_scale = max(1.0, float(preview_rect.height() or self.video_view.height() or 1.0)) / max(1, render_h)
-        preview_text_scale = preview_scale * 0.85
+        preview_text_scale = preview_scale * TEXT_LAYER_EXPORT_SCALE
         items = []
         if not bool(getattr(self, "_text_track_preview_visible", True)):
             self.video_view.set_text_layers([], active_id or getattr(self.timeline, "_selected_layer_id", ""))
@@ -8507,7 +8508,16 @@ class VideoTranslatorGUI(QMainWindow):
                     if layer_type == "blur":
                         try:
                             overlay = getattr(self.video_view, "blur_overlay", None)
-                            if overlay is not None and 0 <= layer_idx < len(overlay._regions):
+                            # A split BlurLayer can share one preview region
+                            # with its sibling pieces. Only remove by index
+                            # when preview regions and timeline layers are
+                            # still one-to-one; otherwise deleting one split
+                            # piece would remove the surviving blur region.
+                            if (
+                                overlay is not None
+                                and len(overlay._regions) == len(track.layers)
+                                and 0 <= layer_idx < len(overlay._regions)
+                            ):
                                 overlay._regions.pop(layer_idx)
                                 overlay._active_index = min(
                                     layer_idx, len(overlay._regions) - 1
@@ -8535,6 +8545,8 @@ class VideoTranslatorGUI(QMainWindow):
                     if layer_type == "blur":
                         try:
                             regions = self._current_blur_regions_payload() if hasattr(self, "_current_blur_regions_payload") else []
+                            if hasattr(self.video_view, "set_blur_regions_normalized"):
+                                self.video_view.set_blur_regions_normalized(regions)
                             if hasattr(self.timeline, "sync_blur_regions"):
                                 self.timeline.sync_blur_regions(regions)
                             if hasattr(self, "apply_preview_blur_region"):
@@ -8718,8 +8730,13 @@ class VideoTranslatorGUI(QMainWindow):
         # list. Otherwise it can retain deleted cues and overwrite the fresh
         # canonical subtitle state on the next redraw.
         self._single_line_split_cache = None
-        self.set_selected_segment_index(index, sync_ui=True)
         self.apply_segments_to_timeline()
+        # Rebuilding TS1 rehydrates its layers and can briefly select the
+        # first cue while the preview refreshes. Restore the cue that was
+        # actually edited only after the rebuild has completed.
+        self.set_selected_segment_index(index, sync_ui=True)
+        if hasattr(self, "timeline"):
+            self.timeline.set_active_segment_index(index)
         self.persist_current_timeline_project_data()
         self.schedule_live_subtitle_preview_refresh()
         self.refresh_ui_state()
@@ -9700,6 +9717,50 @@ class VideoTranslatorGUI(QMainWindow):
                 except (TypeError, ValueError):
                     entry["pixelate_size"] = 12
             regions.append(entry)
+        # Preview rectangles store geometry only. Preserve timing and per-layer
+        # style from B1 whenever its layers correspond one-to-one with those
+        # rectangles. This is essential after splitting: a blur piece remains
+        # an independent timed layer instead of being rebuilt as a full-video
+        # region by the preview-to-timeline sync.
+        blur_layers = []
+        timeline_model = getattr(getattr(self, "timeline", None), "_timeline", None)
+        for track in list(getattr(timeline_model, "tracks", []) or []):
+            if str(getattr(track, "name", "") or "") == "B1":
+                blur_layers = list(getattr(track, "layers", []) or [])
+                break
+        if blur_layers and len(blur_layers) != len(regions):
+            # A split layer can produce several timeline clips that share
+            # one original preview rectangle. In that case the timeline is
+            # authoritative: expand its independent clips back into payload
+            # entries rather than collapsing them to the single rectangle.
+            regions = []
+            for layer in blur_layers:
+                try:
+                    regions.append({
+                        "x": round(float(getattr(layer, "position_x", 0.0) or 0.0), 6),
+                        "y": round(float(getattr(layer, "position_y", 0.0) or 0.0), 6),
+                        "width": round(float(getattr(layer, "width", 0.0) or 0.0), 6),
+                        "height": round(float(getattr(layer, "height", 0.0) or 0.0), 6),
+                        "start": float(getattr(layer, "start", 0.0) or 0.0),
+                        "end": float(getattr(layer, "end", 0.0) or 0.0),
+                        "blur_strength": float(getattr(layer, "blur_strength", 20.0) or 20.0),
+                        "blur_opacity": float(getattr(layer, "blur_opacity", 1.0) or 1.0),
+                        "pixelate": bool(getattr(layer, "pixelate", False)),
+                        "pixelate_size": int(getattr(layer, "pixelate_size", 12) or 12),
+                    })
+                except (TypeError, ValueError):
+                    continue
+        elif len(blur_layers) == len(regions):
+            for entry, layer in zip(regions, blur_layers):
+                try:
+                    entry["start"] = float(getattr(layer, "start", 0.0) or 0.0)
+                    entry["end"] = float(getattr(layer, "end", 0.0) or 0.0)
+                    entry["blur_strength"] = float(getattr(layer, "blur_strength", entry.get("blur_strength", 20)) or 20)
+                    entry["blur_opacity"] = float(getattr(layer, "blur_opacity", entry.get("blur_opacity", 1.0)) or 1.0)
+                    entry["pixelate"] = bool(getattr(layer, "pixelate", entry.get("pixelate", False)))
+                    entry["pixelate_size"] = int(getattr(layer, "pixelate_size", entry.get("pixelate_size", 12)) or 12)
+                except (TypeError, ValueError):
+                    continue
         return regions
 
     def persist_project_blur_state(self, *, regions=None, enabled=None):
@@ -10487,15 +10548,41 @@ class VideoTranslatorGUI(QMainWindow):
             QMessageBox.warning(self, "Import Failed", "The selected file could not be parsed as a valid SRT subtitle.")
             return
 
-        base_segments = self.current_segments or self.current_translated_segments
-        # An SRT only stores text/timestamps.  Keep diarization metadata by
-        # matching its cue order to the existing transcript, even when the
-        # imported file supplies different timing.
-        if base_segments and len(base_segments) == len(imported_segments):
-            for idx, base in enumerate(base_segments):
-                speaker = str(base.get("speaker", "") or "").strip()
-                if speaker:
-                    imported_segments[idx]["speaker"] = speaker
+        # An SRT only stores text/timestamps. Keep diarization metadata from
+        # the current translated transcript first (manual speaker corrections
+        # are stored there), falling back to the original transcript. Matching
+        # by overlap also works when an imported file has slightly different
+        # cue boundaries or a different number of cues.
+        base_segments = self.current_translated_segments or self.current_segments
+        if base_segments:
+            for imported in imported_segments:
+                try:
+                    start = float(imported.get("start", 0.0))
+                    end = float(imported.get("end", start))
+                except (TypeError, ValueError):
+                    continue
+                best = None
+                best_score = -1.0
+                midpoint = (start + end) / 2.0
+                for base in base_segments:
+                    speaker = str(base.get("speaker", "") or "").strip()
+                    if not speaker:
+                        continue
+                    try:
+                        base_start = float(base.get("start", 0.0))
+                        base_end = float(base.get("end", base_start))
+                    except (TypeError, ValueError):
+                        continue
+                    overlap = max(0.0, min(end, base_end) - max(start, base_start))
+                    distance = abs(midpoint - ((base_start + base_end) / 2.0))
+                    score = overlap * 1000.0 - distance
+                    if score > best_score:
+                        best_score = score
+                        best = base
+                if best is not None:
+                    speaker = str(best.get("speaker", "") or "").strip()
+                    if speaker:
+                        imported["speaker"] = speaker
         if self.keep_timeline_cb.isChecked() and base_segments and len(base_segments) == len(imported_segments):
             merged_segments = []
             for idx, base in enumerate(base_segments):
@@ -10515,9 +10602,56 @@ class VideoTranslatorGUI(QMainWindow):
 
         self.translated_text.setText(srt_text)
         self.apply_edited_translation(show_message=False, force_apply=True)
+        # ``apply_edited_translation`` rebuilds dictionaries from SRT (which
+        # has no speaker field). Re-apply the metadata-bearing imported list
+        # after that conversion so the speaker assignments survive both the
+        # editor update and the timeline rebuild.
+        if imported_segments and self.current_translated_segments:
+            if len(imported_segments) == len(self.current_translated_segments):
+                for idx, imported in enumerate(imported_segments):
+                    speaker = str(imported.get("speaker", "") or "").strip()
+                    if speaker:
+                        self.current_translated_segments[idx]["speaker"] = speaker
+            else:
+                for target in self.current_translated_segments:
+                    try:
+                        start = float(target.get("start", 0.0))
+                        end = float(target.get("end", start))
+                    except (TypeError, ValueError):
+                        continue
+                    best = None
+                    best_score = -1.0
+                    midpoint = (start + end) / 2.0
+                    for imported in imported_segments:
+                        speaker = str(imported.get("speaker", "") or "").strip()
+                        if not speaker:
+                            continue
+                        try:
+                            imported_start = float(imported.get("start", 0.0))
+                            imported_end = float(imported.get("end", imported_start))
+                        except (TypeError, ValueError):
+                            continue
+                        overlap = max(0.0, min(end, imported_end) - max(start, imported_start))
+                        distance = abs(midpoint - ((imported_start + imported_end) / 2.0))
+                        score = overlap * 1000.0 - distance
+                        if score > best_score:
+                            best_score = score
+                            best = imported
+                    if best is not None:
+                        target["speaker"] = str(best.get("speaker", "") or "").strip()
+            self.current_translated_segment_models = self._dict_segments_to_models(
+                self.current_translated_segments,
+                translated=True,
+            )
+            self.apply_segments_to_timeline()
         self.last_translated_srt_path = file_path
         self.processed_artifacts["srt_translated"] = file_path
         self.persist_translation_project_data(self.current_translated_segments, file_path)
+        # Rebuild speaker UI/colors after replacing the translated cues.  The
+        # imported SRT itself cannot contain speaker metadata, so the merge
+        # above is the source of truth for these project-only fields.
+        self.refresh_detected_speakers_section()
+        self._refresh_speaker_subtitle_colors_if_needed()
         self.refresh_ui_state()
         QMessageBox.information(
             self,
