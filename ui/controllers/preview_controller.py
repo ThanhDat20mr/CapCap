@@ -116,6 +116,7 @@ class PreviewController:
                                         "font_size": float(getattr(layer, "font_size", 60) or 60),
                                         "font_color": str(getattr(layer, "font_color", "#FFFFFF") or "#FFFFFF"),
                                         "background_color": str(getattr(layer, "background_color", "") or ""),
+                                        "background_opacity": max(0.0, min(1.0, float(getattr(layer, "background_opacity", 0.5) or 0.0))),
                                         "font_bold": bool(getattr(layer, "font_bold", False)),
                                         "x": float(getattr(transform, "x", 0.5)) if transform else 0.5,
                                         "y": float(getattr(transform, "y", 0.5)) if transform else 0.5,
@@ -145,6 +146,11 @@ class PreviewController:
             value = "FFFFFF"
         return f"&H00{value[4:6]}{value[2:4]}{value[0:2]}"
 
+    @classmethod
+    def _ass_color_with_opacity(cls, value: str, opacity: float) -> str:
+        alpha = max(0, min(255, int(round((1.0 - max(0.0, min(1.0, float(opacity)))) * 255))))
+        return f"&H{alpha:02X}{cls._ass_color(value)[4:]}"
+
     def _build_fast_preview_text_ass(self, text_layers, start_seconds, duration_seconds, width, height, temp_dir):
         """Build a clip-relative ASS overlay for editor TEXT layers."""
         if not text_layers:
@@ -160,7 +166,7 @@ class PreviewController:
             background_color = layer.get("background_color", "")
             styles.append(
                 f"Style: {style_name},{layer['font_name']},{max(1, int(round(layer['font_size'] * 0.85)))},{self._ass_color(layer['font_color'])},"
-                f"&H000000FF,{self._ass_color(background_color) if background_color else '&H00000000'},{self._ass_color(background_color) if background_color else '&H00000000'},"
+                f"&H000000FF,{self._ass_color_with_opacity(background_color, layer.get('background_opacity', 0.5)) if background_color else '&H00000000'},{self._ass_color_with_opacity(background_color, layer.get('background_opacity', 0.5)) if background_color else '&H00000000'},"
                 f"{-1 if layer['font_bold'] else 0},0,0,0,100,100,0,0,{3 if background_color else 1},3,0,5,0,0,0,0"
             )
             text = str(layer["text"]).replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\r\n", "\n").replace("\n", "\\N")

@@ -1131,6 +1131,9 @@ def build_preview_panel(gui):
     gui.track_label_bar.blurToggled.connect(gui.on_track_blur_toggled)
     gui.track_label_bar.logoToggled.connect(gui.on_track_logo_toggled)
     gui.track_label_bar.maskToggled.connect(gui.on_track_mask_toggled)
+    gui.track_label_bar.textToggled.connect(gui.on_track_text_toggled)
+    gui.track_label_bar.subtitleToggled.connect(gui.on_track_subtitle_toggled)
+    gui.track_label_bar.trackSelected.connect(gui.on_track_label_selected)
     gui.track_label_bar.lockToggled.connect(gui.on_timeline_track_lock_toggled)
 
     def _sync_labels():
@@ -1141,6 +1144,12 @@ def build_preview_panel(gui):
             locked = [t.locked for t in tracks]
             muted = [t.muted for t in tracks]
             gui.track_label_bar.set_tracks(names, heights, locked, muted)
+            gui.track_label_bar.set_text_shown(
+                "T1 Text", bool(getattr(gui, "_text_track_preview_visible", True))
+            )
+            gui.track_label_bar.set_subtitle_shown(
+                "TS1", bool(getattr(gui, "_subtitle_track_preview_visible", True))
+            )
     gui._sync_track_labels = _sync_labels
     _sync_labels()
 
@@ -1638,9 +1647,11 @@ def build_preview_panel(gui):
     size_row = QHBoxLayout()
     size_row.addWidget(QLabel("Font size"))
     gui.text_inspector_size_combo = QComboBox()
-    for percent in (50, 75, 100, 125, 150):
+    # Keep the same 60 px base used by subtitle-compatible Text layers, but
+    # expose smaller presets for captions and compact labels.
+    for percent in (25, 35, 50, 75, 100, 125, 150):
         gui.text_inspector_size_combo.addItem(f"{percent}%", percent)
-    gui.text_inspector_size_combo.setCurrentIndex(2)
+    gui.text_inspector_size_combo.setCurrentIndex(4)
     gui.text_inspector_size_combo.setToolTip("Matches the subtitle font-size presets (60 px at 100%).")
     size_row.addWidget(gui.text_inspector_size_combo, 1)
     text_layout.addLayout(size_row)
@@ -1658,6 +1669,18 @@ def build_preview_panel(gui):
     background_row.addWidget(gui.text_inspector_background_btn)
     background_row.addStretch(1)
     text_layout.addLayout(background_row)
+    background_opacity_row = QHBoxLayout()
+    background_opacity_row.addWidget(QLabel("Background opacity"))
+    gui.text_inspector_background_opacity_slider = QSlider(Qt.Horizontal)
+    gui.text_inspector_background_opacity_slider.setRange(0, 100)
+    gui.text_inspector_background_opacity_slider.setValue(50)
+    gui.text_inspector_background_opacity_slider.setToolTip("Adjust the Text layer background transparency.")
+    background_opacity_row.addWidget(gui.text_inspector_background_opacity_slider, 1)
+    gui.text_inspector_background_opacity_value = QLabel("50%")
+    gui.text_inspector_background_opacity_value.setMinimumWidth(42)
+    gui.text_inspector_background_opacity_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    background_opacity_row.addWidget(gui.text_inspector_background_opacity_value)
+    text_layout.addLayout(background_opacity_row)
     gui.text_inspector_summary_label = QLabel("Click or drag the selected text on the video preview to position it.")
     gui.text_inspector_summary_label.setObjectName("helperLabel")
     gui.text_inspector_summary_label.setWordWrap(True)

@@ -23,18 +23,19 @@ class SubtitleController:
     def __init__(self, gui):
         self.gui = gui
 
-    def _show_retranslation_progress(self):
-        """Show elapsed time while a deliberate re-translation is running."""
-        self._close_retranslation_progress()
+    def _show_translation_progress(self, *, is_retranslation: bool):
+        """Show elapsed time for both first-time and repeated translation."""
+        self._close_translation_progress()
         provider = self.gui._selected_ai_provider_label() if hasattr(self.gui, "_selected_ai_provider_label") else "selected provider"
+        action = "Re-translating" if is_retranslation else "Translating"
         dialog = QProgressDialog(
-            f"Re-translating subtitles with {provider}...\nElapsed: 00:00",
-            "Hide",
+            f"{action} subtitles with {provider}...\nElapsed: 00:00",
+            None,
             0,
             0,
             self.gui,
         )
-        dialog.setWindowTitle("Re-translating Subtitles")
+        dialog.setWindowTitle(f"{action} Subtitles")
         dialog.setWindowModality(Qt.NonModal)
         dialog.setAutoClose(False)
         dialog.setAutoReset(False)
@@ -52,7 +53,7 @@ class SubtitleController:
         def update_elapsed():
             elapsed = int(time.monotonic() - started)
             dialog.setLabelText(
-                f"Re-translating subtitles with {provider}...\n"
+                f"{action} subtitles with {provider}...\n"
                 f"Elapsed: {elapsed // 60:02d}:{elapsed % 60:02d}\n"
                 "Large subtitle projects can take a few minutes."
             )
@@ -60,17 +61,17 @@ class SubtitleController:
         timer.setInterval(1000)
         timer.timeout.connect(update_elapsed)
         timer.start()
-        self.gui._retranslation_progress_dialog = dialog
-        self.gui._retranslation_progress_timer = timer
+        self.gui._translation_progress_dialog = dialog
+        self.gui._translation_progress_timer = timer
         dialog.show()
 
-    def _close_retranslation_progress(self):
-        timer = getattr(self.gui, "_retranslation_progress_timer", None)
+    def _close_translation_progress(self):
+        timer = getattr(self.gui, "_translation_progress_timer", None)
         if timer is not None:
             timer.stop()
-        self.gui._retranslation_progress_timer = None
-        dialog = getattr(self.gui, "_retranslation_progress_dialog", None)
-        self.gui._retranslation_progress_dialog = None
+        self.gui._translation_progress_timer = None
+        dialog = getattr(self.gui, "_translation_progress_dialog", None)
+        self.gui._translation_progress_dialog = None
         if dialog is not None:
             dialog.hide()
             dialog.deleteLater()
@@ -180,8 +181,7 @@ class SubtitleController:
         self.gui.translate_btn.setEnabled(False)
         self.gui.progress_bar.setValue(80)
         self.gui.update_project_step("translate_raw", "running")
-        if is_retranslation:
-            self._show_retranslation_progress()
+        self._show_translation_progress(is_retranslation=is_retranslation)
 
         self.gui.translation_thread = TranslationWorker(
             srt_source, model_path, src_lang, self.gui.get_target_language_code(), enable_polish
@@ -190,7 +190,7 @@ class SubtitleController:
         self.gui.translation_thread.start()
 
     def on_translation_finished(self, translated_srt, error, fallback_notice=""):
-        self._close_retranslation_progress()
+        self._close_translation_progress()
         self.gui.translate_btn.setEnabled(True)
         if error or not translated_srt:
             self.gui.update_project_step("translate_raw", "failed")

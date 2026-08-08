@@ -1152,6 +1152,8 @@ class _TextLayerOverlayWindow(QWidget):
             rect, font, metrics, lines = self._rect_for(item); painter.setFont(font)
             bg = QColor(str(item.get("background_color", "") or ""))
             if bg.isValid():
+                opacity = max(0.0, min(1.0, float(item.get("background_opacity", 0.5) or 0.0)))
+                bg.setAlpha(int(round(opacity * 255)))
                 painter.fillRect(rect, bg)
             color = QColor(str(item.get("font_color", "#FFFFFF"))); painter.setPen(color if color.isValid() else QColor("#FFFFFF"))
             baseline = rect.top() + 5 + metrics.ascent()

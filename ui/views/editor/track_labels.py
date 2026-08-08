@@ -1,6 +1,21 @@
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QMouseEvent, QPainter, QPen
+import os
+
+from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QMouseEvent, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QFrame, QSizePolicy
+
+
+_ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "icons"))
+_ICON_CACHE = {}
+
+
+def _asset_icon(filename: str):
+    icon = _ICON_CACHE.get(filename)
+    if icon is None:
+        path = os.path.join(_ICON_DIR, filename)
+        icon = QIcon(path) if os.path.exists(path) else QIcon()
+        _ICON_CACHE[filename] = icon
+    return icon
 
 
 TRACK_ICONS: dict[str, str] = {
@@ -17,6 +32,7 @@ AUDIO_PREFIXES = {"A1", "A2"}
 BLUR_PREFIXES = {"B1"}
 LOGO_PREFIXES = {"L1"}
 MASK_PREFIXES = {"M1"}
+TEXT_PREFIXES = {"T1"}
 SUBTITLE_PREFIXES = {"TS1", "S1"}
 MUTE_PREFIXES = {"A1", "A2", "TS1"}
 
@@ -28,9 +44,12 @@ class TrackLabelBar(QFrame):
     blurToggled = Signal(str, bool)  # track_name, is_enabled
     logoToggled = Signal(str, bool)  # track_name, is_shown
     maskToggled = Signal(str, bool)  # track_name, is_shown
+    textToggled = Signal(str, bool)  # track_name, is_shown
+    subtitleToggled = Signal(str, bool)  # track_name, is_shown
+    trackSelected = Signal(str)  # track_name
     lockToggled = Signal(str, bool)  # track_name, is_locked
 
-    TRACK_HEADER_W = 132
+    TRACK_HEADER_W = 156
     RULER_HEIGHT = 30
 
     def __init__(self, parent=None):
@@ -45,6 +64,9 @@ class TrackLabelBar(QFrame):
         self._track_blur_on: list[bool] = []
         self._track_logo_shown: list[bool] = []
         self._track_mask_shown: list[bool] = []
+        self._track_text_shown: list[bool] = []
+        self._track_subtitle_shown: list[bool] = []
+        self._controls_enabled = True
         self._timeline_widget = None  # for vertical scroll sync
 
     def set_timeline(self, timeline):
@@ -67,23 +89,109 @@ class TrackLabelBar(QFrame):
             pass
 
     def set_tracks(self, names: list, heights: list, locked: list = None, muted: list = None):
+        previous = {}
+        for i, old_name in enumerate(self._track_names):
+            prefix = old_name.split(" ")[0] if old_name else ""
+            if prefix in BLUR_PREFIXES:
+                previous[old_name] = self._track_blur_on[i] if i < len(self._track_blur_on) else True
+            elif prefix in LOGO_PREFIXES:
+                previous[old_name] = self._track_logo_shown[i] if i < len(self._track_logo_shown) else True
+            elif prefix in MASK_PREFIXES:
+                previous[old_name] = self._track_mask_shown[i] if i < len(self._track_mask_shown) else True
+            elif prefix in TEXT_PREFIXES:
+                previous[old_name] = self._track_text_shown[i] if i < len(self._track_text_shown) else True
+            elif prefix in SUBTITLE_PREFIXES:
+                previous[old_name] = self._track_subtitle_shown[i] if i < len(self._track_subtitle_shown) else True
         self._track_names = names
         self._track_heights = heights
         self._track_locked = locked or [False] * len(names)
         self._track_muted = muted or [False] * len(names)
         # Default blur effect to ON for B1 tracks
         self._track_blur_on = [
-            (n.split(" ")[0] in BLUR_PREFIXES) for n in names
+            previous.get(n, True) if n.split(" ")[0] in BLUR_PREFIXES else True for n in names
         ]
         # Default logo visibility to ON for L1 tracks
         self._track_logo_shown = [
-            (n.split(" ")[0] in LOGO_PREFIXES) for n in names
+            previous.get(n, True) if n.split(" ")[0] in LOGO_PREFIXES else True for n in names
         ]
         # Default mask visibility to ON for M1 tracks
         self._track_mask_shown = [
-            (n.split(" ")[0] in MASK_PREFIXES) for n in names
+            previous.get(n, True) if n.split(" ")[0] in MASK_PREFIXES else True for n in names
+        ]
+        self._track_text_shown = [
+            previous.get(n, True) if n.split(" ")[0] in TEXT_PREFIXES else True for n in names
+        ]
+        self._track_subtitle_shown = [
+            previous.get(n, True) if n.split(" ")[0] in SUBTITLE_PREFIXES else True for n in names
         ]
         self.update()
+
+    def set_controls_enabled(self, enabled: bool):
+        self._controls_enabled = bool(enabled)
+        self.update()
+
+    @staticmethod
+    def _draw_visibility_icon(painter, x: float, y: float, h: float, hidden: bool, color: QColor):
+        """Draw a font-independent eye icon for the visibility control."""
+        cx, cy = x + 10.0, y + h / 2.0
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        asset = _asset_icon("preview.svg")
+        if not asset.isNull():
+            painter.drawPixmap(int(x + 1), int(y + max(0, (h - 18) / 2)), asset.pixmap(18, 18))
+            if hidden:
+                painter.setPen(QPen(color, 1.5))
+                painter.drawLine(QPointF(cx - 7, cy - 6), QPointF(cx + 7, cy + 6))
+            painter.restore()
+            return
+        painter.setPen(QPen(color, 1.4))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(int(cx - 8), int(cy - 4), 16, 8)
+        if not hidden:
+            painter.setBrush(color)
+            painter.drawEllipse(int(cx - 2.5), int(cy - 2.5), 5, 5)
+        else:
+            painter.drawLine(QPointF(cx - 7, cy - 6), QPointF(cx + 7, cy + 6))
+        painter.restore()
+
+    @staticmethod
+    def _draw_mute_icon(painter, x: float, y: float, h: float, muted: bool, color: QColor):
+        """Draw a compact speaker/mute icon without relying on emoji fonts."""
+        cx, cy = x + 10.0, y + h / 2.0
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        asset = _asset_icon("volume_mute.svg" if muted else "volume_up.svg")
+        if not asset.isNull():
+            painter.drawPixmap(int(x + 1), int(y + max(0, (h - 18) / 2)), asset.pixmap(18, 18))
+            painter.restore()
+            return
+        painter.setPen(QPen(color, 1.4))
+        painter.setBrush(color)
+        painter.drawPolygon(QPolygonF([
+            QPointF(cx - 7, cy - 2.5), QPointF(cx - 3, cy - 2.5),
+            QPointF(cx + 2, cy - 7), QPointF(cx + 2, cy + 7),
+            QPointF(cx - 3, cy + 2.5), QPointF(cx - 7, cy + 2.5),
+        ]))
+        painter.setBrush(Qt.NoBrush)
+        if muted:
+            painter.drawLine(QPointF(cx + 4, cy - 5), QPointF(cx + 10, cy + 5))
+            painter.drawLine(QPointF(cx + 10, cy - 5), QPointF(cx + 4, cy + 5))
+        else:
+            painter.drawArc(int(cx + 1), int(cy - 6), 12, 12, -50 * 16, 100 * 16)
+        painter.restore()
+
+    @staticmethod
+    def _draw_lock_icon(painter, x: float, y: float, h: float, locked: bool, color: QColor):
+        """Draw the bundled SVG lock/unlock artwork."""
+        asset = _asset_icon("lock.svg" if locked else "unlock.svg")
+        if asset.isNull():
+            painter.save()
+            painter.setPen(QPen(color, 1.5))
+            painter.drawRect(int(x + 4), int(y + h / 2), 12, 9)
+            painter.drawArc(int(x + 6), int(y + h / 2 - 8), 8, 12, 0, 180 * 16)
+            painter.restore()
+            return
+        painter.drawPixmap(int(x + 1), int(y + max(0, (h - 18) / 2)), asset.pixmap(18, 18))
 
     def _get_track_heights(self) -> list:
         """Return the current track heights, preferring the timeline's
@@ -126,17 +234,76 @@ class TrackLabelBar(QFrame):
                 self.update()
                 return
 
+    def set_text_shown(self, name: str, shown: bool):
+        for i, n in enumerate(self._track_names):
+            if n == name and i < len(self._track_text_shown):
+                self._track_text_shown[i] = bool(shown)
+                self.update()
+                return
+
+    def set_subtitle_shown(self, name: str, shown: bool):
+        for i, n in enumerate(self._track_names):
+            if n == name and i < len(self._track_subtitle_shown):
+                self._track_subtitle_shown[i] = bool(shown)
+                self.update()
+                return
+
     def mousePressEvent(self, event: QMouseEvent):
-        # Click on an audio track label to toggle its mute state.
-        # Click on a blur track label to toggle the blur effect.
-        # Click on a logo track label to hide/show the logo.
-        # Click on a mask track label to hide/show the mask.
+        # Track labels select/focus only. Visibility/mute and lock changes
+        # are handled by the two dedicated icon cells on the right.
         if event.button() == Qt.LeftButton:
             idx = self._track_index_at(event.position().y())
             if 0 <= idx < len(self._track_names):
                 name = self._track_names[idx]
                 prefix = name.split(" ")[0] if name else ""
-                if event.position().x() >= self.TRACK_HEADER_W - 28:
+                x = event.position().x()
+                if x >= self.TRACK_HEADER_W - 72 and not self._controls_enabled:
+                    event.accept()
+                    return
+                if x < self.TRACK_HEADER_W - 72:
+                    self.trackSelected.emit(name)
+                    event.accept()
+                    return
+                mute_boundary = self.TRACK_HEADER_W - (32 if prefix in AUDIO_PREFIXES else 48)
+                if x < mute_boundary:
+                    if prefix in MUTE_PREFIXES:
+                        new_muted = not self._track_muted[idx]
+                        self._track_muted[idx] = new_muted
+                        self.update()
+                        self.muteToggled.emit(name, new_muted)
+                    event.accept()
+                    return
+                if x < self.TRACK_HEADER_W - 24:
+                    if prefix in SUBTITLE_PREFIXES:
+                        new_state = not self._track_subtitle_shown[idx]
+                        self._track_subtitle_shown[idx] = new_state
+                        self.update()
+                        self.subtitleToggled.emit(name, new_state)
+                        event.accept()
+                        return
+                    if prefix in BLUR_PREFIXES:
+                        new_state = not self._track_blur_on[idx]
+                        self._track_blur_on[idx] = new_state
+                        self.update()
+                        self.blurToggled.emit(name, new_state)
+                    elif prefix in LOGO_PREFIXES:
+                        new_state = not self._track_logo_shown[idx]
+                        self._track_logo_shown[idx] = new_state
+                        self.update()
+                        self.logoToggled.emit(name, new_state)
+                    elif prefix in MASK_PREFIXES:
+                        new_state = not self._track_mask_shown[idx]
+                        self._track_mask_shown[idx] = new_state
+                        self.update()
+                        self.maskToggled.emit(name, new_state)
+                    elif prefix in TEXT_PREFIXES:
+                        new_state = not self._track_text_shown[idx]
+                        self._track_text_shown[idx] = new_state
+                        self.update()
+                        self.textToggled.emit(name, new_state)
+                    event.accept()
+                    return
+                if event.position().x() >= self.TRACK_HEADER_W - 24:
                     new_locked = not bool(self._track_locked[idx] if idx < len(self._track_locked) else False)
                     if idx < len(self._track_locked):
                         self._track_locked[idx] = new_locked
@@ -190,14 +357,41 @@ class TrackLabelBar(QFrame):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        # Change cursor to a pointing hand when hovering over a
-        # clickable track label (audio, dub-subtitle mute, blur, logo,
-        # or mask) to signal it is clickable.
+        # Show a context tooltip for the dedicated controls and for the
+        # label-selection area.
         idx = self._track_index_at(event.position().y())
         is_clickable = False
         if 0 <= idx < len(self._track_names):
             prefix = self._track_names[idx].split(" ")[0] if self._track_names[idx] else ""
             is_clickable = bool(prefix)
+        x = event.position().x()
+        if is_clickable and x >= self.TRACK_HEADER_W - 72 and not self._controls_enabled:
+            self.setToolTip("Pause playback to edit layer controls")
+            self.setCursor(Qt.ForbiddenCursor)
+            return
+        if is_clickable and x >= self.TRACK_HEADER_W - 24:
+            self.setToolTip("Unlock layer" if self._track_locked[idx] else "Lock layer")
+        elif is_clickable and x >= self.TRACK_HEADER_W - 48 and prefix in SUBTITLE_PREFIXES:
+            self.setToolTip("Hide subtitle track" if self._track_subtitle_shown[idx] else "Show subtitle track")
+        elif is_clickable and x >= self.TRACK_HEADER_W - 48 and (prefix in BLUR_PREFIXES or prefix in LOGO_PREFIXES or prefix in MASK_PREFIXES or prefix in TEXT_PREFIXES):
+            hidden = False
+            if prefix in BLUR_PREFIXES:
+                hidden = not self._track_blur_on[idx]
+            elif prefix in LOGO_PREFIXES:
+                hidden = not self._track_logo_shown[idx]
+            elif prefix in MASK_PREFIXES:
+                hidden = not self._track_mask_shown[idx]
+            elif prefix in TEXT_PREFIXES:
+                hidden = not self._track_text_shown[idx]
+            self.setToolTip("Show layer" if hidden else "Hide layer")
+        elif is_clickable and x >= self.TRACK_HEADER_W - 72 and prefix in MUTE_PREFIXES:
+            self.setToolTip("Unmute track" if self._track_muted[idx] else "Mute track")
+            self.setCursor(Qt.PointingHandCursor)
+            return
+        if is_clickable and x >= self.TRACK_HEADER_W - 72:
+            self.setToolTip("")
+            self.setCursor(Qt.PointingHandCursor)
+            return
         if is_clickable and event.position().x() >= self.TRACK_HEADER_W - 28:
             self.setToolTip("Unlock layer" if self._track_locked[idx] else "Lock layer")
         else:
@@ -313,8 +507,9 @@ class TrackLabelBar(QFrame):
         font = QFont("Segoe UI", 9, QFont.Bold)
         painter.setFont(font)
         fm = QFontMetrics(font)
-        # Reserve space on the right for mute/lock icons on audio tracks.
-        icon_col_w = 24
+        # Reserve compact cells on every track. Audio uses mute + lock;
+        # subtitles use mute + visibility + lock; overlays use visibility + lock.
+        icon_col_w = 72
         text_x = 8
         text_w = self.TRACK_HEADER_W - text_x - icon_col_w - 4
 
@@ -332,7 +527,13 @@ class TrackLabelBar(QFrame):
             mask_hidden = (prefix in MASK_PREFIXES
                            and i < len(self._track_mask_shown)
                            and not self._track_mask_shown[i])
-            if muted or logo_hidden or mask_hidden:
+            text_hidden = (prefix in TEXT_PREFIXES
+                           and i < len(self._track_text_shown)
+                           and not self._track_text_shown[i])
+            subtitle_hidden = (prefix in SUBTITLE_PREFIXES
+                               and i < len(self._track_subtitle_shown)
+                               and not self._track_subtitle_shown[i])
+            if muted or logo_hidden or mask_hidden or text_hidden or subtitle_hidden:
                 bg = QColor("#1a1a2e")
             elif prefix in BLUR_PREFIXES and not blur_on:
                 bg = QColor("#1a1a2e")  # dimmed when blur is off
@@ -345,7 +546,7 @@ class TrackLabelBar(QFrame):
             painter.setPen(QPen(c, 0))
             painter.fillRect(0, y, 3, h, c)
 
-            dim_text = (muted or logo_hidden or mask_hidden
+            dim_text = (muted or logo_hidden or mask_hidden or text_hidden or subtitle_hidden
                         or (prefix in BLUR_PREFIXES and not blur_on))
             text_color = QColor("#555") if dim_text else QColor("#ffffff")
             painter.setPen(text_color)
@@ -363,13 +564,31 @@ class TrackLabelBar(QFrame):
 
             # (ON/OFF label removed - blur state is shown by track dimming)
 
+            # Dedicated visibility control for subtitles and overlays.
+            if prefix in SUBTITLE_PREFIXES or prefix in BLUR_PREFIXES or prefix in LOGO_PREFIXES or prefix in MASK_PREFIXES or prefix in TEXT_PREFIXES:
+                hidden = subtitle_hidden or logo_hidden or mask_hidden or text_hidden or (prefix in BLUR_PREFIXES and not blur_on)
+                icon_color = QColor("#5a2525") if hidden else QColor("#4f5c6e")
+                if not self._controls_enabled:
+                    icon_color = QColor("#36404d")
+                self._draw_visibility_icon(painter, self.TRACK_HEADER_W - 48, y + 4, h - 8, hidden, icon_color)
+            # Audio/subtitle mute control occupies the left control cell.
+            if prefix in MUTE_PREFIXES:
+                icon_color = QColor("#5a2525") if muted else QColor("#4f5c6e")
+                if not self._controls_enabled:
+                    icon_color = QColor("#36404d")
+                # Keep A1's two controls visually grouped. TS1 retains the
+                # left column for mute so its three controls stay ordered.
+                mute_x = self.TRACK_HEADER_W - 60 if prefix in AUDIO_PREFIXES else self.TRACK_HEADER_W - 72
+                self._draw_mute_icon(painter, mute_x, y + 4, h - 8, muted, icon_color)
+
             # Per-track lock control. It affects only this editable track,
             # never preview visibility or export.
             if prefix:
                 locked = bool(self._track_locked[i] if i < len(self._track_locked) else False)
-                painter.setPen(QPen(QColor("#e04040") if locked else QColor("#8394aa"), 0))
-                painter.drawText(self.TRACK_HEADER_W - 24, y + 4, 20, h - 8,
-                                 Qt.AlignRight | Qt.AlignVCenter, "🔒" if locked else "🔓")
+                icon_color = QColor("#8e3030") if locked else QColor("#8394aa")
+                if not self._controls_enabled:
+                    icon_color = QColor("#4a5563")
+                self._draw_lock_icon(painter, self.TRACK_HEADER_W - 24, y + 4, h - 8, locked, icon_color)
 
             y += h
 

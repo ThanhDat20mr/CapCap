@@ -64,12 +64,23 @@ def sync_segments_to_dub_subtitle_layers(
     )
 
     existing_by_idx: dict[int, DubSubtitleLayer] = {}
+    existing_by_key: dict[tuple[float, float, str], list[DubSubtitleLayer]] = {}
     for layer in target.layers:
         if isinstance(layer, DubSubtitleLayer):
             idx = int(layer.metadata.get("_seg_index", -1))
             if idx >= 0:
                 existing_by_idx[idx] = idx and layer or layer
                 existing_by_idx[idx] = layer
+            key = (
+                round(float(getattr(layer, "start", 0.0) or 0.0), 6),
+                round(float(getattr(layer, "end", 0.0) or 0.0), 6),
+                str(getattr(layer, "text", "") or ""),
+            )
+            existing_by_key.setdefault(key, []).append(layer)
+    # Index fallback is useful when all subtitle text changes together, but
+    # it is unsafe when the list length changes: inserting a cue would then
+    # recycle the next existing layer and make its timeline identity move.
+    allow_index_fallback = len(existing_by_idx) == len(segments)
 
     new_layers: list[DubSubtitleLayer] = []
     for orig_idx, d in indexed:
@@ -86,7 +97,16 @@ def sync_segments_to_dub_subtitle_layers(
         # no _seg_index) would never reach the layer's metadata.
         d["_seg_index"] = int(orig_idx)
 
-        existing = existing_by_idx.pop(orig_idx, None)
+        key = (round(start, 6), round(end, 6), text)
+        matching = existing_by_key.get(key) or []
+        existing = matching.pop(0) if matching else (
+            existing_by_idx.pop(orig_idx, None) if allow_index_fallback else None
+        )
+        if existing is not None:
+            for existing_idx, existing_layer in list(existing_by_idx.items()):
+                if existing_layer is existing:
+                    existing_by_idx.pop(existing_idx, None)
+                    break
         if existing is not None:
             existing.text = text
             existing.dub_text = dub_text
@@ -141,11 +161,15 @@ def sync_segments_to_dub_subtitle_layers(
             target.layers.append(layer)
         new_layers.append(layer)
 
-    stale_ids = set(existing_by_idx.keys())
-    if stale_ids:
+    # Segment indices are renumbered after a deletion, so they cannot be used
+    # to identify stale layers here: the following cue may now have the same
+    # index as the removed cue.  The remaining entries in existing_by_idx are
+    # the actual layer objects that were not matched above.
+    stale_layer_ids = {id(layer) for layer in existing_by_idx.values()}
+    if stale_layer_ids:
         target.layers[:] = [
             l for l in target.layers
-            if int(l.metadata.get("_seg_index", -1)) not in stale_ids
+            if id(l) not in stale_layer_ids
         ]
     return new_layers
 

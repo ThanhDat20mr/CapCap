@@ -329,6 +329,7 @@ class ExportWorkflow:
                                 "font_size": max(1, int(round(float(layer.get("font_size", 60) or 60) * 0.85))),
                                     "font_color": str(layer.get("font_color", "#FFFFFF") or "#FFFFFF"),
                                     "background_color": str(layer.get("background_color", "") or ""),
+                                    "background_opacity": max(0.0, min(1.0, float(layer.get("background_opacity", 0.5) or 0.0))),
                                     "font_bold": bool(layer.get("font_bold", False)),
                                     "x": max(0.0, min(1.0, float(transform.get("x", 0.5)))),
                                     "y": max(0.0, min(1.0, float(transform.get("y", 0.5)))),
@@ -379,6 +380,13 @@ class ExportWorkflow:
             value = "FFFFFF"
         return f"&H00{value[4:6]}{value[2:4]}{value[0:2]}"
 
+    @classmethod
+    def _ass_color_with_opacity(cls, value: str, opacity: float) -> str:
+        """Return an ASS BGR color with opacity converted to ASS alpha."""
+        base = cls._ass_color(value)
+        alpha = max(0, min(255, int(round((1.0 - max(0.0, min(1.0, float(opacity)))) * 255))))
+        return f"&H{alpha:02X}{base[4:]}"
+
     def _build_text_layer_ass(self, ass_path: str, text_layers, temp_dir: str = "", width=None, height=None) -> str:
         """Append editor TextLayer events to a disposable ASS file for export."""
         if not text_layers:
@@ -407,7 +415,7 @@ class ExportWorkflow:
                 # Keep this field order exactly aligned with the ASS
                 # Format line (including StrikeOut). A shifted style record
                 # can make libass reject the whole subtitle style section.
-                f"&H000000FF,{self._ass_color(layer['background_color']) if layer.get('background_color') else '&H00000000'},{self._ass_color(layer['background_color']) if layer.get('background_color') else '&H00000000'},{ -1 if layer['font_bold'] else 0},0,0,0,100,100,0,0,{3 if layer.get('background_color') else 1},3,0,5,0,0,0,0"
+                f"&H000000FF,{self._ass_color_with_opacity(layer['background_color'], layer.get('background_opacity', 0.5)) if layer.get('background_color') else '&H00000000'},{self._ass_color_with_opacity(layer['background_color'], layer.get('background_opacity', 0.5)) if layer.get('background_color') else '&H00000000'},{ -1 if layer['font_bold'] else 0},0,0,0,100,100,0,0,{3 if layer.get('background_color') else 1},3,0,5,0,0,0,0"
             )
             text = str(layer["text"]).replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\r\n", "\n").replace("\n", "\\N")
             start, end = float(layer["start"]), float(layer["end"])

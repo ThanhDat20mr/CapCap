@@ -1033,6 +1033,11 @@ class VideoTranslatorGUI(QMainWindow):
             state.set_setting("transcription_engine", engine)
             self.project_service.save_project(state)
         if engine != previous:
+            # A new OCR project needs the crop editor immediately. Existing
+            # projects with completed OCR remain unobstructed until the user
+            # explicitly reopens the region tool.
+            if engine == "ocr" and not self.current_segments and not self.transcript_text.toPlainText().strip():
+                self._ocr_overlay_visible = True
             timeline = getattr(self, "timeline", None)
             if timeline is not None:
                 timeline.clear_selection_range()
@@ -3478,6 +3483,10 @@ class VideoTranslatorGUI(QMainWindow):
                 self.audio_handling_combo.setCurrentIndex(combo_index)
         context = self.project_bridge.load_context(state)
         self.processed_artifacts = {}
+        # Preview-only layer visibility is reset when opening a project; the
+        # underlying layers remain unchanged for export.
+        self._subtitle_track_preview_visible = True
+        self._text_track_preview_visible = True
         self.last_original_srt_path = ""
         self.last_translated_srt_path = ""
         self.last_extracted_audio = ""
@@ -3540,11 +3549,18 @@ class VideoTranslatorGUI(QMainWindow):
             if hasattr(self, "audio_tab_btn"):
                 self.audio_tab_btn.setEnabled(True)
         self._sync_timeline_mute_to_gui()
-        # OCR geometry is project-scoped, but the visible editor is not. A
-        # reopened project should return to an unobstructed preview; users can
-        # explicitly reopen the crop editor with the OCR button when needed.
+        # OCR geometry is project-scoped.  For a reopened OCR project that has
+        # not produced a transcript yet, keep the crop editor visible so the
+        # user can configure the region before running Transcript.  Completed
+        # projects return to an unobstructed preview until OCR is explicitly
+        # reopened with the toolbar button.
+        has_transcript = bool(
+            self.current_segments
+            or self.current_segment_models
+            or (hasattr(self, "transcript_text") and self.transcript_text.toPlainText().strip())
+        )
         if not bool(getattr(self, "_alternate_ocr_range_pending", None)):
-            self._ocr_overlay_visible = False
+            self._ocr_overlay_visible = project_engine == "ocr" and not has_transcript
         self._update_ocr_overlay()
         # Clear any stale layer selection from the previous project so
         # the inspector does not stay pinned to a track that no longer
@@ -5851,6 +5867,8 @@ class VideoTranslatorGUI(QMainWindow):
             is_playing = bool(self.media_player.is_playing())
         except Exception:
             is_playing = False
+        if hasattr(self, "track_label_bar"):
+            self.track_label_bar.set_controls_enabled(not is_playing)
         self.video_view.set_mask_regions(
             regions, active_index=active_index, editable=not is_playing,
         )
@@ -6339,6 +6357,9 @@ class VideoTranslatorGUI(QMainWindow):
         preview_scale = max(1.0, float(preview_rect.height() or self.video_view.height() or 1.0)) / max(1, render_h)
         preview_text_scale = preview_scale * 0.85
         items = []
+        if not bool(getattr(self, "_text_track_preview_visible", True)):
+            self.video_view.set_text_layers([], active_id or getattr(self.timeline, "_selected_layer_id", ""))
+            return
         for layer in self._text_layers():
             if not self._layer_is_active_at_preview_time(layer):
                 continue
@@ -6349,6 +6370,7 @@ class VideoTranslatorGUI(QMainWindow):
                 "font_size": max(1, int(round(float(getattr(layer, "font_size", 60)) * preview_text_scale))),
                 "font_color": getattr(layer, "font_color", "#FFFFFF"),
                 "background_color": getattr(layer, "background_color", ""),
+                "background_opacity": max(0.0, min(1.0, float(getattr(layer, "background_opacity", 0.5) or 0.0))),
                 "font_bold": getattr(layer, "font_bold", False),
                 "x": getattr(transform, "x", .5) if transform else .5,
                 "y": getattr(transform, "y", .5) if transform else .5,
@@ -6381,6 +6403,11 @@ class VideoTranslatorGUI(QMainWindow):
         bg = str(getattr(layer, "background_color", "") or "")
         self.text_inspector_background_btn.setText(bg or "None")
         self.text_inspector_background_btn.setStyleSheet(f"background-color: {bg or '#26364a'}; color: #fff;")
+        opacity = max(0, min(100, int(round(float(getattr(layer, "background_opacity", 0.5) or 0.0) * 100))))
+        self.text_inspector_background_opacity_slider.blockSignals(True)
+        self.text_inspector_background_opacity_slider.setValue(opacity)
+        self.text_inspector_background_opacity_slider.blockSignals(False)
+        self.text_inspector_background_opacity_value.setText(f"{opacity}%")
         self.text_inspector_summary_label.setText(f"Selected: {getattr(track, 'name', 'T1 Text')} → {getattr(layer, 'name', 'Text')}. Drag it on the preview to move it.")
 
     def _wire_text_inspector_controls(self):
@@ -6433,11 +6460,19 @@ class VideoTranslatorGUI(QMainWindow):
                 layer.background_color = chosen.name()
                 self.text_inspector_background_btn.setText(layer.background_color)
                 self.text_inspector_background_btn.setStyleSheet(f"background-color: {layer.background_color}; color: #fff;"); changed()
+        def background_opacity_changed(value):
+            layer = selected()
+            if layer is not None:
+                value = max(0, min(100, int(value)))
+                layer.background_opacity = value / 100.0
+                self.text_inspector_background_opacity_value.setText(f"{value}%")
+                changed()
         self.text_inspector_content.textChanged.connect(content_changed)
         self.text_inspector_size_combo.currentIndexChanged.connect(size_changed)
         self.text_inspector_font_combo.currentTextChanged.connect(font_changed)
         self.text_inspector_color_btn.clicked.connect(color_changed)
         self.text_inspector_background_btn.clicked.connect(background_changed)
+        self.text_inspector_background_opacity_slider.valueChanged.connect(background_opacity_changed)
 
     def _show_logo_inspector_for_track(self, track, layer=None):
         """Show the Logo Track Inspector populated with the selected L1 layer."""
@@ -7195,6 +7230,52 @@ class VideoTranslatorGUI(QMainWindow):
                     self.video_view.clear_mask_region()
                 except Exception:
                     pass
+
+    def on_track_text_toggled(self, track_name: str, is_shown: bool):
+        """Show or hide every Text layer in the T1 track without changing export data."""
+        timeline = getattr(self, "timeline", None)
+        if timeline is not None and timeline._timeline:
+            for track in timeline._timeline.tracks:
+                if track.name == track_name:
+                    self._text_track_preview_visible = bool(is_shown)
+                    timeline._redraw()
+                    self._refresh_text_layer_preview(getattr(timeline, "_selected_layer_id", ""))
+                    if hasattr(self, "track_label_bar"):
+                        self.track_label_bar.set_text_shown(track_name, bool(is_shown))
+                    self.log(f"[Timeline] {'Shown' if is_shown else 'Hidden'} text track: {track_name}")
+                    return
+
+    def on_track_subtitle_toggled(self, track_name: str, is_shown: bool):
+        """Temporarily show or hide TS1 subtitle output without deleting data."""
+        self._subtitle_track_preview_visible = bool(is_shown)
+        if not is_shown:
+            try:
+                self.media_player.clear_subtitle()
+            except Exception:
+                pass
+            if hasattr(self, "video_view"):
+                try:
+                    self.video_view.subtitle_item.hide()
+                except Exception:
+                    pass
+        else:
+            try:
+                self.sync_live_subtitle_preview()
+            except Exception:
+                pass
+        if hasattr(self, "track_label_bar"):
+            self.track_label_bar.set_subtitle_shown(track_name, bool(is_shown))
+        self.log(f"[Timeline] {'Shown' if is_shown else 'Hidden'} subtitle track: {track_name}")
+
+    def on_track_label_selected(self, track_name: str):
+        """Select the first layer in a track; label clicks never toggle state."""
+        timeline = getattr(self, "timeline", None)
+        if timeline is None or not timeline._timeline:
+            return
+        for track in timeline._timeline.tracks:
+            if track.name == track_name and track.layers:
+                timeline.select_layer(track.layers[0].id)
+                return
 
     def _sync_timeline_mute_to_gui(self):
         """Pull the current timeline track mute state into the GUI and backend."""
@@ -8400,6 +8481,15 @@ class VideoTranslatorGUI(QMainWindow):
                         if segment_index < 0:
                             QMessageBox.warning(self, "Delete Segment", "Could not identify the selected subtitle segment.")
                             return
+                        # Carry the selected layer's timing/text into the
+                        # canonical deletion path.  Segment indices can be
+                        # renumbered after an insertion/deletion, so relying
+                        # on a stale index can remove the adjacent cue.
+                        self._pending_delete_segment_key = (
+                            round(float(getattr(layer, "start", 0.0) or 0.0), 6),
+                            round(float(getattr(layer, "end", 0.0) or 0.0), 6),
+                            str(getattr(layer, "text", "") or ""),
+                        )
                         self.timeline._selected_layer_id = ""
                         self._selected_segment_index = segment_index
                         return self.delete_selected_timeline_segment()
@@ -8506,6 +8596,23 @@ class VideoTranslatorGUI(QMainWindow):
         if not segments:
             return
         index = int(getattr(self, "_selected_segment_index", -1))
+        pending_key = getattr(self, "_pending_delete_segment_key", None)
+        if pending_key:
+            target_start, target_end, target_text = pending_key
+            matching = [
+                idx for idx, segment in enumerate(segments)
+                if abs(float(segment.get("start", 0.0) or 0.0) - target_start) < 0.01
+                and abs(float(segment.get("end", 0.0) or 0.0) - target_end) < 0.01
+                and (not target_text or str(segment.get("text", "") or "") == target_text)
+            ]
+            if not matching:
+                matching = [
+                    idx for idx, segment in enumerate(segments)
+                    if abs(float(segment.get("start", 0.0) or 0.0) - target_start) < 0.01
+                    and abs(float(segment.get("end", 0.0) or 0.0) - target_end) < 0.01
+                ]
+            if matching:
+                index = matching[0]
         if not (0 <= index < len(segments)):
             index = self._find_active_segment_index(self.media_player.position(), segments)
         if not (0 <= index < len(segments)):
@@ -8525,15 +8632,32 @@ class VideoTranslatorGUI(QMainWindow):
             "translated_after": [],
         }
 
-        if 0 <= index < len(self.current_segments or []):
-            delete_history_entry["current_before"] = [copy.deepcopy(self.current_segments[index])]
-            self.current_segments[index:index + 1] = []
+        def _matching_index(items):
+            if not pending_key:
+                return index if 0 <= index < len(items) else -1
+            target_start, target_end, target_text = pending_key
+            for item_index, segment in enumerate(items):
+                if abs(float(segment.get("start", 0.0) or 0.0) - target_start) < 0.01 \
+                        and abs(float(segment.get("end", 0.0) or 0.0) - target_end) < 0.01 \
+                        and (not target_text or str(segment.get("text", "") or "") == target_text):
+                    return item_index
+            for item_index, segment in enumerate(items):
+                if abs(float(segment.get("start", 0.0) or 0.0) - target_start) < 0.01 \
+                        and abs(float(segment.get("end", 0.0) or 0.0) - target_end) < 0.01:
+                    return item_index
+            return index if 0 <= index < len(items) else -1
+
+        current_index = _matching_index(self.current_segments or [])
+        if 0 <= current_index < len(self.current_segments or []):
+            delete_history_entry["current_before"] = [copy.deepcopy(self.current_segments[current_index])]
+            self.current_segments[current_index:current_index + 1] = []
             self.current_segment_models = self._dict_segments_to_models(self.current_segments, translated=False)
             self._sync_hidden_transcript_text_from_segments()
 
-        if 0 <= index < len(self.current_translated_segments or []):
-            delete_history_entry["translated_before"] = [copy.deepcopy(self.current_translated_segments[index])]
-            self.current_translated_segments[index:index + 1] = []
+        translated_index = _matching_index(self.current_translated_segments or [])
+        if 0 <= translated_index < len(self.current_translated_segments or []):
+            delete_history_entry["translated_before"] = [copy.deepcopy(self.current_translated_segments[translated_index])]
+            self.current_translated_segments[translated_index:translated_index + 1] = []
             self.current_translated_segment_models = self._dict_segments_to_models(self.current_translated_segments, translated=True)
             self._sync_hidden_translated_text_from_segments()
 
@@ -8541,6 +8665,7 @@ class VideoTranslatorGUI(QMainWindow):
         # subtitle list. It must never survive a deletion, otherwise a later
         # timing edit can redraw a stale cue from that cache.
         self._single_line_split_cache = None
+        self._pending_delete_segment_key = None
 
         self._timeline_timing_undo_stack.append(delete_history_entry)
         self._timeline_timing_redo_stack = []
@@ -9706,6 +9831,8 @@ class VideoTranslatorGUI(QMainWindow):
             is_playing = bool(self.media_player.is_playing())
         except Exception:
             is_playing = False
+        if hasattr(self, "track_label_bar"):
+            self.track_label_bar.set_controls_enabled(not is_playing)
         # Sync the timeline's "playing" flag to the real player state.
         # Without this the timeline keeps animating past the end of the
         # video because the player auto-pauses (keep_open="always") but
@@ -10708,6 +10835,11 @@ class VideoTranslatorGUI(QMainWindow):
 
     def update_playback_subtitle_highlight(self, position_ms: int):
         try:
+            if not bool(getattr(self, "_subtitle_track_preview_visible", True)):
+                self.timeline.set_active_segment_index(-1)
+                if hasattr(self, "video_view"):
+                    self.video_view.subtitle_item.hide()
+                return
             segments = self.live_preview_segments or self.get_active_segments()
             active_index = self._find_active_segment_index(position_ms, segments)
             self.timeline.set_active_segment_index(active_index)
@@ -10790,6 +10922,12 @@ class VideoTranslatorGUI(QMainWindow):
     def sync_live_subtitle_preview(self):
         """Synchronize the live subtitle renderer and draggable Qt target."""
         if not hasattr(self, "media_player"):
+            return
+        if not bool(getattr(self, "_subtitle_track_preview_visible", True)):
+            self.media_player.clear_subtitle()
+            if hasattr(self, "video_view"):
+                self.video_view.subtitle_item.set_text("")
+                self.video_view.subtitle_item.hide()
             return
         if getattr(self, "_preview_video_has_burned_subtitles", False):
             self.media_player.clear_subtitle()
@@ -11609,7 +11747,11 @@ class VideoTranslatorGUI(QMainWindow):
                     ollama_status_label.setText("Ollama server: Connected")
                     ollama_status_label.setStyleSheet("color: #61d6a8;")
                 else:
-                    ollama_status_label.setText(f"Ollama server: {detail}")
+                    # Keep raw connection details in the runtime log only;
+                    # endpoint/HTTP/traceback text can make the Settings
+                    # dialog grow to an unusable size.
+                    self.log(f"[Ollama] Connection check failed: {detail}")
+                    ollama_status_label.setText("Ollama server: Unable to connect. Check your connection and settings.")
                     ollama_status_label.setStyleSheet("color: #f08a8a;")
 
             worker.finished.connect(on_status)
@@ -11705,7 +11847,11 @@ class VideoTranslatorGUI(QMainWindow):
                 )
                 test_status.setText(f"Connected: {model}")
             except Exception as e:
-                test_status.setText(f"Failed: {e}")
+                if provider == "ollama":
+                    self.log(f"[Ollama] Connection test failed: {e}")
+                    test_status.setText("Unable to connect to Ollama. Please check your connection and settings.")
+                else:
+                    test_status.setText(f"Failed: {e}")
 
         test_btn.clicked.connect(test_ai_connection)
 
