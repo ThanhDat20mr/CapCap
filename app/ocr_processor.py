@@ -11,6 +11,69 @@ from runtime_paths import bin_path
 _OCR_ENGINE = None
 _OCR_ENGINE_LOCK = None
 
+
+class _ReusableDetectorPreProcess:
+    """RapidOCR detector preprocessing with reusable numeric work buffers.
+
+    The arithmetic intentionally mirrors RapidOCR's DetPreProcess: the input
+    is converted/scaled in float32, then mean/std operations occur in float64
+    because RapidOCR's mean/std arrays are float64, and the final NCHW tensor
+    is float32.  Only temporary allocations are changed; tensor shape, dtype,
+    channel order, and numerical values remain equivalent.
+    """
+
+    def __init__(self, target, shared_buffers):
+        self._target = target
+        self._shared_buffers = shared_buffers
+
+    def __getattr__(self, name):
+        return getattr(self._target, name)
+
+    def __call__(self, image):
+        resized = self._target.resize(image)
+        if resized is None:
+            return None
+
+        shape = tuple(resized.shape)
+        buffers = self._shared_buffers.get(shape)
+        if buffers is None:
+            height, width, channels = shape
+            buffers = {
+                "float32": np.empty(shape, dtype=np.float32),
+                "float64": np.empty(shape, dtype=np.float64),
+                "output": np.empty((1, channels, height, width), dtype=np.float32),
+            }
+            self._shared_buffers[shape] = buffers
+
+        float32_buffer = buffers["float32"]
+        float64_buffer = buffers["float64"]
+        output = buffers["output"]
+
+        np.copyto(float32_buffer, resized, casting="unsafe")
+        float32_buffer *= self._target.scale
+        np.copyto(float64_buffer, float32_buffer, casting="unsafe")
+        float64_buffer -= self._target.mean
+        float64_buffer /= self._target.std
+        np.copyto(output[0], float64_buffer.transpose((2, 0, 1)), casting="unsafe")
+        return output
+
+
+def _enable_reusable_detector_preprocess(engine):
+    """Install the validated detector-only optimization on one OCR engine."""
+    detector = getattr(engine, "text_det", None)
+    if detector is None or getattr(detector, "_capcap_reusable_preprocess", False):
+        return engine
+    original_get_preprocess = detector.get_preprocess
+    shared_buffers = {}
+
+    def get_preprocess(max_side):
+        target = original_get_preprocess(max_side)
+        return _ReusableDetectorPreProcess(target, shared_buffers)
+
+    detector.get_preprocess = get_preprocess
+    detector._capcap_reusable_preprocess = True
+    return engine
+
 MAX_CROP_WIDTH = 960
 EMPTY_TOLERANCE = 2
 EXACT_HASH_THRESHOLD = 5.0
@@ -125,6 +188,7 @@ def _load_ocr_engine():
             _OCR_ENGINE = RapidOCR(params={"Global.log_level": "error"})
             detail = f" ({cuda_reason})" if cuda_reason else ""
             print(f"[OCR] CUDA unavailable; using CPU OCR{detail}")
+        _enable_reusable_detector_preprocess(_OCR_ENGINE)
         return _OCR_ENGINE
 
 
