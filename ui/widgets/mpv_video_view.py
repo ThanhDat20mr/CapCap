@@ -1137,29 +1137,16 @@ class _TextLayerOverlayWindow(QWidget):
             region |= QRegion(rect.adjusted(-4, -4, 4, 4).toAlignedRect())
         self.setMask(region)
     def _rect_for(self, item):
-        # Match subtitle rendering: its size is a pixel size on the scaled
-        # preview canvas, not a Qt point size (which is DPI-dependent and
-        # visibly larger for the same numeric value).
-        from app.layers.text import TEXT_LAYER_PADDING_X, TEXT_LAYER_PADDING_Y
-        font = QFont(str(item.get("font_name", "Arial")))
-        font.setPixelSize(max(1, int(item.get("font_size", 60))))
-        font.setBold(bool(item.get("font_bold", False)))
-        metrics = QFontMetrics(font); lines = str(item.get("text", " ")).splitlines() or [" "]
-        width = max(metrics.horizontalAdvance(line) for line in lines) + TEXT_LAYER_PADDING_X * 2
-        height = metrics.height() * len(lines) + TEXT_LAYER_PADDING_Y * 2
-        return QRectF(float(item.get("x", .5)) * self.width() - width / 2, float(item.get("y", .5)) * self.height() - height / 2, width, height), font, metrics, lines
+        from app.layers.text_renderer import layout_text_layer
+        layout = layout_text_layer(item, self.width(), self.height())
+        return layout.rect, layout.font, layout.metrics, layout.lines
     def paintEvent(self, event):
         painter = QPainter(self); painter.setRenderHint(QPainter.TextAntialiasing)
         for item in self._items:
-            rect, font, metrics, lines = self._rect_for(item); painter.setFont(font)
-            bg = QColor(str(item.get("background_color", "") or ""))
-            if bg.isValid():
-                opacity = max(0.0, min(1.0, float(item.get("background_opacity", 0.5) or 0.0)))
-                bg.setAlpha(int(round(opacity * 255)))
-                painter.fillRect(rect, bg)
-            color = QColor(str(item.get("font_color", "#FFFFFF"))); painter.setPen(color if color.isValid() else QColor("#FFFFFF"))
-            baseline = rect.top() + 5 + metrics.ascent()
-            for line in lines: painter.drawText(QPointF(rect.left() + 6, baseline), line); baseline += metrics.height()
+            from app.layers.text_renderer import layout_text_layer, paint_text_layer
+            layout = layout_text_layer(item, self.width(), self.height())
+            rect = layout.rect
+            paint_text_layer(painter, item, layout)
             if str(item.get("id", "")) == self._active_id:
                 painter.setPen(QPen(QColor("#6ee7d6"), 1, Qt.DashLine)); painter.setBrush(Qt.NoBrush); painter.drawRect(rect)
     def mousePressEvent(self, event):

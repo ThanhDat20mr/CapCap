@@ -6373,6 +6373,12 @@ class VideoTranslatorGUI(QMainWindow):
                 "background_color": getattr(layer, "background_color", ""),
                 "background_opacity": max(0.0, min(1.0, float(getattr(layer, "background_opacity", 0.5) or 0.0))),
                 "font_bold": getattr(layer, "font_bold", False),
+                "font_italic": getattr(layer, "font_italic", False),
+                "font_underline": getattr(layer, "font_underline", False),
+                # The shared Qt renderer scales its source-space padding with
+                # the preview canvas just like glyph size, so export and the
+                # editor use the same physical box geometry.
+                "padding_scale": preview_scale,
                 "x": getattr(transform, "x", .5) if transform else .5,
                 "y": getattr(transform, "y", .5) if transform else .5,
             })

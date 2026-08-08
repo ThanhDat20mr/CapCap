@@ -155,6 +155,7 @@ class ExportWorkflow:
         logo_layers=None,
         blur_regions=None,
         text_ass_path="",
+        text_image_layers=None,
     ):
         print(f"[Export] _export_subtitle_video: mask_regions={mask_regions}, logo_layers={logo_layers}")
         print(f"[Export] ass_path={ass_path}, exists={os.path.exists(ass_path) if ass_path else False}")
@@ -169,6 +170,7 @@ class ExportWorkflow:
                 mask_regions=mask_regions,
                 logo_layers=logo_layers,
                 text_ass_path=secondary_text_ass,
+                text_image_layers=text_image_layers,
                 target_width=target_width,
                 target_height=target_height,
                 output_scale_mode=output_scale_mode,
@@ -185,6 +187,7 @@ class ExportWorkflow:
                 subtitle_style=self._subtitle_options(subtitle_style),
                 mask_regions=mask_regions,
                 logo_layers=logo_layers,
+                text_image_layers=text_image_layers,
                 target_width=target_width,
                 target_height=target_height,
                 output_scale_mode=output_scale_mode,
@@ -332,6 +335,8 @@ class ExportWorkflow:
                                     "background_color": str(layer.get("background_color", "") or ""),
                                     "background_opacity": max(0.0, min(1.0, float(layer.get("background_opacity", 0.5) or 0.0))),
                                     "font_bold": bool(layer.get("font_bold", False)),
+                                    "font_italic": bool(layer.get("font_italic", False)),
+                                    "font_underline": bool(layer.get("font_underline", False)),
                                     "x": max(0.0, min(1.0, float(transform.get("x", 0.5)))),
                                     "y": max(0.0, min(1.0, float(transform.get("y", 0.5)))),
                                     "start": max(0.0, float(layer.get("start", 0.0))),
@@ -435,6 +440,34 @@ class ExportWorkflow:
         print(f"[Export] Added {len(text_layers)} TextLayer event(s) to {output_path}")
         return output_path
 
+    def _build_text_layer_images(self, text_layers, temp_dir: str, width: int, height: int) -> list[dict]:
+        """Render static Text layers with the editor's Qt renderer for FFmpeg."""
+        if not text_layers:
+            return []
+        from app.layers.text_renderer import render_text_layer
+
+        base_temp_dir = str(temp_dir or "").strip() or os.path.join(self.workspace_root, "temp")
+        output_dir = os.path.join(base_temp_dir, "text_layer_images")
+        os.makedirs(output_dir, exist_ok=True)
+        result = []
+        for index, layer in enumerate(text_layers):
+            try:
+                rendered = render_text_layer(layer, int(width), int(height))
+                path = os.path.join(output_dir, f"text_layer_{index}_{int(time.time() * 1000)}.png")
+                if not rendered.image.save(path, "PNG"):
+                    raise RuntimeError("QImage could not save PNG")
+                result.append({
+                    "path": path,
+                    "x": int(round(rendered.rect.left())),
+                    "y": int(round(rendered.rect.top())),
+                    "start": float(layer.get("start", 0.0) or 0.0),
+                    "end": float(layer.get("end", 0.0) or 0.0),
+                })
+            except Exception as exc:
+                print(f"[Export] Could not render TextLayer {index} as PNG: {exc}")
+        print(f"[Export] Rendered {len(result)} TextLayer image overlay(s).")
+        return result
+
     def _ensure_subtitle_ass(self, ass_path: str, srt_path: str, subtitle_style, video_path: str, target_width=None, target_height=None) -> str:
         """Build ASS from the active SRT and current style controls.
 
@@ -509,10 +542,13 @@ class ExportWorkflow:
             print(f"[Export] Project root: {state.project_root}")
             print(f"[Export] Artifacts: {list(state.artifacts.keys())}")
         
-        # Extract visual layers from project state and merge text into the
-        # ASS render pass so it shares libass font/layout rendering.
+        # Text is rendered by Qt into cropped transparent PNGs, matching the
+        # editor's QPainter/QFontMetrics geometry instead of libass metrics.
         mask_regions, logo_layers, text_layers, blur_regions = self._extract_overlay_layers(state)
-        text_ass_path = self._build_text_layer_ass("", text_layers, project_temp_dir, target_w, target_h)
+        render_w, render_h = target_w, target_h
+        if not render_w or not render_h:
+            render_w, render_h = self.engine_runtime.get_video_dimensions(video_path)
+        text_image_layers = self._build_text_layer_images(text_layers, project_temp_dir, render_w or 1920, render_h or 1080)
         print(f"[Export] Extracted {len(mask_regions)} mask(s), {len(logo_layers)} logo(s), {len(text_layers)} text layer(s), {len(blur_regions)} blur(s)")
 
         tmp_mux_path = ""
@@ -535,7 +571,7 @@ class ExportWorkflow:
                     mask_regions=mask_regions,
                     logo_layers=logo_layers,
                     blur_regions=blur_regions,
-                    text_ass_path=text_ass_path,
+                    text_image_layers=text_image_layers,
                 )
             elif mode == "voice":
                 self._emit_progress(on_progress, 25, "Muxing Vietnamese audio into the video...")
@@ -543,7 +579,7 @@ class ExportWorkflow:
                 # fast path when there is no Text layer, but burn text after
                 # muxing when the editor contains text overlays.
                 voice_output = output_path
-                if text_layers and text_ass_path and os.path.exists(text_ass_path):
+                if text_image_layers:
                     tmp_mux_path = self._build_temp_mux_path(project_temp_dir)
                     voice_output = tmp_mux_path
                 self.engine_runtime.mux_audio_for_preview(
@@ -575,7 +611,7 @@ class ExportWorkflow:
                         mask_regions=mask_regions,
                         logo_layers=logo_layers,
                         blur_regions=blur_regions,
-                        text_ass_path=text_ass_path,
+                        text_image_layers=text_image_layers,
                     )
             elif mode == "both":
                 tmp_mux_path = self._build_temp_mux_path(project_temp_dir)
@@ -607,7 +643,7 @@ class ExportWorkflow:
                     mask_regions=mask_regions,
                     logo_layers=logo_layers,
                     blur_regions=blur_regions,
-                    text_ass_path=text_ass_path,
+                    text_image_layers=text_image_layers,
                 )
             else:
                 raise ValueError(f"Unsupported export mode: {mode}")
@@ -625,9 +661,11 @@ class ExportWorkflow:
                     os.remove(tmp_mux_path)
                 except OSError:
                     pass
-            if text_ass_path and os.path.exists(text_ass_path):
-                try:
-                    os.remove(text_ass_path)
-                except OSError:
-                    pass
+            for item in text_image_layers:
+                path = str(item.get("path", "") or "")
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
 

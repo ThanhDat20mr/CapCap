@@ -1,4 +1,5 @@
 import os
+from bisect import bisect_right
 from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView, QPushButton
@@ -88,7 +89,11 @@ class EditorTimeline(QGraphicsView):
         # Playback repaints occur several times per second. Keep the static
         # subtitle overlap layout between edits instead of sorting every TS1
         # segment again on every paint.
-        self._overlap_layout_cache: dict[str, tuple[list, dict[str, int], int]] = {}
+        # Per overlap-stacked track: row assignment, row count, start-sorted
+        # layers, their starts, and a monotonic prefix of maximum end times.
+        # The latter three let playback paint only cues that can intersect
+        # the viewport instead of walking a whole long TS1 track per repaint.
+        self._overlap_layout_cache: dict[str, tuple[dict[str, int], int, list, list[float], list[float]]] = {}
         # Preserve subtitle row assignments by layer identity across model
         # refreshes.  This prevents inserting an earlier cue from reflowing
         # every existing cue to different rows.
@@ -1001,6 +1006,33 @@ class EditorTimeline(QGraphicsView):
             if x > 0:
                 painter.drawLine(x, y, x, y + h)
 
+    def _layers_intersecting_viewport(
+        self,
+        sorted_layers: list,
+        sorted_starts: list[float],
+        prefix_max_ends: list[float],
+        scroll_x: int,
+        view_w: int,
+    ) -> list:
+        """Return only cached subtitle layers that can paint in this viewport.
+
+        ``prefix_max_ends`` stays monotonic, so it also finds cues that
+        started before the viewport but extend into it.  Include one bar's
+        minimum visual width as a small left-side guard; this preserves the
+        existing 20-pixel minimum-width drawing behavior at the viewport edge.
+        """
+        if not sorted_layers or self.pixels_per_second <= 0:
+            return []
+        viewport_start = (float(scroll_x) - self.CONTENT_LEFT_PAD) / self.pixels_per_second
+        viewport_end = (float(scroll_x + max(0, view_w)) - self.CONTENT_LEFT_PAD) / self.pixels_per_second
+        minimum_bar_seconds = 20.0 / self.pixels_per_second
+        left_time = max(0.0, viewport_start - minimum_bar_seconds)
+        first = bisect_right(prefix_max_ends, left_time)
+        last = bisect_right(sorted_starts, max(0.0, viewport_end))
+        if first >= last:
+            return []
+        return sorted_layers[first:last]
+
     def _tick_interval(self) -> int:
         if self.pixels_per_second < 40:
             return 10
@@ -1040,9 +1072,44 @@ class EditorTimeline(QGraphicsView):
                     str(getattr(layer, "id", "")): row
                     for layer, row in zip(visible_layers_sorted, layer_rows)
                 }
-                cached_layout = (visible_layers, layer_row_by_id, max(1, cached_num_rows))
+                sorted_starts = [float(getattr(layer, "start", 0.0) or 0.0)
+                                 for layer in visible_layers_sorted]
+                prefix_max_ends: list[float] = []
+                max_end = float("-inf")
+                for layer in visible_layers_sorted:
+                    try:
+                        layer_end = float(getattr(layer, "end", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        layer_end = 0.0
+                    max_end = max(max_end, layer_end)
+                    prefix_max_ends.append(max_end)
+                cached_layout = (
+                    layer_row_by_id,
+                    max(1, cached_num_rows),
+                    visible_layers_sorted,
+                    sorted_starts,
+                    prefix_max_ends,
+                )
                 self._overlap_layout_cache[track.id] = cached_layout
-            visible_layers, layer_row_by_id, num_rows = cached_layout
+            (
+                layer_row_by_id,
+                num_rows,
+                visible_layers_sorted,
+                sorted_starts,
+                prefix_max_ends,
+            ) = cached_layout
+            # TS1 can contain thousands of cues.  During playback the
+            # timeline repaints roughly five times per second, but only a
+            # handful of cues can reach the current viewport.  Find that
+            # subset in O(log n + visible cues), including any long cue that
+            # began before the viewport, instead of traversing all cues.
+            visible_layers = self._layers_intersecting_viewport(
+                visible_layers_sorted,
+                sorted_starts,
+                prefix_max_ends,
+                scroll_x,
+                view_w,
+            )
             num_rows = max(1, num_rows)
             # All rows (primary + overlap-child) share the same small
             # CHILD_TRACK_H height so the whole track stays compact.

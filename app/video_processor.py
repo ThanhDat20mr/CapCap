@@ -1093,7 +1093,33 @@ def srt_to_ass(srt_path: str,
     return ass_path
 
 
-def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, fast=False):
+def _valid_text_image_layers(text_image_layers):
+    return [
+        layer for layer in (text_image_layers or [])
+        if isinstance(layer, dict) and os.path.exists(str(layer.get("path", "") or ""))
+    ]
+
+
+def _append_text_image_filter_parts(filter_parts, current_label, text_image_layers, input_start_index):
+    """Composite cropped Qt TextLayer PNGs in their timeline intervals."""
+    for index, layer in enumerate(text_image_layers):
+        input_index = input_start_index + index
+        x = int(round(float(layer.get("x", 0) or 0)))
+        y = int(round(float(layer.get("y", 0) or 0)))
+        start = max(0.0, float(layer.get("start", 0.0) or 0.0))
+        end = float(layer.get("end", 0.0) or 0.0)
+        image_label = f"text_image_{index}"
+        next_label = f"with_text_image_{index}"
+        filter_parts.append(f"[{input_index}:v]format=rgba[{image_label}]")
+        timing = f":enable='between(t,{start:.3f},{end:.3f})'" if end > start else ""
+        filter_parts.append(
+            f"[{current_label}][{image_label}]overlay={x}:{y}:shortest=1{timing}[{next_label}]"
+        )
+        current_label = next_label
+    return current_label
+
+
+def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, fast=False):
     """Burn subtitles into video using an already-prepared ASS file."""
     print(f"[FFmpeg] embed_ass_subtitles called with mask_regions={mask_regions}, logo_layers={logo_layers}")
     ffmpeg = _ffmpeg_path(ffmpeg_path)
@@ -1119,6 +1145,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
     print(f"[FFmpeg] mask_chain={mask_chain[:100] if mask_chain else 'empty'}")
     
     # Check if we have logo layers
+    text_image_layers = _valid_text_image_layers(text_image_layers)
     has_logos = logo_layers and len(logo_layers) > 0
     print(f"[FFmpeg] has_logos={has_logos}, logo_layers count={len(logo_layers) if logo_layers else 0}")
     
@@ -1129,7 +1156,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             ffmpeg, video_path, ass_path, output_path, logo_layers,
             blur_region, mask_regions, video_w, video_h,
             scale_chain, blur_chain, mask_chain,
-            output_fps, video_filter_state, text_ass_path
+            output_fps, video_filter_state, text_ass_path, text_image_layers
         )
     else:
         # Simple filter chain (no logos)
@@ -1161,14 +1188,17 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             filter_parts.append(f"{current_label}{blur_chain}[blurred]")
             current_label = "[blurred]"
         
-        # Apply the subtitle ASS and the editor Text-layer ASS as separate
-        # libass passes. This preserves the original subtitle file intact
-        # and guarantees both sets of events render together.
+        # TS1 remains an ASS/libass pass. Editor Text layers are then
+        # composited as Qt-rendered transparent PNGs.
         filter_parts.append(f"{current_label}{_ass_filter_expression(ass_path)}[subbed]")
+        current_label = "subbed"
         if text_ass_path and os.path.exists(text_ass_path):
-            filter_parts.append(f"[subbed]{_ass_filter_expression(text_ass_path)}[out]")
-        else:
-            filter_parts.append("[subbed]null[out]")
+            filter_parts.append(f"[{current_label}]{_ass_filter_expression(text_ass_path)}[text_ass]")
+            current_label = "text_ass"
+        current_label = _append_text_image_filter_parts(
+            filter_parts, current_label, text_image_layers, 1
+        )
+        filter_parts.append(f"[{current_label}]null[out]")
         filter_complex = ";".join(part for part in filter_parts if part)
         
         video_encoder_args = _preferred_h264_encoder_args(ffmpeg, fast=fast)
@@ -1190,6 +1220,13 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             '-c:a', 'aac', '-b:a', '192k',
             '-movflags', '+faststart',
         ]
+        # FFmpeg needs a looping image stream so each static text bitmap can
+        # remain available for its entire timed overlay interval.
+        insert_at = command.index('-map')
+        image_inputs = []
+        for layer in text_image_layers:
+            image_inputs += ['-loop', '1', '-framerate', '30', '-i', str(layer['path'])]
+        command[insert_at:insert_at] = image_inputs
         try:
             if output_fps:
                 parsed_fps = int(float(output_fps))
@@ -1243,7 +1280,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
 def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_layers,
                                  blur_region, mask_regions, video_w, video_h,
                                  scale_chain, blur_chain, mask_chain,
-                                 output_fps, video_filter_state, text_ass_path=""):
+                                 output_fps, video_filter_state, text_ass_path="", text_image_layers=None):
     """Build FFmpeg command with logo overlay using filter_complex."""
     
     # Start building the command with video input
@@ -1261,6 +1298,9 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
         source = logo.get('source', '')
         if source and os.path.exists(source):
             command += ['-i', source]
+    text_image_layers = _valid_text_image_layers(text_image_layers)
+    for layer in text_image_layers:
+        command += ['-loop', '1', '-framerate', '30', '-i', str(layer['path'])]
     
     # Build filter_complex
     filter_parts = []
@@ -1347,10 +1387,16 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
     
     # 3. Burn subtitles
     filter_parts.append(f"[{current_label}]{_ass_filter_expression(ass_path)}[subbed]")
+    current_label = "subbed"
     if text_ass_path and os.path.exists(text_ass_path):
-        filter_parts.append(f"[subbed]{_ass_filter_expression(text_ass_path)}[final]")
-    else:
-        filter_parts.append("[subbed]null[final]")
+        filter_parts.append(f"[{current_label}]{_ass_filter_expression(text_ass_path)}[text_ass]")
+        current_label = "text_ass"
+    current_label = _append_text_image_filter_parts(
+        filter_parts, current_label, text_image_layers, 1 + sum(
+            1 for logo in logo_layers if logo.get('source', '') and os.path.exists(logo.get('source', ''))
+        )
+    )
+    filter_parts.append(f"[{current_label}]null[final]")
     
     # Join all filter parts
     filter_complex = ";".join(filter_parts)
@@ -1433,6 +1479,7 @@ def embed_subtitles(video_path, srt_path, output_path,
                     mask_regions=None,
                     logo_layers=None,
                     text_ass_path="",
+                    text_image_layers=None,
                      target_width=None,
                      target_height=None,
                      output_scale_mode="fit",
@@ -1505,6 +1552,7 @@ def embed_subtitles(video_path, srt_path, output_path,
         mask_regions=mask_regions,
         logo_layers=logo_layers,
         text_ass_path=text_ass_path,
+        text_image_layers=text_image_layers,
         target_width=target_width,
         target_height=target_height,
         output_scale_mode=output_scale_mode,

@@ -146,7 +146,7 @@ class EngineRuntime:
             style_instruction=style_instruction,
         )
 
-    def embed_subtitles(self, video_path: str, srt_path: str, output_path: str, *, subtitle_style=None, mask_regions=None, logo_layers=None, text_ass_path="", target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, fast=False) -> bool:
+    def embed_subtitles(self, video_path: str, srt_path: str, output_path: str, *, subtitle_style=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, fast=False) -> bool:
         return self.ffmpeg.embed_subtitles(
             video_path,
             srt_path,
@@ -155,6 +155,7 @@ class EngineRuntime:
             mask_regions=mask_regions,
             logo_layers=logo_layers,
             text_ass_path=text_ass_path,
+            text_image_layers=text_image_layers,
             target_width=target_width,
             target_height=target_height,
             output_scale_mode=output_scale_mode,
@@ -165,7 +166,7 @@ class EngineRuntime:
             fast=fast,
         )
 
-    def embed_ass_subtitles(self, video_path: str, ass_path: str, output_path: str, *, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, fast=False) -> bool:
+    def embed_ass_subtitles(self, video_path: str, ass_path: str, output_path: str, *, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, fast=False) -> bool:
         return self.ffmpeg.embed_ass_subtitles(
             video_path,
             ass_path,
@@ -174,6 +175,7 @@ class EngineRuntime:
             mask_regions=mask_regions,
             logo_layers=logo_layers,
             text_ass_path=text_ass_path,
+            text_image_layers=text_image_layers,
             target_width=target_width,
             target_height=target_height,
             output_scale_mode=output_scale_mode,

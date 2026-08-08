@@ -118,6 +118,8 @@ class PreviewController:
                                         "background_color": str(getattr(layer, "background_color", "") or ""),
                                         "background_opacity": max(0.0, min(1.0, float(getattr(layer, "background_opacity", 0.5) or 0.0))),
                                         "font_bold": bool(getattr(layer, "font_bold", False)),
+                                        "font_italic": bool(getattr(layer, "font_italic", False)),
+                                        "font_underline": bool(getattr(layer, "font_underline", False)),
                                         "x": float(getattr(transform, "x", 0.5)) if transform else 0.5,
                                         "y": float(getattr(transform, "y", 0.5)) if transform else 0.5,
                                         "start": float(getattr(layer, "start", 0.0) or 0.0),
@@ -191,6 +193,40 @@ class PreviewController:
             handle.write(source)
         print(f"[Preview] Added {len(events)} TextLayer event(s) to {ass_path}")
         return ass_path
+
+    def _build_fast_preview_text_images(self, text_layers, start_seconds, duration_seconds, width, height, temp_dir):
+        """Render editor TEXT layers with the shared Qt renderer for Fast Preview."""
+        if not text_layers:
+            return []
+        from app.layers.text_renderer import render_text_layer
+
+        output_dir = os.path.join(temp_dir, "text_layer_images")
+        os.makedirs(output_dir, exist_ok=True)
+        result = []
+        for index, layer in enumerate(text_layers):
+            layer_start, layer_end = float(layer["start"]), float(layer["end"])
+            clip_start = max(0.0, layer_start - start_seconds)
+            clip_end = min(float(duration_seconds), layer_end - start_seconds)
+            if clip_end <= clip_start:
+                continue
+            try:
+                payload = dict(layer)
+                payload["font_size"] = max(1, int(round(float(layer["font_size"]) * 0.85)))
+                payload["padding_scale"] = 1.0
+                rendered = render_text_layer(payload, int(width), int(height))
+                path = os.path.join(output_dir, f"preview_text_layer_{index}_{int(time.time() * 1000)}.png")
+                if not rendered.image.save(path, "PNG"):
+                    raise RuntimeError("QImage could not save PNG")
+                result.append({
+                    "path": path,
+                    "x": int(round(rendered.rect.left())),
+                    "y": int(round(rendered.rect.top())),
+                    "start": clip_start,
+                    "end": clip_end,
+                })
+            except Exception as exc:
+                print(f"[Preview] Could not render TextLayer {index} image: {exc}")
+        return result
 
     @staticmethod
     def _format_duration_ms(duration_ms: int) -> str:
@@ -761,7 +797,7 @@ class PreviewController:
         preview_output = os.path.join(out_dir, f"{video_name}_preview5s_{int(time.time())}.mp4")
         preview_srt_path = ""
         preview_segments = []
-        text_ass_path = self._build_fast_preview_text_ass(
+        text_image_layers = self._build_fast_preview_text_images(
             text_layers, start_seconds, duration_seconds, text_canvas_width, text_canvas_height,
             self.gui.get_project_temp_dir("preview"),
         )
@@ -803,7 +839,7 @@ class PreviewController:
             video_filter_state=self.gui.get_video_filter_state() if hasattr(self.gui, "get_video_filter_state") else {},
             mask_regions=mask_regions,
             logo_layers=logo_layers,
-            text_ass_path=text_ass_path,
+            text_image_layers=text_image_layers,
             temp_dir=self.gui.get_project_temp_dir("preview"),
         )
         self.gui.quick_preview_thread.finished.connect(self.gui.on_quick_preview_ready)
