@@ -1143,7 +1143,7 @@ def _append_text_image_filter_parts(filter_parts, current_label, text_image_laye
     return current_label
 
 
-def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, fast=False):
+def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False):
     """Burn subtitles into video using an already-prepared ASS file."""
     print(f"[FFmpeg] embed_ass_subtitles called with mask_regions={mask_regions}, logo_layers={logo_layers}")
     ffmpeg = _ffmpeg_path(ffmpeg_path)
@@ -1198,6 +1198,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             scale_chain, blur_chain, mask_chain,
             output_fps, video_filter_state, text_ass_path, text_image_layers,
             source_width=source_w, source_height=source_h,
+            audio_gain_db=audio_gain_db,
         )
     else:
         # Simple filter chain (no logos)
@@ -1274,6 +1275,12 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
                     command += ['-r', str(parsed_fps)]
         except Exception:
             pass
+        try:
+            gain_db = float(audio_gain_db or 0.0)
+            if abs(gain_db) > 0.001:
+                command += ['-af', f'volume={gain_db:.4f}dB']
+        except (TypeError, ValueError):
+            pass
         command += [output_path]
     
     encoder_name = 'libx264' if 'libx264' in ' '.join(command) else 'h264_nvenc'
@@ -1321,7 +1328,7 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
                                  blur_region, mask_regions, video_w, video_h,
                                  scale_chain, blur_chain, mask_chain,
                                  output_fps, video_filter_state, text_ass_path="", text_image_layers=None,
-                                 source_width=None, source_height=None):
+                                 source_width=None, source_height=None, audio_gain_db=0.0):
     """Build FFmpeg command with logo overlay using filter_complex."""
     
     # Start building the command with video input
@@ -1454,6 +1461,12 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
         '-c:a', 'aac', '-b:a', '192k',
         '-movflags', '+faststart',
     ]
+    try:
+        gain_db = float(audio_gain_db or 0.0)
+        if abs(gain_db) > 0.001:
+            command += ['-af', f'volume={gain_db:.4f}dB']
+    except (TypeError, ValueError):
+        pass
     
     try:
         if output_fps:
@@ -1530,8 +1543,9 @@ def embed_subtitles(video_path, srt_path, output_path,
                      output_fill_focus_y=0.5,
                      output_fps=None,
                      ffmpeg_path=None,
-                     video_filter_state=None,
-                     fast=False):
+                    video_filter_state=None,
+                    audio_gain_db=0.0,
+                    fast=False):
     """Burn subtitles into video using a properly-styled ASS file.
 
     Workflow:
@@ -1597,6 +1611,7 @@ def embed_subtitles(video_path, srt_path, output_path,
         output_fill_focus_y=output_fill_focus_y,
         output_fps=output_fps,
         video_filter_state=video_filter_state,
+        audio_gain_db=audio_gain_db,
         fast=fast,
     )
 

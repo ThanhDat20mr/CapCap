@@ -354,6 +354,7 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             output_fill_focus_x=float(payload.get("output_fill_focus_x", 0.5) or 0.5),
             output_fill_focus_y=float(payload.get("output_fill_focus_y", 0.5) or 0.5),
             video_filter_state=dict(payload.get("video_filter_state") or {}),
+            original_audio_gain_db=float(payload.get("original_audio_gain_db", 0.0) or 0.0),
             project_state_path=str(payload.get("project_state_path", "") or ""),
             project_temp_dir=str(payload.get("project_temp_dir", "") or ""),
         )

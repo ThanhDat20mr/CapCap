@@ -156,6 +156,7 @@ class ExportWorkflow:
         blur_regions=None,
         text_ass_path="",
         text_image_layers=None,
+        original_audio_gain_db=0.0,
     ):
         print(f"[Export] _export_subtitle_video: mask_regions={mask_regions}, logo_layers={logo_layers}")
         print(f"[Export] ass_path={ass_path}, exists={os.path.exists(ass_path) if ass_path else False}")
@@ -178,6 +179,7 @@ class ExportWorkflow:
                 output_fill_focus_y=output_fill_focus_y,
                 output_fps=output_fps,
                 video_filter_state=video_filter_state,
+                audio_gain_db=original_audio_gain_db,
             )
         else:
             ok = self.engine_runtime.embed_subtitles(
@@ -195,6 +197,7 @@ class ExportWorkflow:
                 output_fill_focus_y=output_fill_focus_y,
                 output_fps=output_fps,
                 video_filter_state=video_filter_state,
+                audio_gain_db=original_audio_gain_db,
             )
         if not ok:
             raise RuntimeError("Failed to burn subtitles into the output video.")
@@ -537,6 +540,7 @@ class ExportWorkflow:
         output_fill_focus_x: float = 0.5,
         output_fill_focus_y: float = 0.5,
         video_filter_state=None,
+        original_audio_gain_db: float = 0.0,
         project_state_path: str = "",
         project_temp_dir: str = "",
         on_progress=None,
@@ -609,6 +613,8 @@ class ExportWorkflow:
         try:
             if mode == "subtitle":
                 self._emit_progress(on_progress, 20, "Burning subtitles into the video...")
+                if abs(float(original_audio_gain_db or 0.0)) > 0.001:
+                    print(f"[Export] Applying A1 Original audio gain: {float(original_audio_gain_db):.2f} dB")
                 self._export_subtitle_video(
                     video_path=video_path,
                     srt_path=srt_path,
@@ -626,6 +632,7 @@ class ExportWorkflow:
                     logo_layers=logo_layers,
                     blur_regions=blur_regions,
                     text_image_layers=text_image_layers,
+                    original_audio_gain_db=original_audio_gain_db,
                 )
             elif mode == "voice":
                 self._emit_progress(on_progress, 25, "Muxing Vietnamese audio into the video...")

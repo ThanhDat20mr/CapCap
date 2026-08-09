@@ -11377,6 +11377,11 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "tabs"):
             self.tabs.setTabEnabled(1, v_ok)
             self.tabs.setTabEnabled(2, v_ok and mode in ("voice", "both"))
+        # Audio Source and related controls are needed before Transcript, so
+        # the workflow Audio tab must be available as soon as a video is
+        # selected—not only after the optional TTS stage completes.
+        if hasattr(self, "audio_tab_btn"):
+            self.audio_tab_btn.setEnabled(v_ok)
         self.update_workflow_availability()
         self.update_guidance_panel()
         self._update_ocr_overlay()

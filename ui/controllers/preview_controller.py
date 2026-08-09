@@ -363,6 +363,82 @@ class PreviewController:
         except Exception:
             return "Unknown"
 
+    def _video_has_audio_stream(self, video_path: str) -> bool:
+        """Determine whether the source audio that subtitle-only export maps exists."""
+        ffprobe_candidates = [
+            bin_path("ffmpeg", "ffprobe.exe"), bin_path("ffprobe.exe"),
+            shutil.which("ffprobe"), shutil.which("ffprobe.exe"),
+        ]
+        ffprobe_path = next((path for path in ffprobe_candidates if path and os.path.isfile(path)), "")
+        if not ffprobe_path:
+            # A selected/extracted source is a safer fallback than presenting
+            # a misleading “No Audio” label when ffprobe is unavailable.
+            return bool(getattr(self.gui, "last_extracted_audio", ""))
+        try:
+            startupinfo = None
+            creationflags = 0
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            result = subprocess.run(
+                [ffprobe_path, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", video_path],
+                capture_output=True, text=True, timeout=10,
+                startupinfo=startupinfo, creationflags=creationflags,
+                check=False,
+            )
+            return bool(str(result.stdout or "").strip())
+        except Exception:
+            return bool(getattr(self.gui, "last_extracted_audio", ""))
+
+    def _export_voice_summary(self) -> str:
+        """Return a compact voice label without exposing individual mappings."""
+        default_voice = ""
+        combo = getattr(self.gui, "free_voice_combo", None)
+        if combo is not None:
+            default_voice = str(combo.currentText() or "").strip()
+        assignments = {}
+        try:
+            assignments = self.gui._speaker_voice_assignments()
+        except Exception:
+            pass
+        speakers = {
+            str(segment.get("speaker", "") or "").strip()
+            for segment in list(getattr(self.gui, "current_translated_segments", None) or self.gui.get_active_segments() or [])
+            if str(segment.get("speaker", "") or "").strip()
+        }
+        voices = set()
+        for speaker in speakers:
+            assigned = str((assignments.get(speaker, {}) or {}).get("voice", "") or "").strip()
+            if assigned and assigned.lower() != "original":
+                voices.add(assigned)
+            elif default_voice:
+                voices.add(default_voice)
+        if not voices and default_voice:
+            voices.add(default_voice)
+        if len(voices) > 1:
+            return f"Multi-speaker ({len(voices)} voices)"
+        return next(iter(voices), "Selected voice")
+
+    def _active_export_layer_summary(self) -> str:
+        """Count only visible, exportable overlay layers from the live timeline."""
+        timeline = getattr(getattr(self.gui, "timeline", None), "_timeline", None)
+        if timeline is None:
+            return "None"
+        labels = {"blur": "Blur", "mask": "Mask", "text": "Text", "image": "Logo"}
+        counts = {key: 0 for key in labels}
+        for track in list(getattr(timeline, "tracks", []) or []):
+            if bool(getattr(track, "muted", False)):
+                continue
+            track_type = str(getattr(getattr(track, "type", ""), "value", getattr(track, "type", ""))).lower()
+            if track_type not in labels:
+                continue
+            for layer in list(getattr(track, "layers", []) or []):
+                if bool(getattr(layer, "visible", True)):
+                    counts[track_type] += 1
+        parts = [f"{count} {labels[key]}" for key, count in counts.items() if count]
+        return ", ".join(parts) if parts else "None"
+
     def _resolve_export_resolution_label(self, video_path: str, output_quality: str) -> str:
         try:
             from video_processor import get_video_dimensions
@@ -469,11 +545,6 @@ class PreviewController:
         except Exception:
             duration_ms = int(getattr(self.gui.timeline, "duration", 0) or 0)
 
-        try:
-            source_size = self._format_bytes(os.path.getsize(video_path))
-        except Exception:
-            source_size = "Unknown"
-
         mode_label = {
             "subtitle": "Subtitle only",
             "voice": "Voice only",
@@ -482,22 +553,72 @@ class PreviewController:
         fps_label = f"{source_fps} FPS (Source)" if output_fps == "source" else f"{output_fps} FPS"
         canvas_label = self.gui.get_output_scale_mode_key().capitalize()
         focus_x, focus_y = self.gui.get_output_fill_focus()
-        audio_label = "None"
-        if mode in ("voice", "both"):
-            audio_label = os.path.basename(audio_path) if audio_path else "Selected audio"
+        mode_key = str(mode or "").strip().lower()
+        a1_volume = int(self.gui.audio_a1_volume_slider.value()) if hasattr(self.gui, "audio_a1_volume_slider") else 100
+        a2_volume = int(self.gui.audio_a2_volume_slider.value()) if hasattr(self.gui, "audio_a2_volume_slider") else 100
+        has_original_audio = self._video_has_audio_stream(video_path)
+        if mode_key == "subtitle":
+            audio_mode = "Original" if has_original_audio and a1_volume > 0 else "No Audio"
+        elif mode_key == "voice":
+            audio_mode = "Dubbed" if audio_path and a2_volume > 0 else "No Audio"
+        elif a1_volume <= 0 and a2_volume <= 0:
+            audio_mode = "No Audio"
+        elif a1_volume <= 0:
+            audio_mode = "Dubbed"
+        elif a2_volume <= 0:
+            audio_mode = "Original"
+        else:
+            audio_mode = "Original + Dubbed"
+
+        language_code = str(self.gui.get_target_language_code() if hasattr(self.gui, "get_target_language_code") else "").lower()
+        language_label = {"vi": "Vietnamese", "en": "English"}.get(language_code, language_code.upper() or "Output language")
+        quality_key = str(output_quality or "").strip().lower()
+        quality_label = {
+            "": "Source", "source": "Source", "same": "Source", "original": "Source", "auto": "Source",
+            "720": "720p", "720p": "720p", "hd": "720p",
+            "1080": "1080p", "1080p": "1080p", "fullhd": "1080p", "fhd": "1080p",
+            "1440": "1440p", "1440p": "1440p", "2k": "1440p", "qhd": "1440p",
+            "2160": "2160p", "2160p": "2160p", "4k": "2160p", "uhd": "2160p",
+        }.get(quality_key, str(output_quality))
+        ratio_key = str(self.gui.get_output_ratio_key() or "source").strip().lower()
+        ratio_label = "Source" if ratio_key in {"", "source", "same", "original", "auto"} else ratio_key
+        has_subtitles = mode_key in {"subtitle", "both"} and bool(
+            getattr(self.gui, "current_translated_segments", None)
+            or getattr(self.gui, "last_translated_srt_path", "")
+        )
+        filters_on = bool(self.gui.has_active_video_filters()) if hasattr(self.gui, "has_active_video_filters") else False
 
         summary_lines = [
             f"Name: {os.path.basename(output_path)}",
             f"Folder: {os.path.dirname(output_path)}",
             f"Mode: {mode_label}",
             f"Duration: {self._format_duration_ms(duration_ms)}",
+            "",
+            "VIDEO",
             f"Resolution: {self._resolve_export_resolution_label(video_path, output_quality)}",
-            f"FPS: {fps_label}",
+            f"Frame Rate: {fps_label}",
+            f"Quality: {quality_label}",
+            f"Ratio: {ratio_label}",
             f"Canvas: {canvas_label}",
             f"Framing: {int(round(focus_x * 100))}% x / {int(round(focus_y * 100))}% y" if self.gui.get_output_scale_mode_key() == "fill" else "Framing: Center",
-            f"Source Size: {source_size}",
-            f"Audio: {audio_label}",
+            f"Video Filters: {'On' if filters_on else 'Off'}",
+            "",
+            "AUDIO & LANGUAGE",
+            f"Language: {language_label}",
+            f"Audio Mode: {audio_mode}",
         ]
+        if mode_key in {"voice", "both"} and audio_mode != "No Audio":
+            processing = str(self.gui.get_audio_handling_mode() if hasattr(self.gui, "get_audio_handling_mode") else "").strip().lower()
+            processing_label = {"fast": "Fast", "clean": "Cleaner"}.get(processing, processing.capitalize() or "Standard")
+            summary_lines.append(f"Audio Processing: {processing_label}")
+        if mode_key in {"voice", "both"} and "Dubbed" in audio_mode:
+            summary_lines.append(f"Voice: {self._export_voice_summary()}")
+        summary_lines.extend([
+            "",
+            "CONTENT",
+            f"Subtitles: {'Yes' if has_subtitles else 'No'}",
+            f"Layers: {self._active_export_layer_summary()}",
+        ])
 
         box = QMessageBox(self.gui)
         box.setIcon(QMessageBox.Information)
@@ -684,6 +805,16 @@ class PreviewController:
             return "subtitle"
         return mode
 
+    def _original_audio_gain_db_for_render(self, mode: str) -> float:
+        """Return A1 gain for subtitle-only renders (which retain source audio)."""
+        if str(mode or "").strip().lower() != "subtitle":
+            return 0.0
+        try:
+            percent = int(self.gui.audio_a1_volume_slider.value())
+            return float(self.gui._percent_to_db(percent))
+        except Exception:
+            return 0.0
+
     def export_final_video(self):
         video_path = self.gui.video_path_edit.text().strip()
         if not video_path or not os.path.exists(video_path):
@@ -691,6 +822,7 @@ class PreviewController:
             return
 
         mode = self._effective_render_mode_without_tts(self.gui.get_output_mode_key())
+        original_audio_gain_db = self._original_audio_gain_db_for_render(mode)
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         translated_srt_path = self.gui.last_translated_srt_path
         translated_ass_path = self.gui.live_preview_ass_path
@@ -804,6 +936,7 @@ class PreviewController:
             output_fill_focus_x=fill_focus_x,
             output_fill_focus_y=fill_focus_y,
             video_filter_state=self.gui.get_video_filter_state() if hasattr(self.gui, "get_video_filter_state") else {},
+            original_audio_gain_db=original_audio_gain_db,
             project_state_path=project_state_path,
             project_temp_dir=self.gui.get_project_temp_dir("export"),
         )
@@ -820,6 +953,7 @@ class PreviewController:
             return
 
         mode = self._effective_render_mode_without_tts(self.gui.get_output_mode_key())
+        original_audio_gain_db = self._original_audio_gain_db_for_render(mode)
         default_dir = self.gui.final_output_folder_edit.text().strip() or os.path.join(self.gui.workspace_root, "output")
         out_dir = QFileDialog.getExistingDirectory(
             self.gui,
@@ -912,6 +1046,7 @@ class PreviewController:
             output_fill_focus_x=fill_focus_x,
             output_fill_focus_y=fill_focus_y,
             video_filter_state=self.gui.get_video_filter_state() if hasattr(self.gui, "get_video_filter_state") else {},
+            original_audio_gain_db=original_audio_gain_db,
             mask_regions=mask_regions,
             logo_layers=logo_layers,
             text_image_layers=text_image_layers,

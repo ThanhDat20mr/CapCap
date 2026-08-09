@@ -104,7 +104,7 @@ class PreviewMuxWorker(QThread):
 class QuickPreviewWorker(QThread):
     finished = Signal(str, str)
 
-    def __init__(self, video_path, output_path, mode, start_seconds, duration_seconds, srt_path="", ass_path="", audio_path="", subtitle_style=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, temp_dir=""):
+    def __init__(self, video_path, output_path, mode, start_seconds, duration_seconds, srt_path="", ass_path="", audio_path="", subtitle_style=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, original_audio_gain_db=0.0, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, temp_dir=""):
         super().__init__()
         self.video_path = video_path
         self.output_path = output_path
@@ -121,6 +121,7 @@ class QuickPreviewWorker(QThread):
         self.output_fill_focus_x = output_fill_focus_x
         self.output_fill_focus_y = output_fill_focus_y
         self.video_filter_state = video_filter_state or {}
+        self.original_audio_gain_db = float(original_audio_gain_db or 0.0)
         self.mask_regions = mask_regions or []
         self.logo_layers = logo_layers or []
         self.text_ass_path = text_ass_path
@@ -179,6 +180,7 @@ class QuickPreviewWorker(QThread):
                     output_fill_focus_x=self.output_fill_focus_x,
                     output_fill_focus_y=self.output_fill_focus_y,
                     video_filter_state=self.video_filter_state,
+                    audio_gain_db=self.original_audio_gain_db,
                     fast=True,
                 )
                 if not ok:
@@ -200,6 +202,7 @@ class QuickPreviewWorker(QThread):
                     output_fill_focus_x=self.output_fill_focus_x,
                     output_fill_focus_y=self.output_fill_focus_y,
                     video_filter_state=self.video_filter_state,
+                    audio_gain_db=self.original_audio_gain_db,
                     fast=True,
                 )
                 if not ok:
