@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSplitter,
     QStackedWidget,
     QTextEdit,
     QToolButton,
@@ -768,7 +769,10 @@ def build_preview_panel(gui):
     gui.frame_preview_image_label.hide()
 
     gui.video_view = MpvVideoView() if is_mpv_backend_available() else VideoView()
-    gui.video_view.setMinimumHeight(320)
+    # The vertical workspace is splitter-resizable.  Keep a practical but
+    # compact minimum so the transport row always has its own space when the
+    # user gives more room to the timeline.
+    gui.video_view.setMinimumHeight(270)
     gui.video_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     gui.timeline = _import_editor_timeline()()
     gui.timeline.setMinimumHeight(360)
@@ -1836,6 +1840,44 @@ def build_preview_panel(gui):
     workspace_row.addWidget(preview_card, 2)
     workspace_row.addWidget(inspector_shell, 3)
 
-    right_layout.addLayout(workspace_row, 3)
-    right_layout.addWidget(timeline_card, 5)
+    # Keep Preview + Inspector and Timeline independently resizable.  The
+    # previous 3:5 layout gave a 16:9 source only enough height to occupy a
+    # small central portion of a wide preview panel.  A 45:55 default gives
+    # the preview about 20% more vertical room while leaving the timeline
+    # comfortably usable.  MpvVideoView recalculates its canvas and overlays
+    # on every resize, so this does not alter any source/canvas coordinates.
+    workspace_widget = QWidget()
+    workspace_widget.setObjectName("previewWorkspace")
+    workspace_widget.setLayout(workspace_row)
+    # 270 px preview + transport row + card margins/spacing.  This prevents
+    # the native MPV surface from extending over the transport controls when
+    # the splitter is dragged upward on a smaller window.
+    workspace_widget.setMinimumHeight(350)
+    timeline_card.setMinimumHeight(360)
+
+    gui.preview_timeline_splitter = QSplitter(Qt.Vertical)
+    gui.preview_timeline_splitter.setObjectName("previewTimelineSplitter")
+    gui.preview_timeline_splitter.setChildrenCollapsible(False)
+    gui.preview_timeline_splitter.setOpaqueResize(True)
+    gui.preview_timeline_splitter.setHandleWidth(7)
+    gui.preview_timeline_splitter.setStyleSheet(
+        "QSplitter::handle { background: #1b2a3d; margin: 2px 0; }"
+        "QSplitter::handle:hover { background: #3a6289; }"
+    )
+    gui.preview_timeline_splitter.addWidget(workspace_widget)
+    gui.preview_timeline_splitter.addWidget(timeline_card)
+    gui.preview_timeline_splitter.setStretchFactor(0, 45)
+    gui.preview_timeline_splitter.setStretchFactor(1, 55)
+    right_layout.addWidget(gui.preview_timeline_splitter, 1)
+
+    def _set_default_preview_timeline_sizes():
+        splitter = gui.preview_timeline_splitter
+        available = sum(splitter.sizes())
+        if available > 0:
+            preview_height = int(round(available * 0.45))
+            splitter.setSizes([preview_height, max(1, available - preview_height)])
+
+    # Apply the default after Qt knows the real window height.  From then on,
+    # the splitter preserves the user's allocation while resizing the window.
+    QtCore.QTimer.singleShot(0, _set_default_preview_timeline_sizes)
     return right_panel
