@@ -51,6 +51,10 @@ def toggle_play(gui):
 
         has_active_video_filters = bool(hasattr(gui, "has_active_video_filters") and gui.has_active_video_filters())
         filter_workflow_active = bool(hasattr(gui, "is_filter_workflow_active") and gui.is_filter_workflow_active())
+        realtime_color_filters = bool(
+            hasattr(gui, "_is_realtime_color_filter_state")
+            and gui._is_realtime_color_filter_state()
+        )
 
         if gui.media_player.is_playing():
             gui.media_player.pause()
@@ -76,6 +80,7 @@ def toggle_play(gui):
             if (
                 has_active_video_filters
                 and filter_workflow_active
+                and not realtime_color_filters
                 and hasattr(gui, "schedule_live_video_filter_preview")
             ):
                 gui.schedule_live_video_filter_preview()
@@ -84,7 +89,7 @@ def toggle_play(gui):
         else:
             current_source = str(getattr(gui.media_player, "_source_path", "") or "")
             preview_source = str(getattr(gui, "last_preview_video_path", "") or "")
-            if has_active_video_filters and filter_workflow_active:
+            if has_active_video_filters and filter_workflow_active and not realtime_color_filters:
                 if filter_workflow_active and bool(getattr(gui, "_video_filter_preview_dirty", False)):
                     gui._play_video_filter_preview_when_ready = False
                     if hasattr(gui, "video_filter_render_status_label") and gui.video_filter_render_status_label is not None:
@@ -105,6 +110,8 @@ def toggle_play(gui):
             gui.seek_frame_preview_timer.stop()
             if hasattr(gui, "hide_filter_thumbnail_preview"):
                 gui.hide_filter_thumbnail_preview()
+            if realtime_color_filters and hasattr(gui, "_apply_realtime_color_filter_preview"):
+                gui._apply_realtime_color_filter_preview()
             if hasattr(gui, "apply_preview_blur_region"):
                 gui.apply_preview_blur_region(force=True)
             if (
@@ -293,6 +300,7 @@ def set_position(gui, position):
     if (
         hasattr(gui, "has_active_video_filters")
         and gui.has_active_video_filters()
+        and not (hasattr(gui, "_is_realtime_color_filter_state") and gui._is_realtime_color_filter_state())
         and hasattr(gui, "is_filter_workflow_active")
         and gui.is_filter_workflow_active()
         and not gui.media_player.is_playing()

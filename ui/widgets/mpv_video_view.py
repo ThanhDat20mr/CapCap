@@ -5,7 +5,7 @@ import re
 import math
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap, QRegion
+from PySide6.QtGui import QBitmap, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap, QRegion
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 
@@ -772,6 +772,11 @@ class _BlurRegionOverlayWindow(QWidget):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        if self._target_view is not None:
+            # Match the native MPV surface: Fill crops to the selected
+            # canvas, so editable overlay chrome must not paint into the
+            # surrounding matte/frame.
+            painter.setClipRect(self._target_view.get_preview_canvas_rect())
         # This is a translucent top-level overlay. Explicitly clear its
         # backing surface before repainting; otherwise stale pixels from a
         # prior active region can remain as dark rectangles in inactive
@@ -938,6 +943,8 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        if self._target_view is not None:
+            painter.setClipRect(self._target_view.get_preview_canvas_rect())
         for index, _region in enumerate(self._regions):
             rect = self.region_rect(index)
             if rect.width() <= 0 or rect.height() <= 0:
@@ -1076,6 +1083,8 @@ class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        if self._target_view is not None:
+            painter.setClipRect(self._target_view.get_preview_canvas_rect())
         for index, _region in enumerate(self._regions):
             rect = self.region_rect(index)
             if rect.width() <= 0 or rect.height() <= 0:
@@ -1266,11 +1275,49 @@ class MpvVideoView(QWidget):
 
 
     def _sync_preview_stack(self):
+        self._update_preview_clip_mask()
+        self._update_video_surface_mask()
         self.video_surface.lower()
         self.subtitle_item.raise_()
         if self.text_overlay is not None:
             self.text_overlay.raise_()
         self.ratio_badge.raise_()
+
+    def _update_preview_clip_mask(self):
+        """Clip native MPV content to the rounded preview frame on Windows."""
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        try:
+            bitmap = QBitmap(self.size())
+            bitmap.fill(Qt.color0)
+            painter = QPainter(bitmap)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setBrush(Qt.color1)
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 10, 10)
+            painter.end()
+            self.setMask(bitmap)
+        except Exception:
+            # Masking is cosmetic; never prevent video playback if a native
+            # window platform does not support it.
+            pass
+
+    def _update_video_surface_mask(self):
+        """Round the native MPV child so it follows the device-frame corners."""
+        if self.video_surface.width() <= 0 or self.video_surface.height() <= 0:
+            return
+        try:
+            bitmap = QBitmap(self.video_surface.size())
+            bitmap.fill(Qt.color0)
+            painter = QPainter(bitmap)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setBrush(Qt.color1)
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(self.video_surface.rect().adjusted(1, 1, -1, -1), 8, 8)
+            painter.end()
+            self.video_surface.setMask(bitmap)
+        except Exception:
+            pass
 
     def set_text_layers(self, layers, active_id=""):
         """Update every ordinary text layer visible above the MPV surface."""
@@ -1285,14 +1332,14 @@ class MpvVideoView(QWidget):
         self.video_source_width = max(0, int(width or 0))
         self.video_source_height = max(0, int(height or 0))
         content_rect = self.get_video_content_rect().toRect()
-        self.video_surface.setGeometry(content_rect)
+        self.video_surface.setGeometry(self._video_surface_rect())
         self._sync_preview_stack()
         self._update_ratio_badge()
         self.reposition_subtitle()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.video_surface.setGeometry(self.get_video_content_rect().toRect())
+        self.video_surface.setGeometry(self._video_surface_rect())
         self._sync_preview_stack()
         self.reposition_subtitle()
         self._update_ratio_badge()
@@ -1382,7 +1429,7 @@ class MpvVideoView(QWidget):
 
     def set_preview_aspect_ratio(self, aspect_key: str):
         self.preview_aspect_key = str(aspect_key or "source").strip().lower() or "source"
-        self.video_surface.setGeometry(self.get_video_content_rect().toRect())
+        self.video_surface.setGeometry(self._video_surface_rect())
         self._sync_preview_stack()
         self._update_ratio_badge()
         self.reposition_subtitle()
@@ -1392,7 +1439,7 @@ class MpvVideoView(QWidget):
 
     def set_preview_scale_mode(self, scale_mode: str):
         self.preview_scale_mode = str(scale_mode or "fit").strip().lower() or "fit"
-        self.video_surface.setGeometry(self.get_video_content_rect().toRect())
+        self.video_surface.setGeometry(self._video_surface_rect())
         self._sync_preview_stack()
         self._update_ratio_badge()
         self.reposition_subtitle()
@@ -1406,12 +1453,30 @@ class MpvVideoView(QWidget):
     def set_preview_fill_focus(self, focus_x: float, focus_y: float):
         self.preview_fill_focus_x = max(0.0, min(1.0, float(focus_x)))
         self.preview_fill_focus_y = max(0.0, min(1.0, float(focus_y)))
-        self.video_surface.setGeometry(self.get_video_content_rect().toRect())
+        self.video_surface.setGeometry(self._video_surface_rect())
         self._sync_preview_stack()
         self._update_ratio_badge()
         self.reposition_subtitle()
         self.blur_overlay.sync_to_view()
         self.update()
+
+    def _video_surface_rect(self):
+        """Keep the native MPV child clipped to the selected output canvas.
+
+        For Fill, the source is zoomed/cropped by MPV inside this canvas. The
+        normalized overlay geometry still uses ``get_video_content_rect`` so
+        Blur/Mask/Text/Logo remain aligned with the visible source area.
+        """
+        is_fill = str(getattr(self, "preview_scale_mode", "fit") or "fit").strip().lower() == "fill"
+        if is_fill:
+            rect = self.get_preview_canvas_rect().toRect()
+        else:
+            rect = self.get_video_content_rect().toRect()
+        # Leave the simulated device/frame stroke visible on both sides.
+        # Floating canvas coordinates can round asymmetrically on odd pixel
+        # widths, so use a symmetric one-pixel inset for the native surface.
+        inset = 2 if is_fill else 1
+        return rect.adjusted(inset, inset, -inset, -inset) if rect.width() > inset * 2 and rect.height() > inset * 2 else rect
 
     def reset_preview_fill_focus(self):
         self.set_preview_fill_focus(0.5, 0.5)

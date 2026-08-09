@@ -40,6 +40,15 @@ class PreviewMuxWorker(QThread):
             from preview_processor import mux_audio_into_video_for_preview
 
             current_video = self.video_path
+            # The subtitle render pass owns the final canvas and grade.  Do
+            # not apply them while muxing audio as that would re-filter the
+            # same frames in Subtitle/Both preview workflows.
+            final_render_applies_filters = bool(
+                self.render_subtitles
+                and self.mode in ("subtitle", "both")
+                and self.srt_path
+                and os.path.exists(self.srt_path)
+            )
             if self.audio_path and os.path.exists(self.audio_path):
                 temp_dir = self.temp_dir or os.path.join(os.getcwd(), "temp")
                 os.makedirs(temp_dir, exist_ok=True)
@@ -48,12 +57,12 @@ class PreviewMuxWorker(QThread):
                     self.video_path,
                     self.audio_path,
                     temp_mux_path,
-                    target_width=self.target_width,
-                    target_height=self.target_height,
+                    target_width=None if final_render_applies_filters else self.target_width,
+                    target_height=None if final_render_applies_filters else self.target_height,
                     scale_mode=self.output_scale_mode,
                     focus_x=self.output_fill_focus_x,
                     focus_y=self.output_fill_focus_y,
-                    video_filter_state=self.video_filter_state,
+                    video_filter_state={} if final_render_applies_filters else self.video_filter_state,
                 )
 
             if self.render_subtitles and self.mode in ("subtitle", "both") and self.srt_path and os.path.exists(self.srt_path):
@@ -95,7 +104,7 @@ class PreviewMuxWorker(QThread):
 class QuickPreviewWorker(QThread):
     finished = Signal(str, str)
 
-    def __init__(self, video_path, output_path, mode, start_seconds, duration_seconds, srt_path="", audio_path="", subtitle_style=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, temp_dir=""):
+    def __init__(self, video_path, output_path, mode, start_seconds, duration_seconds, srt_path="", ass_path="", audio_path="", subtitle_style=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, temp_dir=""):
         super().__init__()
         self.video_path = video_path
         self.output_path = output_path
@@ -103,6 +112,7 @@ class QuickPreviewWorker(QThread):
         self.start_seconds = start_seconds
         self.duration_seconds = duration_seconds
         self.srt_path = srt_path
+        self.ass_path = ass_path
         self.audio_path = audio_path
         self.subtitle_style = subtitle_style or {}
         self.target_width = target_width
@@ -126,6 +136,8 @@ class QuickPreviewWorker(QThread):
             os.makedirs(temp_dir, exist_ok=True)
             if self.text_ass_path and os.path.exists(self.text_ass_path):
                 temp_paths.append(self.text_ass_path)
+            if self.ass_path and os.path.exists(self.ass_path):
+                temp_paths.append(self.ass_path)
             temp_paths.extend(str(item.get("path", "")) for item in self.text_image_layers if item.get("path"))
             stamp = int(time.time())
             base_clip = os.path.join(temp_dir, f"preview_base_{stamp}.mp4")
@@ -151,7 +163,27 @@ class QuickPreviewWorker(QThread):
                 )
                 current_video = voice_clip
 
-            if self.mode in ("subtitle", "both") and self.srt_path and os.path.exists(self.srt_path):
+            if self.mode in ("subtitle", "both") and self.ass_path and os.path.exists(self.ass_path):
+                engine = EngineRuntime()
+                ok = engine.embed_ass_subtitles(
+                    current_video,
+                    self.ass_path,
+                    self.output_path,
+                    mask_regions=self.mask_regions,
+                    logo_layers=self.logo_layers,
+                    text_ass_path=self.text_ass_path,
+                    text_image_layers=self.text_image_layers,
+                    target_width=self.target_width,
+                    target_height=self.target_height,
+                    output_scale_mode=self.output_scale_mode,
+                    output_fill_focus_x=self.output_fill_focus_x,
+                    output_fill_focus_y=self.output_fill_focus_y,
+                    video_filter_state=self.video_filter_state,
+                    fast=True,
+                )
+                if not ok:
+                    raise RuntimeError("Failed to render subtitle preview clip.")
+            elif self.mode in ("subtitle", "both") and self.srt_path and os.path.exists(self.srt_path):
                 engine = EngineRuntime()
                 ok = engine.embed_subtitles(
                     current_video,

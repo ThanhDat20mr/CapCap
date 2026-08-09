@@ -4,6 +4,12 @@ import re
 
 from new_highlight_selector import auto_select_matches
 from runtime_paths import bin_path
+from video_filter_chain import (
+    build_video_color_chain,
+    build_video_filter_chain,
+    build_video_lut_chain,
+    normalize_video_filter_state,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -334,59 +340,77 @@ def _build_canvas_filter_chain(target_width=None, target_height=None, scale_mode
     return ""
 
 
-def _normalize_video_filter_state(video_filter_state) -> dict:
-    if not isinstance(video_filter_state, dict):
-        return {}
-    final_values = video_filter_state.get("final", video_filter_state)
-    if not isinstance(final_values, dict):
-        return {}
-    normalized = {}
-    for field in ("brightness", "contrast", "saturation", "temperature", "highlights", "shadows"):
+def _map_normalized_overlays_to_canvas(regions, source_width, source_height,
+                                       target_width, target_height,
+                                       scale_mode="fit", focus_x=0.5, focus_y=0.5):
+    """Map source-video-normalized rectangles into the output canvas.
+
+    Editor overlays are authored in source-video coordinates.  The preview
+    first fits/crops that source into the selected canvas, so export must use
+    the same transform before converting to pixels.  This is intentionally a
+    small geometry helper shared by every overlay type; it does not alter the
+    stored normalized layer state.
+    """
+    if not isinstance(regions, (list, tuple)):
+        return regions
+    try:
+        sw, sh = float(source_width), float(source_height)
+        tw, th = float(target_width), float(target_height)
+        if sw <= 0 or sh <= 0 or tw <= 0 or th <= 0:
+            return list(regions)
+        mode = str(scale_mode or "fit").strip().lower()
+        scale = max(tw / sw, th / sh) if mode == "fill" else min(tw / sw, th / sh)
+        displayed_w, displayed_h = sw * scale, sh * scale
+        fx = max(0.0, min(1.0, float(focus_x)))
+        fy = max(0.0, min(1.0, float(focus_y)))
+        if mode == "fill":
+            offset_x = (tw - displayed_w) * fx
+            offset_y = (th - displayed_h) * fy
+        else:
+            offset_x = (tw - displayed_w) * 0.5
+            offset_y = (th - displayed_h) * 0.5
+    except (TypeError, ValueError):
+        return list(regions)
+
+    mapped = []
+    for region in regions:
+        if not isinstance(region, dict):
+            continue
         try:
-            normalized[field] = max(-100.0, min(100.0, float(final_values.get(field, 0.0))))
-        except Exception:
-            normalized[field] = 0.0
-    return normalized
+            x = float(region.get("x", 0.0)) * displayed_w + offset_x
+            y = float(region.get("y", 0.0)) * displayed_h + offset_y
+            w = float(region.get("width", 0.0)) * displayed_w
+            h = float(region.get("height", 0.0)) * displayed_h
+        except (TypeError, ValueError):
+            continue
+        # Clip exactly as the preview canvas clips the native video surface.
+        left, top = max(0.0, x), max(0.0, y)
+        right, bottom = min(tw, x + w), min(th, y + h)
+        if right <= left or bottom <= top:
+            continue
+        item = dict(region)
+        item["x"] = left / tw
+        item["y"] = top / th
+        item["width"] = (right - left) / tw
+        item["height"] = (bottom - top) / th
+        mapped.append(item)
+    return mapped
+
+
+def _normalize_video_filter_state(video_filter_state) -> dict:
+    return normalize_video_filter_state(video_filter_state)
 
 
 def _build_video_filter_chain(video_filter_state=None):
-    values = _normalize_video_filter_state(video_filter_state)
-    if not values or not any(abs(value) > 0.01 for value in values.values()):
-        return ""
+    return build_video_filter_chain(video_filter_state)
 
-    brightness = values.get("brightness", 0.0)
-    contrast = values.get("contrast", 0.0)
-    saturation = values.get("saturation", 0.0)
-    temperature = values.get("temperature", 0.0)
-    highlights = values.get("highlights", 0.0)
-    shadows = values.get("shadows", 0.0)
 
-    chain = []
-    eq_parts = []
-    if abs(brightness) > 0.01:
-        eq_parts.append(f"brightness={max(-1.0, min(1.0, brightness / 100.0 * 0.35)):.4f}")
-    if abs(contrast) > 0.01:
-        eq_parts.append(f"contrast={max(0.4, min(1.8, 1.0 + contrast / 100.0 * 0.65)):.4f}")
-    if abs(saturation) > 0.01:
-        eq_parts.append(f"saturation={max(0.0, min(2.2, 1.0 + saturation / 100.0 * 1.2)):.4f}")
-    if eq_parts:
-        chain.append("eq=" + ":".join(eq_parts))
+def _build_video_color_chain(video_filter_state=None):
+    return build_video_color_chain(video_filter_state)
 
-    if abs(temperature) > 0.01:
-        temp_norm = max(-0.35, min(0.35, temperature / 100.0 * 0.35))
-        chain.append(
-            f"colorbalance=rs={temp_norm:.4f}:gs={temp_norm * 0.2:.4f}:bs={-temp_norm:.4f}"
-        )
 
-    if abs(highlights) > 0.01 or abs(shadows) > 0.01:
-        shadow_point = max(0.0, min(0.45, 0.25 + shadows / 100.0 * 0.18))
-        highlight_point = max(0.55, min(1.0, 0.75 + highlights / 100.0 * 0.18))
-        chain.append(
-            "curves=master="
-            f"'0/0 0.25/{shadow_point:.3f} 0.75/{highlight_point:.3f} 1/1'"
-        )
-
-    return ",".join(part for part in chain if part)
+def _build_video_lut_chain(video_filter_state=None):
+    return build_video_lut_chain(video_filter_state)
 
 
 def get_video_dimensions(video_path):
@@ -1128,17 +1152,33 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
     if not os.path.exists(ass_path):
         raise FileNotFoundError(f"ASS subtitle file not found at {ass_path}")
 
-    video_w, video_h = get_video_dimensions(video_path)
+    source_w, source_h = get_video_dimensions(video_path)
+    video_w, video_h = source_w, source_h
 
     scale_chain = _build_canvas_filter_chain(target_width, target_height, output_scale_mode, output_fill_focus_x, output_fill_focus_y)
+    canvas_w, canvas_h = source_w, source_h
     try:
         if target_width and target_height:
             tw = int(target_width)
             th = int(target_height)
             if tw > 0 and th > 0:
-                video_w, video_h = tw, th
+                canvas_w, canvas_h = tw, th
     except Exception:
-        pass
+        canvas_w, canvas_h = source_w, source_h
+
+    print(
+        f"[Export Geometry] subtitle/filter space={source_w}x{source_h} "
+        f"canvas={canvas_w}x{canvas_h} "
+        f"mode={str(output_scale_mode or 'fit').lower()} "
+        f"focus=({float(output_fill_focus_x):.3f},{float(output_fill_focus_y):.3f})"
+    )
+
+    # Logos are composited after the canvas transform, so convert their
+    # source-normalized rectangles into output-canvas coordinates first.
+    logo_layers_for_canvas = _map_normalized_overlays_to_canvas(
+        logo_layers, source_w, source_h, canvas_w, canvas_h,
+        output_scale_mode, output_fill_focus_x, output_fill_focus_y,
+    ) if target_width and target_height else logo_layers
 
     blur_chain = _build_blur_filter_chain(blur_region, video_w, video_h)
     mask_chain = _build_mask_filter_chain(mask_regions, video_w, video_h)
@@ -1146,52 +1186,52 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
     
     # Check if we have logo layers
     text_image_layers = _valid_text_image_layers(text_image_layers)
-    has_logos = logo_layers and len(logo_layers) > 0
-    print(f"[FFmpeg] has_logos={has_logos}, logo_layers count={len(logo_layers) if logo_layers else 0}")
+    has_logos = logo_layers_for_canvas and len(logo_layers_for_canvas) > 0
+    print(f"[FFmpeg] has_logos={has_logos}, logo_layers count={len(logo_layers_for_canvas) if logo_layers_for_canvas else 0}")
     
     # Build command based on whether we have logos
     if has_logos:
         # Complex filter graph with multiple inputs
         command = _build_logo_overlay_command(
-            ffmpeg, video_path, ass_path, output_path, logo_layers,
-            blur_region, mask_regions, video_w, video_h,
+            ffmpeg, video_path, ass_path, output_path, logo_layers_for_canvas,
+            blur_region, mask_regions, canvas_w, canvas_h,
             scale_chain, blur_chain, mask_chain,
-            output_fps, video_filter_state, text_ass_path, text_image_layers
+            output_fps, video_filter_state, text_ass_path, text_image_layers,
+            source_width=source_w, source_height=source_h,
         )
     else:
         # Simple filter chain (no logos)
         filter_parts = []
-        if scale_chain:
-            filter_parts.append(f"[0:v]{scale_chain}[scaled]")
-            current_label = "[scaled]"
-        else:
-            current_label = "[0:v]"
+        current_label = "[0:v]"
         
-        filter_video_chain = _build_video_filter_chain(video_filter_state)
+        filter_video_chain = _build_video_color_chain(video_filter_state)
         if filter_video_chain:
             filter_parts.append(f"{current_label}{filter_video_chain}[filtered]")
             current_label = "[filtered]"
         
-        if mask_chain:
-            # mask_chain is a complete filter graph starting with [0:v] and ending with [mN]
-            # Replace [0:v] with current_label
-            mask_chain = mask_chain.replace("[0:v]", current_label, 1)
-            filter_parts.append(mask_chain)
-            # Extract the final output label from mask_chain
-            if "[m" in mask_chain:
-                # Find the last [mN] label
-                matches = re.findall(r'\[m\d+\]', mask_chain)
-                if matches:
-                    current_label = matches[-1]
-        
         if blur_chain:
             filter_parts.append(f"{current_label}{blur_chain}[blurred]")
             current_label = "[blurred]"
+        if mask_chain:
+            # Keep export consistent with MPV: Blur, then Mask.
+            mask_chain = mask_chain.replace("[0:v]", current_label, 1)
+            filter_parts.append(mask_chain)
+            if "[m" in mask_chain:
+                matches = re.findall(r'\[m\d+\]', mask_chain)
+                if matches:
+                    current_label = matches[-1]
+        lut_chain = _build_video_lut_chain(video_filter_state)
+        if lut_chain:
+            filter_parts.append(f"{current_label}{lut_chain}[lut_filtered]")
+            current_label = "[lut_filtered]"
         
-        # TS1 remains an ASS/libass pass. Editor Text layers are then
-        # composited as Qt-rendered transparent PNGs.
+        # TS1 remains an ASS/libass pass in source-video coordinates, matching
+        # MPV preview. The output canvas transform follows this pass.
         filter_parts.append(f"{current_label}{_ass_filter_expression(ass_path)}[subbed]")
         current_label = "subbed"
+        if scale_chain:
+            filter_parts.append(f"[{current_label}]{scale_chain}[scaled]")
+            current_label = "scaled"
         if text_ass_path and os.path.exists(text_ass_path):
             filter_parts.append(f"[{current_label}]{_ass_filter_expression(text_ass_path)}[text_ass]")
             current_label = "text_ass"
@@ -1280,7 +1320,8 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
 def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_layers,
                                  blur_region, mask_regions, video_w, video_h,
                                  scale_chain, blur_chain, mask_chain,
-                                 output_fps, video_filter_state, text_ass_path="", text_image_layers=None):
+                                 output_fps, video_filter_state, text_ass_path="", text_image_layers=None,
+                                 source_width=None, source_height=None):
     """Build FFmpeg command with logo overlay using filter_complex."""
     
     # Start building the command with video input
@@ -1305,37 +1346,41 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
     # Build filter_complex
     filter_parts = []
     
-    # 1. Apply video filters to main video
-    if scale_chain:
-        filter_parts.append(f"[0:v]{scale_chain}[scaled]")
-        main_label = "scaled"
-    else:
-        main_label = "0:v"
+    # Apply source-video filters and ASS before the final Fit/Fill transform,
+    # matching MPV's subtitle render order. Logo/Text images are composited
+    # after scaling because they are authored in output-canvas coordinates.
+    main_label = "0:v"
     
     # Apply video filter chain
-    filter_video_chain = _build_video_filter_chain(video_filter_state)
+    filter_video_chain = _build_video_color_chain(video_filter_state)
     if filter_video_chain:
         filter_parts.append(f"[{main_label}]{filter_video_chain}[filtered]")
         main_label = "filtered"
     
-    # Apply mask chain
+    # Apply Blur then Mask, matching the managed MPV graph.
+    if blur_chain:
+        filter_parts.append(f"[{main_label}]{blur_chain}[blurred]")
+        main_label = "blurred"
     if mask_chain:
-        # mask_chain is a complete filter graph starting with [0:v] and ending with [mN]
-        # Replace [0:v] with the actual current label
         adjusted_mask_chain = mask_chain.replace("[0:v]", f"[{main_label}]", 1)
         filter_parts.append(adjusted_mask_chain)
-        # Extract the final output label from mask_chain
         import re
         matches = re.findall(r'\[m\d+\]', adjusted_mask_chain)
         if matches:
             main_label = matches[-1].strip("[]")
         else:
             main_label = "masked"
-    
-    # Apply blur chain
-    if blur_chain:
-        filter_parts.append(f"[{main_label}]{blur_chain}[blurred]")
-        main_label = "blurred"
+
+    lut_chain = _build_video_lut_chain(video_filter_state)
+    if lut_chain:
+        filter_parts.append(f"[{main_label}]{lut_chain}[lut_filtered]")
+        main_label = "lut_filtered"
+
+    filter_parts.append(f"[{main_label}]{_ass_filter_expression(ass_path)}[subbed]")
+    main_label = "subbed"
+    if scale_chain:
+        filter_parts.append(f"[{main_label}]{scale_chain}[scaled]")
+        main_label = "scaled"
     
     # 2. Process each logo layer
     logo_input_idx = 1
@@ -1385,9 +1430,7 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
         current_label = next_label
         logo_input_idx += 1
     
-    # 3. Burn subtitles
-    filter_parts.append(f"[{current_label}]{_ass_filter_expression(ass_path)}[subbed]")
-    current_label = "subbed"
+    # Optional legacy secondary ASS/Text pass remains a canvas overlay.
     if text_ass_path and os.path.exists(text_ass_path):
         filter_parts.append(f"[{current_label}]{_ass_filter_expression(text_ass_path)}[text_ass]")
         current_label = "text_ass"
@@ -1503,15 +1546,9 @@ def embed_subtitles(video_path, srt_path, output_path,
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
 
     # Step 1: get real video resolution
+    # ASS is rendered before the output Fit/Fill transform, just like MPV's
+    # live subtitle track, so author it in source-video coordinates.
     video_w, video_h = get_video_dimensions(video_path)
-    try:
-        if target_width and target_height:
-            tw = int(target_width)
-            th = int(target_height)
-            if tw > 0 and th > 0:
-                video_w, video_h = tw, th
-    except Exception:
-        pass
 
     # Step 2: generate ASS
     ass_path = srt_to_ass(

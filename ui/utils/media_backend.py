@@ -1,4 +1,5 @@
 import os
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +9,72 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 from runtime_paths import bin_path
 from video_processor import srt_to_ass
+try:
+    # The normal launcher places ``app`` directly on sys.path.
+    from experimental_mpv_lut import MpvGpuLutPrototype
+except ImportError:  # pragma: no cover - package/import tooling context
+    from app.experimental_mpv_lut import MpvGpuLutPrototype
+
+
+_REALTIME_COLOR_FIELDS = (
+    "brightness", "contrast", "saturation", "temperature", "gamma", "hue",
+    "highlights", "shadows",
+)
+
+
+def _escape_mpv_filter_path(path: str) -> str:
+    value = str(path or "").strip().replace("\\", "/")
+    return value.replace(":", "\\:").replace("'", "\\'")
+
+
+def _realtime_color_graph(state=None) -> str:
+    """Build the managed MPV source-color graph in export order."""
+    source = state.get("final", state) if isinstance(state, dict) else {}
+    if not isinstance(source, dict):
+        source = {}
+    values = {}
+    for field in _REALTIME_COLOR_FIELDS:
+        try:
+            values[field] = max(-100.0, min(100.0, float(source.get(field, 0.0) or 0.0)))
+        except (TypeError, ValueError):
+            values[field] = 0.0
+    if not any(abs(value) > 0.01 for value in values.values()):
+        return ""
+    stages = []
+    current = ""
+    filters = []
+    eq_parts = []
+    if abs(values["brightness"]) > 0.01:
+        eq_parts.append(f"brightness={values['brightness'] / 100.0 * 0.35:.4f}")
+    if abs(values["contrast"]) > 0.01:
+        eq_parts.append(f"contrast={max(0.4, min(1.8, 1.0 + values['contrast'] / 100.0 * 0.65)):.4f}")
+    if abs(values["saturation"]) > 0.01:
+        eq_parts.append(f"saturation={max(0.0, min(2.2, 1.0 + values['saturation'] / 100.0 * 1.2)):.4f}")
+    if abs(values["gamma"]) > 0.01:
+        eq_parts.append(f"gamma={max(0.5, min(2.0, 1.0 + values['gamma'] / 100.0 * 0.75)):.4f}")
+    if eq_parts:
+        filters.append("eq=" + ":".join(eq_parts))
+    if abs(values["hue"]) > 0.01:
+        filt = f"hue=h={max(-180.0, min(180.0, values['hue'] * 1.8)):.3f}"
+        filters.append(filt)
+    if abs(values["temperature"]) > 0.01:
+        temp = max(-0.35, min(0.35, values["temperature"] / 100.0 * 0.35))
+        filt = f"colorbalance=rs={temp:.4f}:gs={temp * 0.2:.4f}:bs={-temp:.4f}"
+        filters.append(filt)
+    if abs(values["highlights"]) > 0.01 or abs(values["shadows"]) > 0.01:
+        shadow_point = max(0.0, min(0.45, 0.25 + values["shadows"] / 100.0 * 0.18))
+        highlight_point = max(0.55, min(1.0, 0.75 + values["highlights"] / 100.0 * 0.18))
+        filters.append(
+            "curves=master="
+            f"'0/0 0.25/{shadow_point:.3f} 0.75/{highlight_point:.3f} 1/1'"
+        )
+    for index, filt in enumerate(filters):
+        output = "color_main" if index == len(filters) - 1 else f"color_stage{index}"
+        stages.append(f"[{current}]{filt}[{output}]" if current else f"{filt}[{output}]")
+        current = output
+    if current and current != "color_main":
+        stages.append(f"[{current}]null[color_main]")
+    return ";".join(stages)
 
 
 def _ffprobe_video_duration(video_path: str) -> float:
@@ -117,6 +184,15 @@ class QtMediaPlayerBackend(QObject):
     def clear_blur_region(self):
         return None
 
+    def set_color_filter_state(self, state=None):
+        return None
+
+    def clear_color_filter(self):
+        return None
+
+    def set_preview_framing(self, source_ratio=None, canvas_ratio=None, scale_mode="fit", focus_x=0.5, focus_y=0.5):
+        return None
+
     def set_volume(self, percent):
         value = max(0, min(100, int(percent)))
         self._audio_output.setVolume(value / 100.0)
@@ -208,11 +284,23 @@ class MpvMediaPlayerBackend(QObject):
         self._sub_track_id = -1
         self._blur_region = None
         self._mask_region = None
+        self._color_filter_state = {}
+        self._managed_vf_label = "capcap-managed"
+        self._gpu_lut = None
+        self.supports_native_lut = False
         self._mute_original = False
         self._mute_dubbed = False
 
         prepare_mpv_bundle()
         import mpv
+
+        # gpu-next is the preferred production renderer. Set
+        # MPV_GPU_NEXT_ENABLED=false/0 to force the stable gpu backend while
+        # diagnosing a driver or libplacebo compatibility issue.
+        gpu_next_enabled = str(os.environ.get("MPV_GPU_NEXT_ENABLED", "true") or "true").strip().lower() not in {
+            "0", "false", "no", "off"
+        }
+        self._gpu_next_enabled = gpu_next_enabled
 
         target_wid = video_view.get_mpv_target_winid() if hasattr(video_view, "get_mpv_target_winid") else video_view.winId()
         try:
@@ -222,18 +310,41 @@ class MpvMediaPlayerBackend(QObject):
         if sys.platform.startswith("win"):
             target_wid &= 0xFFFFFFFF
 
-        self._player = mpv.MPV(
-            wid=str(target_wid),
-            ao="null",  # No audio output from mpv — we use QMediaPlayer sidecars
-            input_default_bindings=False,
-            input_vo_keyboard=False,
-            force_window="no",
-            osc=False,
-            pause=True,
-            keep_open="always",
-            sub_auto="no",
-            sub_ass_override="no",
-        )
+        player_options = {
+            "wid": str(target_wid),
+            "vo": "gpu-next" if gpu_next_enabled else "gpu",
+            "ao": "null",  # No audio output from mpv — we use QMediaPlayer sidecars
+            "input_default_bindings": False,
+            "input_vo_keyboard": False,
+            "force_window": "no",
+            "osc": False,
+            "pause": True,
+            "keep_open": "always",
+            "sub_auto": "no",
+            "sub_ass_override": "no",
+        }
+        try:
+            self._player = mpv.MPV(**player_options)
+        except Exception as exc:
+            if not gpu_next_enabled:
+                raise
+            # gpu-next is experimental and may be unavailable with a
+            # particular driver/libplacebo combination. Keep startup safe by
+            # falling back to the stable renderer.
+            self.log(f"[Preview] MPV gpu-next unavailable; falling back to gpu: {exc}")
+            player_options["vo"] = "gpu"
+            self._gpu_next_enabled = False
+            self._player = mpv.MPV(**player_options)
+        if self._gpu_next_enabled:
+            try:
+                self._gpu_lut = MpvGpuLutPrototype(
+                    self._player,
+                    Path("temp/mpv_lut_cache").resolve(),
+                )
+                self.supports_native_lut = True
+            except Exception as exc:
+                self.log(f"[Preview] Native MPV LUT unavailable: {exc}")
+        self.log(f"[Preview] MPV video output: {'gpu-next' if gpu_next_enabled else 'gpu'}")
 
         @self._player.event_callback("file-loaded")
         def _on_file_loaded(event):
@@ -539,7 +650,7 @@ class MpvMediaPlayerBackend(QObject):
         body = self._build_blur_body()
         return f"lavfi=[{body}]" if body else ""
 
-    def _build_blur_body(self) -> str:
+    def _build_blur_body(self, source_label: str | None = None) -> str:
         """Return the lavfi graph body (no `lavfi=[` wrapper) for
         the blur effect. The body takes the source video as input
         and outputs the blurred video on a named label `[b0]`
@@ -620,9 +731,10 @@ class MpvMediaPlayerBackend(QObject):
             # its input.
             output_label = "[b_last]" if index == len(regions) - 1 else f"[b{index}]"
             overlay_parts.append(f"[{base_label}][blur{index}]overlay={x}:{y}{output_label}")
+        split_inputs = f"[{source_label}]" if source_label else ""
         split_outputs = "[main]" + "".join(f"[tmp{i}]" for i in range(len(regions)))
         return (
-            f"split={len(regions) + 1}{split_outputs};"
+            f"{split_inputs}split={len(regions) + 1}{split_outputs};"
             + ";".join(crop_parts + overlay_parts)
         )
 
@@ -647,15 +759,19 @@ class MpvMediaPlayerBackend(QObject):
         output labelled `[b0]` and the mask taking `[b0]` as input)
         makes the chain deterministic: blur first, then mask on top.
         """
-        blur_body = self._build_blur_body()
+        color_body = _realtime_color_graph(self._color_filter_state)
+        blur_body = self._build_blur_body(source_label="color_main" if color_body else None)
         mask_body = self._build_mask_body(
-            input_label="b_last" if blur_body else None
+            input_label=("b_last" if blur_body else ("color_main" if color_body else None))
         )
-        try:
-            self._player.command("vf", "clr", "")
-        except Exception:
-            pass
-        if not blur_body and not mask_body:
+        if not color_body and not blur_body and not mask_body:
+            try:
+                self._player.command("vf", "remove", f"@{self._managed_vf_label}")
+            except Exception:
+                try:
+                    self._player.vf = []
+                except Exception:
+                    pass
             return
         if blur_body and mask_body:
             # The blur body ends with a named output `[b0]` (or the
@@ -668,13 +784,63 @@ class MpvMediaPlayerBackend(QObject):
             combined = blur_body
         else:
             combined = mask_body
+        if color_body:
+            combined = f"{color_body};{combined}" if combined else color_body
         try:
-            self._player.command("vf", "add", f"lavfi=[{combined}]")
+            self._player.command("vf", "set", f"@{self._managed_vf_label}:lavfi=[{combined}]")
         except Exception:
             try:
                 self._player.vf = f"lavfi=[{combined}]"
             except Exception:
                 pass
+
+    def set_color_filter_state(self, state=None):
+        """Update realtime Brightness/Contrast/Saturation state."""
+        self._color_filter_state = dict(state or {}) if isinstance(state, dict) else {}
+        self._apply_all_filters()
+        self._apply_native_lut(self._color_filter_state)
+
+    def clear_color_filter(self):
+        self._color_filter_state = {}
+        self._apply_all_filters()
+        self._apply_native_lut({})
+
+    def set_preview_framing(self, source_ratio=None, canvas_ratio=None, scale_mode="fit", focus_x=0.5, focus_y=0.5):
+        """Apply preview-only crop framing inside the native MPV canvas."""
+        try:
+            source_ratio = float(source_ratio or 0.0)
+            canvas_ratio = float(canvas_ratio or 0.0)
+            mode = str(scale_mode or "fit").strip().lower()
+            if mode != "fill" or source_ratio <= 0.0 or canvas_ratio <= 0.0:
+                zoom = 0.0
+                pan_x = pan_y = 0.0
+            else:
+                crop_factor = max(source_ratio / canvas_ratio, canvas_ratio / source_ratio)
+                zoom = max(0.0, math.log(crop_factor, 2.0))
+                pan_x = (max(0.0, min(1.0, float(focus_x))) - 0.5) * 2.0
+                pan_y = (max(0.0, min(1.0, float(focus_y))) - 0.5) * 2.0
+            self._player.command("set", "video-zoom", str(zoom))
+            self._player.command("set", "video-pan-x", str(pan_x))
+            self._player.command("set", "video-pan-y", str(pan_y))
+        except Exception as exc:
+            self.log(f"[Preview] Framing update failed: {exc}")
+
+    def _apply_native_lut(self, state=None):
+        if not self._gpu_lut:
+            return
+        state = state if isinstance(state, dict) else {}
+        lut_path = str(state.get("lut_path", "") or "").strip()
+        try:
+            strength = float(state.get("lut_strength", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            strength = 0.0
+        if not lut_path or strength <= 0.001 or not os.path.exists(lut_path):
+            self._gpu_lut.clear()
+            return
+        try:
+            self._gpu_lut.apply(lut_path, strength * 100.0)
+        except Exception as exc:
+            self.log(f"[Filter] Native MPV LUT update failed: {exc}")
 
     def set_blur_region(self, blur_region=None):
         if isinstance(blur_region, list):

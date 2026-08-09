@@ -2,6 +2,7 @@ import os
 import subprocess
 
 from runtime_paths import bin_path
+from video_filter_chain import build_video_filter_chain, normalize_video_filter_state
 
 
 _FFMPEG_ENCODER_CACHE = {}
@@ -119,26 +120,7 @@ def _build_canvas_vf(target_width=None, target_height=None, scale_mode: str = "f
 
 
 def _normalize_video_filter_state(video_filter_state) -> dict:
-    if not isinstance(video_filter_state, dict):
-        return {}
-    final_values = video_filter_state.get("final", video_filter_state)
-    normalized = {}
-    for field in ("brightness", "contrast", "saturation", "temperature", "highlights", "shadows"):
-        try:
-            source_values = final_values if isinstance(final_values, dict) else {}
-            normalized[field] = max(-100.0, min(100.0, float(source_values.get(field, 0.0))))
-        except Exception:
-            normalized[field] = 0.0
-    lut_path = str(video_filter_state.get("lut_path", "") or "").strip()
-    if lut_path and os.path.exists(lut_path):
-        normalized["lut_path"] = lut_path
-    else:
-        normalized["lut_path"] = ""
-    try:
-        normalized["lut_strength"] = max(0.0, min(1.0, float(video_filter_state.get("lut_strength", 0.0) or 0.0)))
-    except Exception:
-        normalized["lut_strength"] = 0.0
-    return normalized
+    return normalize_video_filter_state(video_filter_state)
 
 
 def _escape_ffmpeg_path(path: str) -> str:
@@ -149,54 +131,7 @@ def _escape_ffmpeg_path(path: str) -> str:
 
 
 def _build_video_filter_vf(video_filter_state=None) -> str:
-    values = _normalize_video_filter_state(video_filter_state)
-    if not values:
-        return ""
-    brightness = values.get("brightness", 0.0)
-    contrast = values.get("contrast", 0.0)
-    saturation = values.get("saturation", 0.0)
-    temperature = values.get("temperature", 0.0)
-    highlights = values.get("highlights", 0.0)
-    shadows = values.get("shadows", 0.0)
-    lut_path = str(values.get("lut_path", "") or "").strip()
-    lut_strength = max(0.0, min(1.0, float(values.get("lut_strength", 0.0) or 0.0)))
-
-    if not any(abs(values.get(field, 0.0)) > 0.01 for field in ("brightness", "contrast", "saturation", "temperature", "highlights", "shadows")) and not (lut_path and lut_strength > 0.001):
-        return ""
-
-    chain = []
-    if lut_path and lut_strength > 0.001:
-        escaped_lut_path = _escape_ffmpeg_path(lut_path)
-        chain.append(
-            "split=2[base][lutsrc];"
-            f"[lutsrc]lut3d=file='{escaped_lut_path}'[lutapplied];"
-            f"[base][lutapplied]blend=all_expr='A*(1-{lut_strength:.4f})+B*{lut_strength:.4f}'"
-        )
-    eq_parts = []
-    if abs(brightness) > 0.01:
-        eq_parts.append(f"brightness={max(-1.0, min(1.0, brightness / 100.0 * 0.35)):.4f}")
-    if abs(contrast) > 0.01:
-        eq_parts.append(f"contrast={max(0.4, min(1.8, 1.0 + contrast / 100.0 * 0.65)):.4f}")
-    if abs(saturation) > 0.01:
-        eq_parts.append(f"saturation={max(0.0, min(2.2, 1.0 + saturation / 100.0 * 1.2)):.4f}")
-    if eq_parts:
-        chain.append("eq=" + ":".join(eq_parts))
-
-    if abs(temperature) > 0.01:
-        temp_norm = max(-0.35, min(0.35, temperature / 100.0 * 0.35))
-        rm = max(-1.0, min(1.0, temp_norm))
-        bm = max(-1.0, min(1.0, -temp_norm))
-        chain.append(f"colorbalance=rs={rm:.4f}:gs={temp_norm * 0.2:.4f}:bs={bm:.4f}")
-
-    if abs(highlights) > 0.01 or abs(shadows) > 0.01:
-        shadow_point = max(0.0, min(0.45, 0.25 + shadows / 100.0 * 0.18))
-        highlight_point = max(0.55, min(1.0, 0.75 + highlights / 100.0 * 0.18))
-        chain.append(
-            "curves=master="
-            f"'0/0 0.25/{shadow_point:.3f} 0.75/{highlight_point:.3f} 1/1'"
-        )
-
-    return ",".join(part for part in chain if part)
+    return build_video_filter_chain(video_filter_state)
 
 
 def _merge_video_filter_chain(*parts) -> str:

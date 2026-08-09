@@ -1769,18 +1769,15 @@ def build_preview_panel(gui):
         gui.video_inspector_adjust_sliders[field_key] = (slider, value_lbl)
         video_layout.addLayout(row)
 
-    # --- Status + Apply / Revert ---
+    # --- Status + Reset ---
     gui.video_inspector_status_label = QLabel("")
     gui.video_inspector_status_label.setObjectName("helperLabel")
     gui.video_inspector_status_label.setWordWrap(True)
     video_layout.addWidget(gui.video_inspector_status_label)
     action_row = QHBoxLayout()
-    gui.video_inspector_apply_btn = QPushButton("Apply")
-    gui.video_inspector_apply_btn.setToolTip("Apply the filter to the live preview.")
-    gui.video_inspector_revert_btn = QPushButton("Revert")
-    gui.video_inspector_revert_btn.setToolTip("Revert the live preview to the source video.")
-    action_row.addWidget(gui.video_inspector_apply_btn)
-    action_row.addWidget(gui.video_inspector_revert_btn)
+    gui.video_inspector_reset_btn = QPushButton("Reset")
+    gui.video_inspector_reset_btn.setToolTip("Reset all video filters to their defaults.")
+    action_row.addWidget(gui.video_inspector_reset_btn)
     action_row.addStretch(1)
     video_layout.addLayout(action_row)
     video_layout.addStretch(1)

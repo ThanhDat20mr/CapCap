@@ -463,6 +463,11 @@ class ExportWorkflow:
                     "start": float(layer.get("start", 0.0) or 0.0),
                     "end": float(layer.get("end", 0.0) or 0.0),
                 })
+                print(
+                    f"[Export Geometry] TextLayer {index}: center="
+                    f"({float(layer.get('x', 0.5)):.4f},{float(layer.get('y', 0.5)):.4f}) "
+                    f"canvas={int(width)}x{int(height)}"
+                )
             except Exception as exc:
                 print(f"[Export] Could not render TextLayer {index} as PNG: {exc}")
         print(f"[Export] Rendered {len(result)} TextLayer image overlay(s).")
@@ -475,6 +480,14 @@ class ExportWorkflow:
         export.  Reusing that file would silently ignore changes made in the
         subtitle style UI (notably background box, color, and opacity).
         """
+        # The editor's live preview ASS is generated from the current segment
+        # list and style immediately before export. Reusing it makes the
+        # libass event geometry byte-for-byte identical in MPV and FFmpeg.
+        # Other ASS paths are still rebuilt from SRT so stale legacy exports
+        # cannot silently ignore style changes.
+        if ass_path and os.path.exists(ass_path) and os.path.basename(ass_path).lower().startswith("live_preview_"):
+            print(f"[Export] Reusing live preview ASS for WYSIWYG: {ass_path}")
+            return ass_path
         if not srt_path or not os.path.exists(srt_path):
             return ass_path if ass_path and os.path.exists(ass_path) else ""
         from video_processor import srt_to_ass
@@ -531,7 +544,30 @@ class ExportWorkflow:
         subtitle_style = subtitle_style or {}
         target_w, target_h = self._resolve_target_dimensions(video_path, output_quality, output_ratio)
         target_fps = self._resolve_target_fps(output_fps)
-        ass_path = self._ensure_subtitle_ass(ass_path, srt_path, subtitle_style, video_path, target_w, target_h)
+        # MPV renders the live ASS track on the source frame before its
+        # Fit/Fill presentation transform.  Author export ASS in that same
+        # source render space; embed_ass_subtitles applies the canvas transform
+        # after the ASS pass so preview and export share one coordinate system.
+        source_w, source_h = self.engine_runtime.get_video_dimensions(video_path)
+        ass_style = dict(subtitle_style)
+        if ass_style.get("custom_position_enabled") and target_w and target_h:
+            try:
+                mode_key = str(output_scale_mode or "fit").strip().lower()
+                fx = max(0.0, min(1.0, float(output_fill_focus_x)))
+                fy = max(0.0, min(1.0, float(output_fill_focus_y)))
+                scale = max(target_w / source_w, target_h / source_h) if mode_key == "fill" else min(target_w / source_w, target_h / source_h)
+                displayed_w, displayed_h = source_w * scale, source_h * scale
+                offset_x = (target_w - displayed_w) * (fx if mode_key == "fill" else 0.5)
+                offset_y = (target_h - displayed_h) * (fy if mode_key == "fill" else 0.5)
+                x_canvas = float(ass_style.get("custom_position_x", 50.0)) * target_w / 100.0
+                y_canvas = float(ass_style.get("custom_position_y", 86.0)) * target_h / 100.0
+                ass_style["custom_position_x"] = max(0.0, min(100.0, (x_canvas - offset_x) * 100.0 / displayed_w))
+                ass_style["custom_position_y"] = max(0.0, min(100.0, (y_canvas - offset_y) * 100.0 / displayed_h))
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+        ass_path = self._ensure_subtitle_ass(
+            ass_path, srt_path, ass_style, video_path, source_w, source_h
+        )
 
         state = self._load_state(project_state_path)
         self._mark_started(state)
@@ -548,6 +584,24 @@ class ExportWorkflow:
         render_w, render_h = target_w, target_h
         if not render_w or not render_h:
             render_w, render_h = self.engine_runtime.get_video_dimensions(video_path)
+        # Text layers are rendered to target-canvas PNGs.  Their stored
+        # normalized positions are source-video coordinates, so use the same
+        # Fit/Fill transform as the preview before Qt renders the bitmap.
+        if target_w and target_h and text_layers:
+            # Text x/y is a centre anchor (unlike rectangle layers' top-left).
+            sw, sh = self.engine_runtime.get_video_dimensions(video_path)
+            try:
+                scale = max(target_w / float(sw), target_h / float(sh)) if str(output_scale_mode).lower() == "fill" else min(target_w / float(sw), target_h / float(sh))
+                dw, dh = float(sw) * scale, float(sh) * scale
+                fx = max(0.0, min(1.0, float(output_fill_focus_x)))
+                fy = max(0.0, min(1.0, float(output_fill_focus_y)))
+                ox = (target_w - dw) * (fx if str(output_scale_mode).lower() == "fill" else 0.5)
+                oy = (target_h - dh) * (fy if str(output_scale_mode).lower() == "fill" else 0.5)
+                for layer in text_layers:
+                    layer["x"] = (float(layer.get("x", 0.5)) * dw + ox) / float(target_w)
+                    layer["y"] = (float(layer.get("y", 0.5)) * dh + oy) / float(target_h)
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
         text_image_layers = self._build_text_layer_images(text_layers, project_temp_dir, render_w or 1920, render_h or 1080)
         print(f"[Export] Extracted {len(mask_regions)} mask(s), {len(logo_layers)} logo(s), {len(text_layers)} text layer(s), {len(blur_regions)} blur(s)")
 
@@ -586,13 +640,17 @@ class ExportWorkflow:
                     video_path,
                     audio_path,
                     voice_output,
-                    target_width=target_w,
-                    target_height=target_h,
+                    # The subsequent Text/overlay pass owns scaling and the
+                    # color grade, so keep this intermediate audio mux a
+                    # stream-copy video pass.  Otherwise the filters would
+                    # be applied once here and once again below.
+                    target_width=None if voice_output != output_path else target_w,
+                    target_height=None if voice_output != output_path else target_h,
                     output_scale_mode=output_scale_mode,
                     focus_x=output_fill_focus_x,
                     focus_y=output_fill_focus_y,
-                    output_fps=target_fps,
-                    video_filter_state=video_filter_state,
+                    output_fps=None if voice_output != output_path else target_fps,
+                    video_filter_state={} if voice_output != output_path else video_filter_state,
                 )
                 if voice_output != output_path:
                     self._export_subtitle_video(

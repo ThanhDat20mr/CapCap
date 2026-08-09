@@ -5,13 +5,10 @@ import os
 def save_user_settings(gui):
     s = gui.settings
     s.setValue("output_mode", gui.output_mode_combo.currentText())
-    s.setValue("output_quality", gui.get_output_quality_key())
-    if hasattr(gui, "output_fps_combo"):
-        s.setValue("output_fps", gui.output_fps_combo.currentData())
-    if hasattr(gui, "output_ratio_combo"):
-        s.setValue("output_ratio", gui.output_ratio_combo.currentData())
-    if hasattr(gui, "output_scale_mode_combo"):
-        s.setValue("output_scale_mode", gui.output_scale_mode_combo.currentData())
+    # Output/canvas choices are intentionally session-local. Remove legacy
+    # cached values so reopening another project always starts from defaults.
+    for key in ("output_quality", "output_fps", "output_ratio", "output_scale_mode"):
+        s.remove(key)
     if hasattr(gui, "get_video_filter_state"):
         filter_state = gui.get_video_filter_state()
         s.setValue("video_filter_preset", filter_state.get("preset", "original"))
@@ -31,10 +28,9 @@ def save_user_settings(gui):
     s.setValue("srt_output_folder", gui.srt_output_folder_edit.text())
     s.setValue("voice_output_folder", gui.voice_output_folder_edit.text())
     s.setValue("audio_source", gui.audio_source_edit.text())
-    if hasattr(gui, "speaker_diarization_cb"):
-        s.setValue("speaker_diarization", gui.speaker_diarization_cb.isChecked())
-    if hasattr(gui, "speaker_diarization_speakers_combo"):
-        s.setValue("speaker_diarization_num_speakers", gui.get_speaker_diarization_num_speakers())
+    # Speaker diarization choices are also intentionally not cached.
+    s.remove("speaker_diarization")
+    s.remove("speaker_diarization_num_speakers")
     s.setValue("background_audio", gui.bg_music_edit.text())
     s.setValue("mixed_audio", gui.mixed_audio_edit.text())
     s.setValue("free_voice_name", gui.free_voice_combo.currentText())
@@ -96,26 +92,14 @@ def load_user_settings(gui):
     # Generation is always Subtitle + Voice; ignore legacy single-output
     # preferences while preserving the hidden compatibility combo.
     gui.output_mode_combo.setCurrentText("Vietnamese subtitles + voice")
-    output_quality = str(s.value("output_quality", "source") or "source").strip().lower()
     if hasattr(gui, "output_quality_combo"):
-        idx = gui.output_quality_combo.findData(output_quality)
-        if idx >= 0:
-            gui.output_quality_combo.setCurrentIndex(idx)
-    output_fps = str(s.value("output_fps", "source") or "source").strip().lower()
+        gui.output_quality_combo.setCurrentIndex(0)
     if hasattr(gui, "output_fps_combo"):
-        idx = gui.output_fps_combo.findData(output_fps)
-        if idx >= 0:
-            gui.output_fps_combo.setCurrentIndex(idx)
-    output_ratio = str(s.value("output_ratio", "source") or "source").strip().lower()
+        gui.output_fps_combo.setCurrentIndex(0)
     if hasattr(gui, "output_ratio_combo"):
-        idx = gui.output_ratio_combo.findData(output_ratio)
-        if idx >= 0:
-            gui.output_ratio_combo.setCurrentIndex(idx)
-    output_scale_mode = str(s.value("output_scale_mode", "fit") or "fit").strip().lower()
+        gui.output_ratio_combo.setCurrentIndex(0)
     if hasattr(gui, "output_scale_mode_combo"):
-        idx = gui.output_scale_mode_combo.findData(output_scale_mode)
-        if idx >= 0:
-            gui.output_scale_mode_combo.setCurrentIndex(idx)
+        gui.output_scale_mode_combo.setCurrentIndex(0)
     filter_preset = "original"
     filter_intensity = 75
     filter_overrides = {}
@@ -216,17 +200,11 @@ def load_user_settings(gui):
     if audio_handling_index >= 0:
         gui.audio_handling_combo.setCurrentIndex(audio_handling_index)
     if hasattr(gui, "speaker_diarization_cb"):
-        gui.speaker_diarization_cb.setChecked(
-            str(s.value("speaker_diarization", False)).lower() == "true"
-        )
+        gui.speaker_diarization_cb.setChecked(False)
         if hasattr(gui, "update_speaker_diarization_availability"):
             gui.update_speaker_diarization_availability()
     if hasattr(gui, "speaker_diarization_speakers_combo"):
-        try:
-            count = int(s.value("speaker_diarization_num_speakers", -1))
-        except (TypeError, ValueError):
-            count = -1
-        index = gui.speaker_diarization_speakers_combo.findData(count if count >= 2 else -1)
+        index = gui.speaker_diarization_speakers_combo.findData(-1)
         if index >= 0:
             gui.speaker_diarization_speakers_combo.setCurrentIndex(index)
     gui.voice_gender_combo.setCurrentText(s.value("voice_gender", gui.voice_gender_combo.currentText()))

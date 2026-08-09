@@ -142,6 +142,69 @@ class PreviewController:
         return f"{hours}:{minutes:02d}:{whole:02d}.{centis:02d}"
 
     @staticmethod
+    def _parse_ass_timestamp(value: str) -> float:
+        """Return an ASS H:MM:SS.cc timestamp as seconds."""
+        match = re.fullmatch(r"\s*(\d+):(\d{1,2}):(\d{1,2})[.:](\d{1,2})\s*", str(value or ""))
+        if not match:
+            raise ValueError(f"Invalid ASS timestamp: {value!r}")
+        hours, minutes, seconds, centiseconds = (int(part) for part in match.groups())
+        return hours * 3600.0 + minutes * 60.0 + seconds + centiseconds / 100.0
+
+    def _build_fast_preview_subtitle_ass(self, start_seconds: float, duration_seconds: float) -> str:
+        """Rebase the live libass script to the short Fast Preview clip.
+
+        The editor and final export use the live ASS file as their source of truth.
+        Fast Preview trims the source video first, so its subtitle events need only a
+        time offset; copying the script otherwise keeps font metrics, positions,
+        speaker colours, boxes, and animation styles identical.
+        """
+        try:
+            self.gui.sync_live_subtitle_preview()
+            live_ass_path = str(getattr(self.gui, "live_preview_ass_path", "") or "")
+            if not live_ass_path or not os.path.isfile(live_ass_path):
+                return ""
+
+            clip_start = max(0.0, float(start_seconds))
+            clip_end = clip_start + max(0.0, float(duration_seconds))
+            rebased_lines = []
+            event_count = 0
+            with open(live_ass_path, "r", encoding="utf-8-sig", errors="replace") as handle:
+                for raw_line in handle:
+                    if not raw_line.startswith("Dialogue:"):
+                        rebased_lines.append(raw_line)
+                        continue
+                    parts = raw_line.rstrip("\r\n").split(":", 1)
+                    fields = parts[1].lstrip().split(",", 9) if len(parts) == 2 else []
+                    if len(fields) != 10:
+                        rebased_lines.append(raw_line)
+                        continue
+                    try:
+                        event_start = self._parse_ass_timestamp(fields[1])
+                        event_end = self._parse_ass_timestamp(fields[2])
+                    except ValueError:
+                        rebased_lines.append(raw_line)
+                        continue
+                    if event_end <= clip_start or event_start >= clip_end:
+                        continue
+                    fields[1] = self._ass_timestamp(max(event_start, clip_start) - clip_start)
+                    fields[2] = self._ass_timestamp(min(event_end, clip_end) - clip_start)
+                    rebased_lines.append("Dialogue: " + ",".join(fields) + "\n")
+                    event_count += 1
+
+            if not event_count:
+                return ""
+            preview_dir = self.gui.get_project_temp_dir("preview")
+            os.makedirs(preview_dir, exist_ok=True)
+            output_path = os.path.join(preview_dir, f"fast_preview_subtitle_{int(time.time() * 1000)}.ass")
+            with open(output_path, "w", encoding="utf-8") as handle:
+                handle.writelines(rebased_lines)
+            print(f"[Preview] Rebased {event_count} live ASS subtitle event(s) for Fast Preview.")
+            return output_path
+        except Exception as exc:
+            print(f"[Preview] Could not build Fast Preview ASS from live preview: {exc}")
+            return ""
+
+    @staticmethod
     def _ass_color(value: str) -> str:
         value = str(value or "#FFFFFF").strip().lstrip("#")
         if not re.fullmatch(r"[0-9a-fA-F]{6}", value):
@@ -649,8 +712,17 @@ class PreviewController:
 
         if mode in ("subtitle", "both"):
             translated_srt_path = self._prepare_current_export_srt()
-            # Force export to rebuild styled subtitles from the latest SRT instead of a stale ASS preview cache.
-            translated_ass_path = ""
+            # Refresh once, then export the exact ASS that MPV is currently
+            # displaying. This prevents a second, slightly different ASS
+            # generation pass from changing custom anchors/margins after a
+            # Ratio or Canvas setting is selected.
+            try:
+                self.gui.sync_live_subtitle_preview()
+                preview_ass = str(getattr(self.gui, "live_preview_ass_path", "") or "")
+                translated_ass_path = preview_ass if os.path.exists(preview_ass) else ""
+            except Exception as exc:
+                self.gui.log(f"[Export] Could not refresh live subtitle ASS: {exc}")
+                translated_ass_path = ""
 
         if mode in ("subtitle", "both") and (not translated_srt_path or not os.path.exists(translated_srt_path)):
             QMessageBox.warning(self.gui, "Error", "Translated subtitle file not found. Translate or import an SRT first.")
@@ -796,6 +868,7 @@ class PreviewController:
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         preview_output = os.path.join(out_dir, f"{video_name}_preview5s_{int(time.time())}.mp4")
         preview_srt_path = ""
+        preview_ass_path = ""
         preview_segments = []
         text_image_layers = self._build_fast_preview_text_images(
             text_layers, start_seconds, duration_seconds, text_canvas_width, text_canvas_height,
@@ -807,6 +880,7 @@ class PreviewController:
             if not preview_srt_path:
                 QMessageBox.warning(self.gui, "Error", "Could not build the 5-second subtitle preview clip.")
                 return
+            preview_ass_path = self._build_fast_preview_subtitle_ass(start_seconds, duration_seconds)
 
         self.gui.preview_5s_btn.setEnabled(False)
         self.gui.preview_5s_btn.setText("Rendering...")
@@ -829,6 +903,7 @@ class PreviewController:
             start_seconds=start_seconds,
             duration_seconds=duration_seconds,
             srt_path=preview_srt_path,
+            ass_path=preview_ass_path,
             audio_path=chosen_audio,
             subtitle_style=self.gui.get_subtitle_export_style(segments=preview_segments),
             target_width=target_width,
@@ -1209,9 +1284,6 @@ class PreviewController:
                 self.gui.log(f"[Preview] Inspector status error: {e}")
         
         # Re-enable Apply button after preview is ready
-        if hasattr(self.gui, "video_inspector_apply_btn"):
-            self.gui.video_inspector_apply_btn.setEnabled(True)
-            self.gui.log("[Preview] Re-enabled Apply button")
 
         if error:
             self.gui.log(f"[Preview] Error occurred: {error}")

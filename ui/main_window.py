@@ -82,7 +82,6 @@ from worker_adapters import (
     ResourceDownloadWorker,
     OcrTranslatorCaptureWorker,
     OcrTranslatorTranslationWorker,
-    OllamaStatusWorker,
     SegmentAudioPreviewWorker,
     VoiceSamplePreviewWorker,
     VocalSeparationWorker,
@@ -2823,12 +2822,60 @@ class VideoTranslatorGUI(QMainWindow):
         self.sync_live_subtitle_preview()
 
     def schedule_live_video_filter_preview(self):
+        if self._is_realtime_color_filter_state():
+            self._pending_video_filter_preview = False
+            self._apply_realtime_color_filter_preview()
+            return
         if not hasattr(self, "video_filter_preview_timer"):
             return
         self._pending_video_filter_preview = True
         if getattr(self, "_styled_preview_running", False):
             return
         self.video_filter_preview_timer.start()
+
+    def _is_realtime_color_filter_state(self) -> bool:
+        """Return whether the current state is safe for MPV live preview."""
+        try:
+            state = self.get_video_filter_state()
+            # LUT preview is realtime only when the active MPV backend has
+            # native gpu-next/libplacebo LUT support. The stable gpu backend
+            # continues using the debounced FFmpeg preview path.
+            if (
+                state.get("lut_path")
+                and float(state.get("lut_strength", 0) or 0) > 0.001
+                and not bool(getattr(self.media_player, "supports_native_lut", False))
+            ):
+                return False
+            return bool(getattr(self.media_player, "backend_name", "") == "libmpv") and hasattr(
+                self.media_player, "set_color_filter_state"
+            )
+        except Exception:
+            return False
+
+    def _apply_realtime_color_filter_preview(self) -> bool:
+        if not self._is_realtime_color_filter_state():
+            return False
+        try:
+            source_path = self.video_path_edit.text().strip()
+            if not source_path or not os.path.exists(source_path):
+                return False
+            current_source = str(getattr(self.media_player, "_source_path", "") or "")
+            was_playing = bool(self.media_player.is_playing())
+            position = int(self.media_player.position() or 0)
+            if os.path.abspath(current_source) != os.path.abspath(source_path):
+                self.media_player.setSource(QUrl.fromLocalFile(source_path))
+                if position > 0:
+                    self.media_player.setPosition(position)
+                if was_playing:
+                    self.media_player.play()
+            self.media_player.set_color_filter_state(self.get_video_filter_state())
+            self._video_filter_preview_dirty = False
+            self._video_filter_apply_requested = False
+            self._play_video_filter_preview_when_ready = False
+            return True
+        except Exception as exc:
+            self.log(f"[Filter] MPV realtime preview failed: {exc}")
+            return False
 
     def _is_video_filter_slider_interacting(self):
         sliders = [getattr(self, "video_filter_intensity_slider", None)]
@@ -2851,12 +2898,22 @@ class VideoTranslatorGUI(QMainWindow):
             return False
 
     def _mark_video_filter_preview_dirty(self):
+        if self._is_realtime_color_filter_state():
+            self._video_filter_preview_dirty = False
+            self._video_filter_apply_requested = False
+            self._apply_realtime_color_filter_preview()
+            return
         self._video_filter_preview_dirty = self.has_active_video_filters()
         self._video_filter_apply_requested = False
         self.refresh_ui_state()
 
     def apply_current_video_filter(self):
         self.log(f"[Filter] apply_current_video_filter called, has_active={self.has_active_video_filters()}")
+        if self._is_realtime_color_filter_state():
+            self.log("[Filter] Applying Brightness/Contrast/Saturation through MPV realtime preview")
+            self._apply_realtime_color_filter_preview()
+            self.refresh_ui_state()
+            return
         if not self.has_active_video_filters():
             self.log("[Filter] No active filters, returning early")
             self._video_filter_preview_dirty = False
@@ -2921,6 +2978,9 @@ class VideoTranslatorGUI(QMainWindow):
         return False
 
     def run_live_video_filter_preview(self):
+        if self._is_realtime_color_filter_state():
+            self._pending_video_filter_preview = False
+            return
         if getattr(self, "_styled_preview_running", False) or getattr(self, "_frame_preview_running", False):
             return
         if not getattr(self, "_pending_video_filter_preview", False):
@@ -4030,7 +4090,7 @@ class VideoTranslatorGUI(QMainWindow):
         }
 
     def _video_filter_fields(self):
-        return ("brightness", "contrast", "saturation", "temperature", "highlights", "shadows")
+        return ("brightness", "contrast", "saturation", "gamma", "hue", "temperature", "highlights", "shadows")
 
     def _clamp_video_filter_value(self, value):
         try:
@@ -4126,6 +4186,8 @@ class VideoTranslatorGUI(QMainWindow):
         self._video_filter_adjust_overrides = base_overrides
         self._video_filter_user_modified = base_modified_flags
         self._refresh_video_filter_ui()
+        if hasattr(self, "media_player") and self._is_realtime_color_filter_state():
+            self._apply_realtime_color_filter_preview()
         self.refresh_ui_state()
 
     def on_video_filter_preset_selected(self, preset_key):
@@ -4141,6 +4203,7 @@ class VideoTranslatorGUI(QMainWindow):
         )
         self._mark_video_filter_preview_dirty()
         self.schedule_live_video_filter_preview()
+        self._persist_video_filter_settings()
 
     def on_video_filter_intensity_changed(self, value):
         if self._video_filter_ui_sync:
@@ -4151,6 +4214,7 @@ class VideoTranslatorGUI(QMainWindow):
         self._mark_video_filter_preview_dirty()
         if not self._is_video_filter_slider_interacting():
             self.schedule_live_video_filter_preview()
+        self._persist_video_filter_settings()
 
     def on_video_filter_adjust_changed(self, field_key, value):
         if self._video_filter_ui_sync:
@@ -4167,6 +4231,7 @@ class VideoTranslatorGUI(QMainWindow):
         self._mark_video_filter_preview_dirty()
         if not self._is_video_filter_slider_interacting():
             self.schedule_live_video_filter_preview()
+        self._persist_video_filter_settings()
 
     def reset_video_filters(self):
         self.set_video_filter_state(
@@ -4175,10 +4240,13 @@ class VideoTranslatorGUI(QMainWindow):
             self._default_video_filter_overrides(),
             self._default_video_filter_modified_flags(),
         )
+        if self._is_realtime_color_filter_state():
+            self._apply_realtime_color_filter_preview()
         self._video_filter_preview_dirty = False
         self._video_filter_apply_requested = False
-        self.revert_video_filter_preview_to_source()
-        self.schedule_live_video_filter_preview()
+        if not self._is_realtime_color_filter_state():
+            self.schedule_live_video_filter_preview()
+        self._persist_video_filter_settings()
 
     def reset_video_filter_adjustments(self):
         seeded_overrides = self._get_video_filter_scaled_values(self._video_filter_preset_key, self._video_filter_intensity)
@@ -4201,8 +4269,10 @@ class VideoTranslatorGUI(QMainWindow):
             lut_path = ""
         lut_strength = 0.0
         if lut_path:
-            lut_strength = max(0.0, min(0.45, (float(self._video_filter_intensity) / 100.0) * 0.45))
-        active = any(abs(int(value)) > 0 for value in effective_values.values())
+            lut_strength = max(0.0, min(1.0, float(self._video_filter_intensity) / 100.0))
+        active = any(abs(int(value)) > 0 for value in effective_values.values()) or bool(
+            lut_path and lut_strength > 0.001
+        )
         return {
             "preset": preset_key,
             "intensity": int(self._video_filter_intensity),
@@ -4226,6 +4296,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.video_view.set_preview_aspect_ratio(self.get_output_ratio_key())
         if hasattr(self, "video_view") and hasattr(self.video_view, "set_preview_scale_mode"):
             self.video_view.set_preview_scale_mode(self.get_output_scale_mode_key())
+        self._sync_preview_framing_to_player()
         self.update_subtitle_preview_style()
         self.apply_preview_blur_region()
         self.refresh_ui_state()
@@ -4233,17 +4304,20 @@ class VideoTranslatorGUI(QMainWindow):
     def on_output_scale_mode_changed(self, *_args):
         if hasattr(self, "video_view") and hasattr(self.video_view, "set_preview_scale_mode"):
             self.video_view.set_preview_scale_mode(self.get_output_scale_mode_key())
+        self._sync_preview_framing_to_player()
         self.update_subtitle_preview_style()
         self.apply_preview_blur_region()
         self.refresh_ui_state()
 
     def on_preview_framing_changed(self, *_args):
+        self._sync_preview_framing_to_player()
         self.apply_preview_blur_region()
         self.refresh_ui_state()
 
     def reset_preview_framing(self):
         if hasattr(self, "video_view") and hasattr(self.video_view, "reset_preview_fill_focus"):
             self.video_view.reset_preview_fill_focus()
+        self._sync_preview_framing_to_player()
         self.apply_preview_blur_region()
         self.refresh_ui_state()
 
@@ -4870,15 +4944,11 @@ class VideoTranslatorGUI(QMainWindow):
         export_font_size = max(1, int(self.subtitle_font_size_spin.value()))
         style_segments = segments if segments is not None else self.get_active_segments()
         position = self.get_subtitle_position_config()
+        # Preview and export both use the subtitle's centre anchor.  Do not
+        # convert it to ASS's bottom anchor: that conversion includes the Qt
+        # widget's font-metric padding and caused a vertical offset whenever
+        # the output canvas ratio changed.
         custom_bottom_y = None
-        if position.get("custom_position_enabled") and hasattr(self, "video_view"):
-            try:
-                item = self.video_view.subtitle_item
-                canvas = self.video_view.get_preview_canvas_rect()
-                top_left = self.video_view.mapFromGlobal(item.pos()) if item.is_top_level_overlay() else item.pos()
-                custom_bottom_y = max(0.0, min(100.0, (top_left.y() + item.height() - canvas.top()) * 100.0 / canvas.height()))
-            except Exception:
-                custom_bottom_y = None
         return {
             "font_name": self._resolved_subtitle_font_name(
                 self.subtitle_font_combo.currentText().strip() or preset.get("font_name", "Arial")
@@ -5029,6 +5099,7 @@ class VideoTranslatorGUI(QMainWindow):
 
     def refresh_video_dimensions(self, path: str):
         refresh_video_dimensions_impl(self, path, get_video_dimensions)
+        self._sync_preview_framing_to_player()
 
     def _hex_to_ass_color(self, hex_color: str) -> str:
         color = QColor(hex_color)
@@ -6570,6 +6641,13 @@ class VideoTranslatorGUI(QMainWindow):
 
     def _show_video_inspector_for_track(self, track, layer=None):
         """Show the Video Track Inspector (V1 Video)."""
+        if not self._video_filter_inspector_available():
+            self._switch_inspector("default")
+            if hasattr(self, "default_inspector_summary_label"):
+                self.default_inspector_summary_label.setText(
+                    "Video Filter Inspector requires the gpu-next preview backend."
+                )
+            return
         self._switch_inspector("video")
         if track is None:
             return
@@ -6623,11 +6701,9 @@ class VideoTranslatorGUI(QMainWindow):
                 slider.sliderReleased.connect(
                     lambda fk=field_key: self._on_video_inspector_adjust_released(fk)
                 )
-        # Apply / Revert
-        if hasattr(self, "video_inspector_apply_btn"):
-            self.video_inspector_apply_btn.clicked.connect(self._on_video_inspector_apply)
-        if hasattr(self, "video_inspector_revert_btn"):
-            self.video_inspector_revert_btn.clicked.connect(self._on_video_inspector_revert)
+        # Reset
+        if hasattr(self, "video_inspector_reset_btn"):
+            self.video_inspector_reset_btn.clicked.connect(self._on_video_inspector_reset)
         self._video_inspector_wired = True
         # Initial UI sync
         self._sync_video_inspector_ui()
@@ -6681,31 +6757,19 @@ class VideoTranslatorGUI(QMainWindow):
                 active = bool(self.has_active_video_filters())
             except Exception:
                 active = False
+            realtime = self._is_realtime_color_filter_state()
             
-            is_applying = getattr(self, "_video_filter_apply_requested", False) and getattr(self, "_styled_preview_running", False)
-            
-            if is_applying:
-                self.video_inspector_status_label.setText("⟳ Applying filter...")
-                self.video_inspector_status_label.setStyleSheet("color: #2196F3; font-weight: bold;")
+            if active and realtime:
+                self.video_inspector_status_label.setText("✓ Realtime preview")
+                self.video_inspector_status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
             elif active:
                 self.video_inspector_status_label.setText("✓ Filter applied")
                 self.video_inspector_status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
             else:
                 self.video_inspector_status_label.setText("No filter applied")
                 self.video_inspector_status_label.setStyleSheet("color: #888; font-weight: normal;")
-            
-            if hasattr(self, "video_inspector_apply_btn"):
-                if is_applying:
-                    self.video_inspector_apply_btn.setText("Applying...")
-                    self.video_inspector_apply_btn.setEnabled(False)
-                elif active:
-                    # Filter is active - enable button so user can re-apply if needed
-                    self.video_inspector_apply_btn.setText("Apply")
-                    self.video_inspector_apply_btn.setEnabled(True)
-                else:
-                    # No filter - enable button so user can apply
-                    self.video_inspector_apply_btn.setText("Apply")
-                    self.video_inspector_apply_btn.setEnabled(True)
+            if hasattr(self, "video_inspector_reset_btn"):
+                self.video_inspector_reset_btn.setEnabled(self._video_filter_inspector_available())
         except Exception as e:
             if hasattr(self, "log"):
                 self.log(f"[Filter] Status refresh error: {e}")
@@ -6747,13 +6811,25 @@ class VideoTranslatorGUI(QMainWindow):
 
     def _on_video_inspector_adjust_changed(self, field_key: str, value: int, value_lbl):
         value_lbl.setText(str(int(value)))
-        if not isinstance(getattr(self, "_video_filter_adjust_overrides", None), dict):
-            self._video_filter_adjust_overrides = {}
-        self._video_filter_adjust_overrides[field_key] = int(value)
-        if not isinstance(getattr(self, "_video_filter_user_modified", None), dict):
-            self._video_filter_user_modified = {}
-        self._video_filter_user_modified[field_key] = True
+        self.on_video_filter_adjust_changed(field_key, int(value))
         self._refresh_video_inspector_status()
+
+    def _video_filter_inspector_available(self) -> bool:
+        """Return whether the initialized preview backend supports realtime filters."""
+        backend = getattr(self, "media_player", None)
+        if backend is None or str(getattr(backend, "backend_name", "")) != "libmpv":
+            return False
+        if not bool(getattr(backend, "_gpu_next_enabled", False)):
+            return False
+        try:
+            vo = backend._player.vo
+            return any(
+                str(item.get("name", "")) == "gpu-next"
+                for item in (vo or [])
+                if isinstance(item, dict)
+            )
+        except Exception:
+            return False
 
     def _on_video_inspector_adjust_released(self, field_key: str):
         if hasattr(self, "on_video_filter_slider_released"):
@@ -6763,40 +6839,8 @@ class VideoTranslatorGUI(QMainWindow):
                 pass
         self._refresh_video_inspector_status()
 
-    def _on_video_inspector_apply(self):
-        self.log("[Filter] Apply button clicked")
-        
-        # Disable button immediately to prevent double-clicks
-        if hasattr(self, "video_inspector_apply_btn"):
-            self.video_inspector_apply_btn.setEnabled(False)
-            self.video_inspector_apply_btn.setText("Applying...")
-        
-        try:
-            self._video_filter_apply_requested = True
-            if hasattr(self, "refresh_ui_state"):
-                self.refresh_ui_state()
-        except Exception as e:
-            self.log(f"[Filter] UI update error: {e}")
-        
-        if hasattr(self, "apply_current_video_filter"):
-            try:
-                self.log(f"[Filter] Calling apply_current_video_filter, has_active={self.has_active_video_filters()}")
-                self.apply_current_video_filter()
-            except Exception as e:
-                self.log(f"[Filter] Apply error: {e}")
-                if hasattr(self, "show_error"):
-                    self.show_error("Filter Error", "Failed to apply filter.", str(e))
-                # Re-enable button on error
-                if hasattr(self, "video_inspector_apply_btn"):
-                    self.video_inspector_apply_btn.setEnabled(True)
-                    self.video_inspector_apply_btn.setText("Apply")
-
-    def _on_video_inspector_revert(self):
-        if hasattr(self, "revert_video_filter_preview_to_source"):
-            try:
-                self.revert_video_filter_preview_to_source()
-            except Exception:
-                pass
+    def _on_video_inspector_reset(self):
+        self.reset_video_filters()
         self._refresh_video_inspector_status()
         if hasattr(self, "refresh_ui_state"):
             self.refresh_ui_state()
@@ -7972,6 +8016,36 @@ class VideoTranslatorGUI(QMainWindow):
         self.persist_current_timeline_project_data()
         self.schedule_live_subtitle_preview_refresh()
         self.refresh_ui_state()
+
+    def _sync_preview_framing_to_player(self):
+        """Keep native MPV crop framing consistent with the preview canvas."""
+        view = getattr(self, "video_view", None)
+        player = getattr(self, "media_player", None)
+        if view is None or player is None or not hasattr(player, "set_preview_framing"):
+            return
+        try:
+            source_w = float(getattr(view, "video_source_width", 0) or 0)
+            source_h = float(getattr(view, "video_source_height", 0) or 0)
+            canvas = view.get_preview_canvas_rect()
+            source_ratio = source_w / source_h if source_w > 0 and source_h > 0 else 0.0
+            canvas_ratio = canvas.width() / canvas.height() if canvas.height() > 0 else source_ratio
+            focus_x, focus_y = self.get_output_fill_focus()
+            player.set_preview_framing(
+                source_ratio,
+                canvas_ratio,
+                self.get_output_scale_mode_key(),
+                focus_x,
+                focus_y,
+            )
+        except Exception as exc:
+            self.log(f"[Preview] Could not sync canvas framing: {exc}")
+
+    def _persist_video_filter_settings(self):
+        """Persist realtime filter controls without requiring an Apply action."""
+        try:
+            self.save_user_settings()
+        except Exception as exc:
+            self.log(f"[Filter] Could not persist filter settings: {exc}")
 
     def transcribe_selected_range_alternate(self):
         timeline = getattr(self, "timeline", None)
@@ -10787,8 +10861,29 @@ class VideoTranslatorGUI(QMainWindow):
             )
         ):
             self.refresh_video_dimensions(video_path)
-        video_width, video_height = self._subtitle_render_dimensions()
+        source_width = max(1, int(getattr(self.video_view, "video_source_width", 0) or 1920))
+        source_height = max(1, int(getattr(self.video_view, "video_source_height", 0) or 1080))
+        canvas_width, canvas_height = self._subtitle_render_dimensions()
         subtitle_style = self.get_subtitle_export_style(segments=segments)
+        # MPV/libass renders subtitles on the source frame before MPV applies
+        # its Fit/Fill presentation transform. Convert custom canvas-relative
+        # anchors back into source coordinates so the visible result follows
+        # the same point after framing.
+        if subtitle_style.get("custom_position_enabled") and (canvas_width != source_width or canvas_height != source_height):
+            try:
+                scale_mode = self.get_output_scale_mode_key()
+                focus_x, focus_y = self.get_output_fill_focus()
+                scale = max(canvas_width / source_width, canvas_height / source_height) if scale_mode == "fill" else min(canvas_width / source_width, canvas_height / source_height)
+                displayed_w, displayed_h = source_width * scale, source_height * scale
+                offset_x = (canvas_width - displayed_w) * (focus_x if scale_mode == "fill" else 0.5)
+                offset_y = (canvas_height - displayed_h) * (focus_y if scale_mode == "fill" else 0.5)
+                x_canvas = float(subtitle_style.get("custom_position_x", 50.0)) * canvas_width / 100.0
+                y_canvas = float(subtitle_style.get("custom_position_y", 86.0)) * canvas_height / 100.0
+                subtitle_style["custom_position_x"] = max(0.0, min(100.0, (x_canvas - offset_x) * 100.0 / displayed_w))
+                subtitle_style["custom_position_y"] = max(0.0, min(100.0, (y_canvas - offset_y) * 100.0 / displayed_h))
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+        video_width, video_height = source_width, source_height
         preview_signature = (
             video_path,
             video_width,
@@ -11175,6 +11270,8 @@ class VideoTranslatorGUI(QMainWindow):
                 status_text = "Rendering filtered preview video..."
             elif getattr(self, "_video_filter_preview_dirty", False):
                 status_text = "Filter changes pending. Click Apply Filter to render motion preview."
+            elif self._is_realtime_color_filter_state():
+                status_text = "Realtime MPV preview active."
             elif self.has_active_video_filters() if hasattr(self, "has_active_video_filters") else False:
                 status_text = "Filtered preview video is ready."
             self.video_filter_render_status_label.setText(status_text)
@@ -11859,44 +11956,8 @@ class VideoTranslatorGUI(QMainWindow):
         provider_hint.setVisible(not remote_mode)
         layout.addWidget(provider_hint)
 
-        ollama_status_label = QLabel("")
-        ollama_status_label.setObjectName("helperLabel")
-        ollama_status_label.setVisible(False)
-        layout.addWidget(ollama_status_label)
-
         def _toggle_visible(widget, visible):
             widget.setVisible(visible)
-
-        def refresh_ollama_status():
-            if provider_combo.currentData() != "ollama":
-                return
-            active = getattr(self, "_ollama_status_worker", None)
-            if active is not None and active.isRunning():
-                return
-            ollama_status_label.setText("Ollama server: Checking…")
-            ollama_status_label.setStyleSheet("color: #f6c863;")
-            worker = OllamaStatusWorker(base_url_edit.text().strip() or "http://localhost:11434/v1")
-            self._ollama_status_worker = worker
-
-            def on_status(connected, detail):
-                if getattr(self, "_ollama_status_worker", None) is worker:
-                    self._ollama_status_worker = None
-                if provider_combo.currentData() != "ollama":
-                    return
-                if connected:
-                    ollama_status_label.setText("Ollama server: Connected")
-                    ollama_status_label.setStyleSheet("color: #61d6a8;")
-                else:
-                    # Keep raw connection details in the runtime log only;
-                    # endpoint/HTTP/traceback text can make the Settings
-                    # dialog grow to an unusable size.
-                    self.log(f"[Ollama] Connection check failed: {detail}")
-                    ollama_status_label.setText("Ollama server: Unable to connect. Check your connection and settings.")
-                    ollama_status_label.setStyleSheet("color: #f08a8a;")
-
-            worker.finished.connect(on_status)
-            worker.finished.connect(worker.deleteLater)
-            worker.start()
 
         def update_provider_fields():
             p = provider_combo.currentData()
@@ -11913,7 +11974,6 @@ class VideoTranslatorGUI(QMainWindow):
             _toggle_visible(test_status, not remote_mode and is_ai)
             _toggle_visible(model_label, not remote_mode and is_ai)
             _toggle_visible(model_edit, not remote_mode and is_ai)
-            _toggle_visible(ollama_status_label, not remote_mode and is_ollama)
             if is_google:
                 provider_hint.setText("Free Google web translate, no API key needed. Lower quality than AI translation.")
                 key_edit.clear()
@@ -11946,8 +12006,6 @@ class VideoTranslatorGUI(QMainWindow):
             model_edit.setReadOnly(False)
             dialog.layout().invalidate()
             dialog.adjustSize()
-            if is_ollama:
-                QTimer.singleShot(0, refresh_ollama_status)
 
         test_btn = QPushButton("Test Connection", dialog)
         test_btn.setVisible(not remote_mode)
