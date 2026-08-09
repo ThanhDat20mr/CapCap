@@ -3637,6 +3637,7 @@ class VideoTranslatorGUI(QMainWindow):
             self.transcript_text.clear()
         if hasattr(self, "translated_text"):
             self.translated_text.clear()
+        self._saved_timeline_model_restored = False
         if hasattr(self, "timeline"):
             self.timeline.set_segments([])
             self.timeline.set_video_thumbnails([])
@@ -3644,7 +3645,9 @@ class VideoTranslatorGUI(QMainWindow):
             # Restore optional tracks before apply_segments_to_timeline().
             # That method refreshes TS1, while preserving the restored Text,
             # Logo, Blur, and Mask tracks.
-            self._restore_saved_timeline_model(state)
+            self._saved_timeline_model_restored = bool(
+                self._restore_saved_timeline_model(state)
+            )
         self._timeline_video_thumb_cache_key = None
         self._timeline_video_thumbnails = []
         self.processed_artifacts.update(context["artifacts"])
@@ -10022,6 +10025,33 @@ class VideoTranslatorGUI(QMainWindow):
     def _restore_project_blur_state(self, state):
         blur_state = dict(getattr(state, "settings", {}).get("blur_state") or {})
         regions = blur_state.get("regions", [])
+        # A serialized timeline is authoritative for optional layers.  The
+        # legacy blur_state setting can be stale after deleting the last B1
+        # layer, so never use it to recreate a deleted layer on reopen.
+        if getattr(self, "_saved_timeline_model_restored", False):
+            timeline_model = getattr(getattr(self, "timeline", None), "_timeline", None)
+            timeline_layers = []
+            for track in getattr(timeline_model, "tracks", []) or []:
+                if str(getattr(track, "name", "") or "") == "B1":
+                    timeline_layers = list(getattr(track, "layers", []) or [])
+                    break
+            regions = []
+            for layer in timeline_layers:
+                try:
+                    regions.append({
+                        "x": float(getattr(layer, "position_x", 0.0) or 0.0),
+                        "y": float(getattr(layer, "position_y", 0.0) or 0.0),
+                        "width": float(getattr(layer, "width", 0.0) or 0.0),
+                        "height": float(getattr(layer, "height", 0.0) or 0.0),
+                        "start": float(getattr(layer, "start", 0.0) or 0.0),
+                        "end": float(getattr(layer, "end", 0.0) or 0.0),
+                        "blur_strength": float(getattr(layer, "blur_strength", 20.0) or 20.0),
+                        "blur_opacity": float(getattr(layer, "blur_opacity", 1.0) or 1.0),
+                        "pixelate": bool(getattr(layer, "pixelate", False)),
+                        "pixelate_size": int(getattr(layer, "pixelate_size", 12) or 12),
+                    })
+                except (TypeError, ValueError):
+                    continue
         if hasattr(self, "video_view") and hasattr(self.video_view, "set_blur_regions_normalized"):
             self.video_view.set_blur_regions_normalized(regions)
         # Always default the blur toggle to ON on project reopen so the
@@ -10036,7 +10066,7 @@ class VideoTranslatorGUI(QMainWindow):
                 self.track_label_bar.set_blur_on("B1", True)
             except Exception:
                 pass
-        if hasattr(self, "timeline"):
+        if hasattr(self, "timeline") and not getattr(self, "_saved_timeline_model_restored", False):
             self.timeline.sync_blur_regions(regions)
         if hasattr(self, "media_player"):
             try:
@@ -10195,6 +10225,12 @@ class VideoTranslatorGUI(QMainWindow):
     def _restore_project_mask_state(self, state):
         mask_state = dict(getattr(state, "settings", {}).get("mask_state") or {})
         regions = mask_state.get("regions", [])
+        timeline_model_restored = bool(getattr(self, "_saved_timeline_model_restored", False))
+        if timeline_model_restored:
+            # The saved M1 track is authoritative.  In particular, an empty
+            # M1 track means the user deleted the final mask and must not be
+            # reconstructed from the legacy mask_state setting.
+            regions = self._current_mask_regions_payload(include_inactive=True)
         if hasattr(self, "media_player") and hasattr(self.media_player, "set_mask_region"):
             if regions:
                 self.media_player.set_mask_region(regions)
@@ -10205,8 +10241,10 @@ class VideoTranslatorGUI(QMainWindow):
                 self.track_label_bar.set_mask_shown("M1", True)
             except Exception:
                 pass
-        # Sync the M1 track from the persisted regions.
-        if hasattr(self, "timeline") and regions:
+        # Sync the M1 track from legacy settings only when no serialized
+        # timeline was available.  Otherwise this method must not recreate
+        # deleted layers or overwrite their timing/style properties.
+        if hasattr(self, "timeline") and regions and not timeline_model_restored:
             try:
                 from app.layers.mask import MaskLayer
                 from app.layers.sync_bridge import find_or_create_track
