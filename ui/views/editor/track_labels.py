@@ -4,6 +4,11 @@ from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QMouseEvent, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QFrame, QSizePolicy
 
+try:
+    from runtime_paths import asset_path
+except ImportError:  # pragma: no cover - source-tree fallback
+    asset_path = None
+
 
 _ICON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "icons"))
 _ICON_CACHE = {}
@@ -12,7 +17,9 @@ _ICON_CACHE = {}
 def _asset_icon(filename: str):
     icon = _ICON_CACHE.get(filename)
     if icon is None:
-        path = os.path.join(_ICON_DIR, filename)
+        path = asset_path("icons", filename) if asset_path is not None else ""
+        if not path or not os.path.exists(path):
+            path = os.path.join(_ICON_DIR, filename)
         icon = QIcon(path) if os.path.exists(path) else QIcon()
         _ICON_CACHE[filename] = icon
     return icon

@@ -60,6 +60,12 @@ def save_user_settings(gui):
     s.setValue("subtitle_color", gui.subtitle_color_hex)
     s.setValue("subtitle_background_color", getattr(gui, "subtitle_background_color_hex", "#000000"))
     s.setValue("subtitle_background", gui.subtitle_background_cb.isChecked())
+    if hasattr(gui, "subtitle_background_width_combo"):
+        s.setValue("subtitle_background_width", gui.subtitle_background_width_combo.currentData())
+    if hasattr(gui, "subtitle_background_shape_combo"):
+        s.setValue("subtitle_background_shape", gui.subtitle_background_shape_combo.currentData())
+    if hasattr(gui, "subtitle_background_radius_spin"):
+        s.setValue("subtitle_background_radius", gui.subtitle_background_radius_spin.value())
     s.setValue(
         "subtitle_outline",
         getattr(gui, "subtitle_outline_cb", None).isChecked() if hasattr(gui, "subtitle_outline_cb") else True,
@@ -180,6 +186,22 @@ def load_user_settings(gui):
     if hasattr(gui, "subtitle_background_color_btn"):
         gui.subtitle_background_color_btn.setText(gui.subtitle_background_color_hex)
     gui.subtitle_background_cb.setChecked(str(s.value("subtitle_background", gui.subtitle_background_cb.isChecked())).lower() == "true")
+    if hasattr(gui, "subtitle_background_width_combo"):
+        width_index = gui.subtitle_background_width_combo.findData(
+            str(s.value("subtitle_background_width", "fit_text"))
+        )
+        if width_index >= 0:
+            gui.subtitle_background_width_combo.setCurrentIndex(width_index)
+    if hasattr(gui, "subtitle_background_shape_combo"):
+        shape_index = gui.subtitle_background_shape_combo.findData(
+            str(s.value("subtitle_background_shape", "rectangle"))
+        )
+        if shape_index >= 0:
+            gui.subtitle_background_shape_combo.setCurrentIndex(shape_index)
+    if hasattr(gui, "on_subtitle_background_width_changed"):
+        gui.on_subtitle_background_width_changed()
+    if hasattr(gui, "subtitle_background_radius_spin"):
+        gui.subtitle_background_radius_spin.setValue(int(s.value("subtitle_background_radius", 0)))
     if hasattr(gui, "subtitle_outline_cb"):
         gui.subtitle_outline_cb.setChecked(str(s.value("subtitle_outline", gui.subtitle_outline_cb.isChecked())).lower() == "true")
     if hasattr(gui, "subtitle_bg_alpha_spin"):

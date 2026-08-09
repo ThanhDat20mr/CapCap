@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
-from runtime_paths import bin_path
+from runtime_paths import asset_path, bin_path
 from video_processor import srt_to_ass
 try:
     # The normal launcher places ``app`` directly on sys.path.
@@ -310,6 +310,7 @@ class MpvMediaPlayerBackend(QObject):
         if sys.platform.startswith("win"):
             target_wid &= 0xFFFFFFFF
 
+        bundled_font_dir = asset_path("fonts")
         player_options = {
             "wid": str(target_wid),
             "vo": "gpu-next" if gpu_next_enabled else "gpu",
@@ -323,6 +324,11 @@ class MpvMediaPlayerBackend(QObject):
             "sub_auto": "no",
             "sub_ass_override": "no",
         }
+        # FFmpeg export passes this directory to libass. Give MPV the same
+        # bundled faces so subtitle wrapping and the full-block background
+        # use matching font metrics in Preview and Export.
+        if bundled_font_dir and os.path.isdir(bundled_font_dir):
+            player_options["sub_fonts_dir"] = bundled_font_dir
         try:
             self._player = mpv.MPV(**player_options)
         except Exception as exc:

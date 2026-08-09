@@ -1,9 +1,13 @@
 import subprocess
 import os
 import re
+import math
+import hashlib
+import threading
+from functools import lru_cache
 
 from new_highlight_selector import auto_select_matches
-from runtime_paths import bin_path
+from runtime_paths import asset_path, bin_path, temp_path
 from video_filter_chain import (
     build_video_color_chain,
     build_video_filter_chain,
@@ -37,6 +41,55 @@ def _subprocess_run_kwargs() -> dict:
 
 
 _FFMPEG_ENCODER_CACHE = {}
+# libass FontSize is not a one-to-one Pillow pixel size on Windows.  In the
+# current bundled libass/DirectWrite path it renders at roughly 64% of the
+# Pillow pixel metric.  Apply this conversion once before measuring layouts;
+# ASS itself still receives the original FontSize and ScaleX/ScaleY values.
+_LIBASS_METRIC_SCALE = 0.64
+_LIBASS_METRIC_CALIBRATIONS: dict[tuple, float] = {}
+_LIBASS_LAYOUT_BOUNDS_CACHE: dict[str, list[tuple[int, int, int, int] | None]] = {}
+_LIBASS_CUE_BOUNDS_CACHE: dict[str, tuple[int, int, int, int] | None] = {}
+_LIBASS_LAYOUT_CACHE_LOCK = threading.RLock()
+
+
+@lru_cache(maxsize=32)
+def _subtitle_metric_font(font_name: str, pixel_size: int, bold: bool):
+    """Load the same bundled face used by libass for lightweight sizing.
+
+    This is deliberately best-effort: export still uses libass as the text
+    renderer, while Pillow supplies real glyph metrics for the accompanying
+    vector background instead of a character-count estimate.
+    """
+    try:
+        from PIL import ImageFont
+    except Exception:
+        return None
+
+    requested = re.sub(r"[^a-z0-9]", "", str(font_name or "").lower())
+    font_dirs = [asset_path("fonts"), os.path.join(os.environ.get("WINDIR", r"C:\\Windows"), "Fonts")]
+    candidates: list[tuple[int, str]] = []
+    for directory in font_dirs:
+        if not directory or not os.path.isdir(directory):
+            continue
+        try:
+            entries = os.listdir(directory)
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.lower().endswith((".ttf", ".otf", ".ttc")):
+                continue
+            stem = re.sub(r"[^a-z0-9]", "", os.path.splitext(entry)[0].lower())
+            if requested and requested not in stem and stem not in requested:
+                continue
+            is_bold = "bold" in stem or "semibold" in stem
+            score = 0 if is_bold == bool(bold) else 1
+            candidates.append((score, os.path.join(directory, entry)))
+    for _score, path in sorted(candidates):
+        try:
+            return ImageFont.truetype(path, max(1, int(pixel_size)))
+        except OSError:
+            continue
+    return None
 
 
 def _ffmpeg_supports_encoder(ffmpeg_path: str, encoder_name: str) -> bool:
@@ -86,6 +139,216 @@ def _ass_filter_expression(ass_path: str) -> str:
         escaped_fonts = _escape_path_for_filter(windows_fonts)
         return f"ass=filename='{escaped_ass}':fontsdir='{escaped_fonts}'"
     return f"ass=filename='{escaped_ass}'"
+
+
+def _calibrated_libass_metric_scale(font_name: str, font_size: int, font_scale: float, bold: bool) -> float:
+    """Calibrate Pillow's font metrics against the active bundled libass path.
+
+    Pillow and libass use different font-size units on Windows. A global scale
+    happens to work for some faces but not, for example, Montserrat at 100% or
+    Verdana. Render one tiny reference cue through the same FFmpeg/libass
+    configuration used by export, cache its measured width, and use that
+    ratio for this exact face/size/style.
+    """
+    requested_size = max(1, int(font_size))
+    requested_scale = max(0.1, float(font_scale))
+    key = (str(font_name or ""), requested_size, round(requested_scale, 4), bool(bold))
+    cached = _LIBASS_METRIC_CALIBRATIONS.get(key)
+    if cached is not None:
+        return cached
+
+    fallback = _LIBASS_METRIC_SCALE
+    nominal_size = max(1, int(round(requested_size * requested_scale)))
+    metric_font = _subtitle_metric_font(font_name, nominal_size, bool(bold))
+    if metric_font is None:
+        _LIBASS_METRIC_CALIBRATIONS[key] = fallback
+        return fallback
+
+    probe_text = "CapCap WMWM 0123456789 AaEeGg ÀÁÂĂĐÊÔƠƯ àáâăđêôơư"
+    pillow_width = float(metric_font.getlength(probe_text))
+    if pillow_width <= 1.0:
+        _LIBASS_METRIC_CALIBRATIONS[key] = fallback
+        return fallback
+
+    digest = hashlib.sha1(repr(key).encode("utf-8")).hexdigest()[:12]
+    probe_dir = temp_path("subtitle_metric_probe")
+    ass_path = os.path.join(probe_dir, f"{digest}.ass")
+    image_path = os.path.join(probe_dir, f"{digest}.png")
+    try:
+        os.makedirs(probe_dir, exist_ok=True)
+        ass_scale = max(10, int(round(requested_scale * 100)))
+        with open(ass_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "[Script Info]\nScriptType: v4.00+\nPlayResX: 2048\nPlayResY: 256\n"
+                "[V4+ Styles]\n"
+                "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+                f"Style: Default,{font_name},{requested_size},&H000000FF,&H000000FF,&H00000000,&H00000000,{-1 if bold else 0},0,0,0,{ass_scale},{ass_scale},0,0,1,0,0,7,0,0,0,1\n"
+                "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+                f"Dialogue: 0,0:00:00.00,0:00:00.10,Default,,0,0,0,,{{\\an7\\pos(20,20)}}{probe_text}\n"
+            )
+        command = [
+            _ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=2048x256:d=0.1",
+            "-vf", _ass_filter_expression(ass_path), "-frames:v", "1", image_path,
+        ]
+        subprocess.run(command, check=True, timeout=15, **_subprocess_run_kwargs())
+        from PIL import Image
+        image = Image.open(image_path).convert("RGB")
+        xs = []
+        for y in range(image.height):
+            for x in range(image.width):
+                red, green, blue = image.getpixel((x, y))
+                if red > 32 and red > green * 1.5 and red > blue * 1.5:
+                    xs.append(x)
+        if xs:
+            rendered_width = max(xs) - min(xs) + 1
+            scale = max(0.35, min(1.2, float(rendered_width) / pillow_width))
+            _LIBASS_METRIC_CALIBRATIONS[key] = scale
+            return scale
+    except Exception:
+        pass
+    finally:
+        for path in (ass_path, image_path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    _LIBASS_METRIC_CALIBRATIONS[key] = fallback
+    return fallback
+
+
+def _measure_libass_cue_bounds(
+    cues: list[dict], *, video_width: int, video_height: int, font_name: str,
+    font_size: int, font_scale: float, bold: bool, alignment: int,
+    outline_width: float,
+) -> list[tuple[int, int, int, int] | None]:
+    """Return exact libass text bounds for cues, in ASS PlayRes coordinates.
+
+    This is deliberately a batch render: one synthetic frame per cue, using
+    the same FFmpeg/libass/fontsdir path as export. It avoids Qt/Pillow font
+    metrics and preserves libass's own automatic wrapping and fallback.
+    """
+    if not cues:
+        return []
+    # Cache each cue rather than only the whole subtitle document.  Changing
+    # one subtitle, its colour, or a single timing entry must not force a
+    # complete libass measurement pass for hundreds of unaffected cues.
+    style_key = (
+        int(video_width), int(video_height), str(font_name), int(font_size),
+        round(float(font_scale), 5), bool(bold), int(alignment),
+        round(float(outline_width), 4),
+    )
+
+    def _cue_cache_key(cue: dict) -> str:
+        layout = (
+            str(cue.get("text", "") or ""),
+            int(cue.get("margin_v", 0) or 0),
+            bool(cue.get("custom_position_enabled", False)),
+            round(float(cue.get("custom_position_x", 50.0) or 50.0), 4),
+            round(float(cue.get("custom_position_y", 86.0) or 86.0), 4),
+            cue.get("custom_position_bottom_y"),
+            style_key,
+        )
+        return hashlib.sha1(repr(layout).encode("utf-8")).hexdigest()
+
+    cue_keys = [_cue_cache_key(cue) for cue in cues]
+    with _LIBASS_LAYOUT_CACHE_LOCK:
+        if all(key in _LIBASS_CUE_BOUNDS_CACHE for key in cue_keys):
+            return [_LIBASS_CUE_BOUNDS_CACHE[key] for key in cue_keys]
+
+    # Identical text and layout appears frequently (repeated captions and
+    # duplicated timeline segments). Render it only once per probe batch.
+    missing_cues: list[dict] = []
+    missing_keys: list[str] = []
+    seen_missing: set[str] = set()
+    with _LIBASS_LAYOUT_CACHE_LOCK:
+        cached_cues = dict(_LIBASS_CUE_BOUNDS_CACHE)
+    for cue, cue_key in zip(cues, cue_keys):
+        if cue_key in cached_cues or cue_key in seen_missing:
+            continue
+        seen_missing.add(cue_key)
+        missing_keys.append(cue_key)
+        missing_cues.append(cue)
+    if not missing_cues:
+        with _LIBASS_LAYOUT_CACHE_LOCK:
+            return [_LIBASS_CUE_BOUNDS_CACHE.get(key) for key in cue_keys]
+
+    cache_input = repr((missing_keys, style_key))
+    cache_key = hashlib.sha1(cache_input.encode("utf-8")).hexdigest()
+
+    probe_dir = temp_path("subtitle_libass_layout")
+    ass_path = os.path.join(probe_dir, f"{cache_key}.ass")
+    ass_scale = max(10, int(round(max(0.1, float(font_scale)) * 100)))
+    style = (
+        "[Script Info]\nScriptType: v4.00+\n"
+        f"PlayResX: {video_width}\nPlayResY: {video_height}\nWrapStyle: 1\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Probe,{font_name},{font_size},&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00000000,{-1 if bold else 0},0,0,0,{ass_scale},{ass_scale},0,0,1,{max(0.0, float(outline_width))},0,{alignment},60,60,0,1\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+    try:
+        os.makedirs(probe_dir, exist_ok=True)
+        with open(ass_path, "w", encoding="utf-8") as handle:
+            handle.write(style)
+            for index, cue in enumerate(missing_cues):
+                text = _ass_escape_text(str(cue.get("text", "") or ""))
+                position_tag = _position_override_tag(
+                    video_width, video_height,
+                    custom_position_enabled=bool(cue.get("custom_position_enabled", False)),
+                    custom_position_x=float(cue.get("custom_position_x", 50.0)),
+                    custom_position_y=float(cue.get("custom_position_y", 86.0)),
+                    custom_position_bottom_y=cue.get("custom_position_bottom_y"),
+                )
+                prefix = f"{{{position_tag}}}" if position_tag else ""
+                handle.write(
+                    f"Dialogue: 0,{_seconds_to_ass(float(index))},{_seconds_to_ass(float(index + 1))},"
+                    f"Probe,,0,0,{int(cue.get('margin_v', 0))},,{prefix}{text}\n"
+                )
+
+        command = [
+            _ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+            f"color=c=black:s={video_width}x{video_height}:r=1:d={len(missing_cues)}",
+            "-vf", _ass_filter_expression(ass_path), "-frames:v", str(len(missing_cues)),
+            "-pix_fmt", "gray", "-f", "rawvideo", "-",
+        ]
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **_subprocess_run_kwargs()
+        )
+        frame_size = max(1, int(video_width) * int(video_height))
+        bounds: list[tuple[int, int, int, int] | None] = []
+        for _index in range(len(missing_cues)):
+            frame = b""
+            while len(frame) < frame_size:
+                chunk = process.stdout.read(frame_size - len(frame)) if process.stdout else b""
+                if not chunk:
+                    break
+                frame += chunk
+            if len(frame) != frame_size:
+                raise RuntimeError("libass probe returned an incomplete frame")
+            left, top, right, bottom = video_width, video_height, -1, -1
+            for pixel_index, value in enumerate(frame):
+                if value <= 8:
+                    continue
+                y, x = divmod(pixel_index, video_width)
+                left, right = min(left, x), max(right, x)
+                top, bottom = min(top, y), max(bottom, y)
+            bounds.append((left, top, right + 1, bottom + 1) if right >= left else None)
+        process.wait(timeout=20)
+        if process.returncode != 0:
+            raise RuntimeError("libass probe failed")
+        with _LIBASS_LAYOUT_CACHE_LOCK:
+            _LIBASS_LAYOUT_BOUNDS_CACHE[cache_key] = bounds
+            _LIBASS_CUE_BOUNDS_CACHE.update(zip(missing_keys, bounds))
+            return [_LIBASS_CUE_BOUNDS_CACHE.get(key) for key in cue_keys]
+    except Exception:
+        return [None] * len(cues)
+    finally:
+        try:
+            os.remove(ass_path)
+        except OSError:
+            pass
 
 
 def _build_blur_filter_chain(blur_region, video_width, video_height):
@@ -495,6 +758,40 @@ def _custom_anchor_position(video_width: int, video_height: int, position_x: flo
     return x, y
 
 
+def _subtitle_position_and_alignment(
+    video_width: int,
+    video_height: int,
+    *,
+    alignment: int,
+    margin_v: int,
+    custom_position_enabled: bool = False,
+    custom_position_x: float = 50.0,
+    custom_position_y: float = 86.0,
+    custom_position_bottom_y: float | None = None,
+) -> tuple[int, int, int]:
+    """Return the exact ASS anchor point and alignment used by a subtitle.
+
+    A dragged subtitle uses an explicit ``\\pos`` override.  Its alignment is
+    intentionally fixed to ``an2`` (bottom) or ``an5`` (centre), regardless of
+    the Style alignment.  Consumers which draw a companion element, such as a
+    full-block background, must use this same effective alignment or they will
+    drift everywhere except by coincidence at the centre.
+    """
+    if custom_position_enabled:
+        x, y = _custom_anchor_position(
+            video_width, video_height, custom_position_x, custom_position_y
+        )
+        if custom_position_bottom_y is not None:
+            _unused, y = _custom_anchor_position(
+                video_width, video_height, custom_position_x, custom_position_bottom_y
+            )
+            return x, y, 2
+        return x, y, 5
+
+    x, y = _alignment_anchor_position(video_width, video_height, alignment, margin_v)
+    return x, y, int(alignment)
+
+
 def _position_override_tag(
     video_width: int,
     video_height: int,
@@ -506,11 +803,17 @@ def _position_override_tag(
 ) -> str:
     if not custom_position_enabled:
         return ""
-    x, y = _custom_anchor_position(video_width, video_height, custom_position_x, custom_position_y)
-    if custom_position_bottom_y is not None:
-        _unused, y = _custom_anchor_position(video_width, video_height, custom_position_x, custom_position_bottom_y)
-        return rf"\an2\pos({x},{y})"
-    return rf"\an5\pos({x},{y})"
+    x, y, effective_alignment = _subtitle_position_and_alignment(
+        video_width,
+        video_height,
+        alignment=2,
+        margin_v=0,
+        custom_position_enabled=True,
+        custom_position_x=custom_position_x,
+        custom_position_y=custom_position_y,
+        custom_position_bottom_y=custom_position_bottom_y,
+    )
+    return rf"\an{effective_alignment}\pos({x},{y})"
 
 
 def _build_typewriter_text(text: str, duration_seconds: float, mapped_words=None) -> str:
@@ -903,6 +1206,7 @@ def srt_to_ass(srt_path: str,
                background_width: str = "fit_text",
                background_shape: str = "rectangle",
                background_padding: float = 6.0,
+               background_radius: float = 0.0,
                bold: bool = False,
                preset_key: str = "",
                auto_keyword_highlight: bool = False,
@@ -935,13 +1239,18 @@ def srt_to_ass(srt_path: str,
             return "&H" + f"{alpha:02X}" + ass_color[4:]
         return ass_color
 
-    full_background = False
-    border_style = 3 if background_box and not full_background else 1
-    outline = max(0.0, float(background_padding), float(outline_width)) if background_box else float(outline_width)
+    full_background = str(background_width or "fit_text").strip().lower() == "full_area"
+    fit_background = bool(background_box and not full_background)
+    # Keep the text style independent from its background. BorderStyle=3
+    # cannot draw a glyph outline and a box outline at the same time, so Fit
+    # Text uses a separate transparent-background dialogue below the normal
+    # outlined text dialogue.
+    outline = max(0.0, float(outline_width))
+    box_outline = max(0.0, float(background_padding), float(outline_width))
     shadow = 0 if background_box else float(shadow_depth)
     box_color = _with_alpha(background_color, background_alpha) if background_box else None
-    style_outline_color = box_color if background_box and not full_background else outline_color
-    back_color = box_color if background_box and not full_background else _with_alpha(shadow_color, 0.7)
+    style_outline_color = outline_color
+    back_color = _with_alpha(shadow_color, 0.7)
     bold_flag = -1 if bold else 0
 
     wrap_style = 2 if single_line else 1
@@ -961,40 +1270,174 @@ def srt_to_ass(srt_path: str,
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,{font_name},{font_size},"
         f"{font_color},{highlight_color},{style_outline_color},{back_color},"
-        f"{bold_flag},0,0,0,{ass_font_scale},{ass_font_scale},0,0,{border_style},{outline},{shadow},"
+        f"{bold_flag},0,0,0,{ass_font_scale},{ass_font_scale},0,0,1,{outline},{shadow},"
         f"{alignment},60,60,{margin_v},1\n"
+    )
+    if fit_background:
+        header += (
+            f"Style: Background,{font_name},{font_size},&HFF000000,&HFF000000,{box_color},{box_color},"
+            f"{bold_flag},0,0,0,{ass_font_scale},{ass_font_scale},0,0,3,{box_outline},0,"
+            f"{alignment},60,60,{margin_v},1\n"
+        )
+    header += (
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
-    def _full_background_event(start: str, end: str, text: str, event_margin: int) -> str:
+    background_debug_logged = False
+
+    def _final_subtitle_layout(text: str) -> tuple[str, int, int, dict]:
+        """Measure a subtitle without changing its authored line breaks."""
+        pad = max(3, int(round(float(background_padding))))
+        effective_font_size = max(1.0, float(font_size) * max(0.1, float(font_scale)))
+        metric_scale = _calibrated_libass_metric_scale(font_name, int(font_size), float(font_scale), bool(bold))
+        metric_font_size = max(1, int(round(effective_font_size * metric_scale)))
+        usable_width = max(1, int(video_width - 120))
+        metric_font = _subtitle_metric_font(font_name, metric_font_size, bool(bold))
+        stroke = int(math.ceil(max(0.0, float(outline_width))))
         source_lines = [line.strip() for line in str(text or "").splitlines() if line.strip()] or [""]
-        pad = max(3, int(round(max(3.0, float(outline_width)))))
-        width = max(1, int(video_width - 120))
-        # Estimate the same word wrapping used by ASS at the full-area width
-        # instead of reserving a fixed number of rows.
-        chars_per_row = max(1, int(width / max(1.0, float(font_size) * 0.52)))
-        rendered_rows = 0
-        for line in source_lines:
-            row_len = 0
-            for word in line.split() or [""]:
-                word_len = len(word) + (1 if row_len else 0)
-                if row_len and row_len + word_len > chars_per_row:
-                    rendered_rows += 1
-                    row_len = len(word)
+        if metric_font is None:
+            # This fallback is only for unexpectedly incomplete installations.
+            max_chars = max((len(line) for line in source_lines), default=1)
+            width = min(usable_width, max(1, int(round(effective_font_size * 0.55 * max_chars + pad * 2))))
+            height = max(1, int(math.ceil(effective_font_size * 0.8 * len(source_lines) + pad * 2 + stroke * 2)))
+            return "\n".join(source_lines), width, height, {
+                "font_ascent": None,
+                "font_descent": None,
+                "line_count": len(source_lines),
+                "line_widths": [],
+                "line_height": None,
+                "font_source": "fallback",
+                "metric_font_size": metric_font_size,
+                "metric_scale": metric_scale,
+            }
+
+        # Do not insert artificial line breaks. Existing/manual breaks remain
+        # intact and libass retains ownership of automatic wrapping. We only
+        # mirror its word/character wrapping here to estimate the background
+        # bounds; the returned text is deliberately left untouched.
+        max_text_width = max(1, usable_width - pad * 2)
+
+        def _estimated_wrapped_lines(line: str) -> list[str]:
+            if metric_font.getlength(line) <= max_text_width:
+                return [line or " "]
+            tokens = line.split() if len(line.split()) > 1 else list(line)
+            separator = " " if len(line.split()) > 1 else ""
+            rows: list[str] = []
+            current = ""
+            for token in tokens:
+                candidate = f"{current}{separator if current else ''}{token}"
+                if current and metric_font.getlength(candidate) > max_text_width:
+                    rows.append(current)
+                    current = token
                 else:
-                    row_len += word_len
-            rendered_rows += 1
-        height = max(int(font_size * 1.4 * max(1, rendered_rows)) + pad * 2, int(font_size * 1.5))
-        left = 60
-        top = max(0, int(video_height - event_margin - height))
-        rgb, alpha = str(box_color)[4:], str(box_color)[2:4]
-        if str(background_shape) == "oval":
-            cx, cy, rx, ry = width // 2, height // 2, width // 2, height // 2
-            path = f"m {cx-rx} {cy} b {cx-rx} {cy-ry} {cx+rx} {cy-ry} {cx+rx} {cy} b {cx+rx} {cy+ry} {cx-rx} {cy+ry} {cx-rx} {cy}"
+                    current = candidate
+            if current:
+                rows.append(current)
+            return rows or [" "]
+
+        measured_lines = [
+            row for source_line in source_lines for row in _estimated_wrapped_lines(source_line)
+        ]
+        bounds = [metric_font.getbbox(line or " ", stroke_width=stroke) for line in measured_lines]
+        line_widths = [max(1, right - left) for left, _top, right, _bottom in bounds]
+        line_heights = [max(1, bottom - top) for _left, top, _right, bottom in bounds]
+        text_width = max((right - left for left, _top, right, _bottom in bounds), default=1)
+        # This is a measurement only; text layout still belongs to libass.
+        text_height = sum(line_heights)
+        font_ascent, font_descent = metric_font.getmetrics()
+        return (
+            str(text or ""),
+            min(usable_width, max(1, int(math.ceil(text_width + pad * 2)))),
+            max(1, int(math.ceil(text_height + pad * 2))),
+            {
+                "font_ascent": font_ascent,
+                "font_descent": font_descent,
+                "line_count": len(measured_lines),
+                "line_widths": line_widths,
+                "line_height": max(line_heights, default=0),
+                "font_source": "bundled-or-system Pillow face",
+                "metric_font_size": metric_font_size,
+                "metric_scale": metric_scale,
+            },
+        )
+
+    def _full_background_event(start: str, end: str, layout, event_margin: int) -> str:
+        nonlocal background_debug_logged
+        pad = max(3, int(round(float(background_padding))))
+        if isinstance(layout, dict) and layout.get("debug", {}).get("source") == "libass":
+            width, height = int(layout["width"]), int(layout["height"])
+            left, top = int(layout["left"]), int(layout["top"])
+            metric_debug = layout["debug"]
+            anchor_x, anchor_y, effective_alignment = _subtitle_position_and_alignment(
+                video_width, video_height, alignment=alignment, margin_v=event_margin,
+                custom_position_enabled=custom_position_enabled, custom_position_x=custom_position_x,
+                custom_position_y=custom_position_y, custom_position_bottom_y=custom_position_bottom_y,
+            )
         else:
+            _final_text, width, height, metric_debug = layout
+            anchor_x, anchor_y, effective_alignment = _subtitle_position_and_alignment(
+                video_width, video_height, alignment=alignment, margin_v=event_margin,
+                custom_position_enabled=custom_position_enabled, custom_position_x=custom_position_x,
+                custom_position_y=custom_position_y, custom_position_bottom_y=custom_position_bottom_y,
+            )
+            horizontal = ((effective_alignment - 1) % 3) + 1
+            vertical = (effective_alignment - 1) // 3
+            left = anchor_x if horizontal == 1 else anchor_x - width // 2 if horizontal == 2 else anchor_x - width
+            top = anchor_y - height if vertical == 0 else anchor_y - height // 2 if vertical == 1 else anchor_y
+            left = max(0, min(int(left), max(0, video_width - width)))
+            top = max(0, min(int(top), max(0, video_height - height)))
+        if not background_debug_logged and (metric_debug.get("source") == "libass" or int(metric_debug.get("line_count", 0) or 0) > 1):
+            background_debug_logged = True
+            print(
+                "[Subtitle Background] "
+                f"font={font_name}, fontSize={font_size}, metricFontSize={metric_debug.get('metric_font_size')}, "
+                f"metricScale={metric_debug.get('metric_scale')}, source={metric_debug.get('source')}, "
+                f"scaleX/Y={ass_font_scale}/{ass_font_scale}, "
+                f"ascent={metric_debug.get('font_ascent')}, descent={metric_debug.get('font_descent')}, "
+                f"lineHeight={metric_debug.get('line_height')}, lineCount={metric_debug.get('line_count')}, "
+                f"lineWidths={metric_debug.get('line_widths')}, block={width}x{height}, "
+                f"paddingX={pad}, paddingY={pad}, PlayRes={video_width}x{video_height}, alignment={effective_alignment}, "
+                f"anchor=({anchor_x},{anchor_y}), rect=({left},{top},{left + width},{top + height}), "
+                f"metricSource={metric_debug.get('font_source')}"
+            )
+        rgb, alpha = str(box_color)[4:], str(box_color)[2:4]
+        radius = max(0, min(int(round(float(background_radius))), width // 2, height // 2))
+        if radius <= 0:
             path = f"m 0 0 l {width} 0 {width} {height} 0 {height} 0 0"
-        return f"Dialogue: 0,{start},{end},Default,,0,0,0,,{{\\an7\\pos({left},{top})\\p1\\1c&H{rgb}&\\1a&H{alpha}&}}{path}"
+        else:
+            # Cubic curves approximate rounded corners in ASS vector drawing.
+            k = int(round(radius * 0.5523))
+            path = (
+                f"m {radius} 0 l {width-radius} 0 "
+                f"b {width-radius+k} 0 {width} {radius-k} {width} {radius} "
+                f"l {width} {height-radius} "
+                f"b {width} {height-radius+k} {width-radius+k} {height} {width-radius} {height} "
+                f"l {radius} {height} "
+                f"b {radius-k} {height} 0 {height-radius+k} 0 {height-radius} "
+                f"l 0 {radius} b 0 {radius-k} {radius-k} 0 {radius} 0"
+            )
+        # Vector drawings inherit the Style's ScaleX/ScaleY.  Explicitly
+        # neutralize that font scaling: ``width``/``height`` above are already
+        # calculated in final PlayRes pixels.  Without this override, changing
+        # the subtitle scale resized the vector a second time while libass
+        # resized the text only once.
+        return f"Dialogue: 0,{start},{end},Default,,0,0,0,,{{\\an7\\pos({left},{top})\\fscx100\\fscy100\\p1\\1c&H{rgb}&\\1a&H{alpha}&}}{path}"
+
+    def _fit_background_event(start: str, end: str, text: str, event_margin: int) -> str:
+        """Render Fit Text's box on a lower layer, leaving glyph styling intact."""
+        position_tag = _position_override_tag(
+            video_width, video_height,
+            custom_position_enabled=custom_position_enabled,
+            custom_position_x=custom_position_x,
+            custom_position_y=custom_position_y,
+            custom_position_bottom_y=custom_position_bottom_y,
+        )
+        prefix = f"{{{position_tag}}}" if position_tag else ""
+        return (
+            f"Dialogue: 0,{start},{end},Background,,0,0,{event_margin},,"
+            f"{prefix}{_ass_escape_text(text)}"
+        )
     # Parse SRT entries
     with open(srt_path, 'r', encoding='utf-8-sig') as f:
         content = f.read()
@@ -1006,10 +1449,55 @@ def srt_to_ass(srt_path: str,
         re.DOTALL
     )
 
+    matches = list(pattern.finditer(content.strip() + "\n\n"))
+    libass_background_layouts: list[dict | None] = [None] * len(matches)
+    if full_background and matches:
+        probe_cues: list[dict] = []
+        probe_rows: list[float] = []
+        probe_line_height = max(20, int(font_size * 1.4))
+        for match in matches:
+            start_seconds = _srt_time_to_seconds(match.group(1))
+            end_seconds = _srt_time_to_seconds(match.group(2))
+            raw_probe_text = match.group(3).strip()
+            if single_line:
+                raw_probe_text = " ".join(part.strip() for part in raw_probe_text.splitlines() if part.strip())
+            row_index = next((idx for idx, last_end in enumerate(probe_rows) if last_end <= start_seconds), len(probe_rows))
+            if row_index == len(probe_rows):
+                probe_rows.append(end_seconds)
+            else:
+                probe_rows[row_index] = max(probe_rows[row_index], end_seconds)
+            probe_cues.append({
+                "text": raw_probe_text,
+                "margin_v": int(max(0, margin_v + row_index * probe_line_height)),
+                "custom_position_enabled": custom_position_enabled,
+                "custom_position_x": custom_position_x,
+                "custom_position_y": custom_position_y,
+                "custom_position_bottom_y": custom_position_bottom_y,
+            })
+        exact_bounds = _measure_libass_cue_bounds(
+            probe_cues, video_width=video_width, video_height=video_height,
+            font_name=font_name, font_size=font_size, font_scale=font_scale,
+            bold=bold, alignment=alignment, outline_width=outline,
+        )
+        pad = max(3, int(round(float(background_padding))))
+        for index, bounds in enumerate(exact_bounds):
+            if bounds is None:
+                continue
+            text_left, text_top, text_right, text_bottom = bounds
+            left = max(0, text_left - pad)
+            top = max(0, text_top - pad)
+            right = min(video_width, text_right + pad)
+            bottom = min(video_height, text_bottom + pad)
+            libass_background_layouts[index] = {
+                "left": left, "top": top,
+                "width": max(1, right - left), "height": max(1, bottom - top),
+                "debug": {"source": "libass", "text_bounds": bounds, "line_count": 2 if "\n" in probe_cues[index]["text"] else 1},
+            }
+
     events = []
     line_height = max(20, int(font_size * 1.4))
     row_last_end: list[float] = []
-    for event_index, m in enumerate(pattern.finditer(content.strip() + "\n\n")):
+    for event_index, m in enumerate(matches):
         start_seconds = _srt_time_to_seconds(m.group(1))
         end_seconds = _srt_time_to_seconds(m.group(2))
         start = _srt_time_to_ass(m.group(1))
@@ -1028,6 +1516,9 @@ def srt_to_ass(srt_path: str,
                 line_speaker_color = candidate
         if single_line:
             raw_text = " ".join(part.strip() for part in raw_text.splitlines() if part.strip())
+        full_background_layout = None
+        if full_background:
+            full_background_layout = libass_background_layouts[event_index] or _final_subtitle_layout(raw_text)
         style_key = (animation_style or "Static").strip().lower()
 
         # Greedy row assignment: a segment goes to the first row whose
@@ -1051,7 +1542,9 @@ def srt_to_ass(srt_path: str,
 
         if style_key == "word highlight karaoke":
             if full_background:
-                events.append(_full_background_event(start, end, raw_text, event_margin_v))
+                events.append(_full_background_event(start, end, full_background_layout, event_margin_v))
+            elif fit_background:
+                events.append(_fit_background_event(start, end, raw_text, event_margin_v))
             events.extend(
                 _build_karaoke_dialogue_events(
                     start_seconds=start_seconds,
@@ -1102,7 +1595,10 @@ def srt_to_ass(srt_path: str,
         )
         dialogue = f"Dialogue: 0,{start},{end},Default,,0,0,{event_margin_v},,{text}"
         if full_background:
-            events.append(_full_background_event(start, end, raw_text, event_margin_v))
+            events.append(_full_background_event(start, end, full_background_layout, event_margin_v))
+            dialogue = dialogue.replace("Dialogue: 0,", "Dialogue: 1,", 1)
+        elif fit_background:
+            events.append(_fit_background_event(start, end, raw_text, event_margin_v))
             dialogue = dialogue.replace("Dialogue: 0,", "Dialogue: 1,", 1)
         events.append(dialogue)
 

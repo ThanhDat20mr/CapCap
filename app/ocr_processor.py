@@ -146,13 +146,20 @@ def _load_ocr_engine():
         except Exception:
             models_dir = ""
 
+        # PyInstaller one-dir builds place collected data below _internal,
+        # while source installs keep it beside rapidocr.__file__. Resolve both.
         import sys
-        if not models_dir or not os.path.isdir(models_dir):
-            meipass = getattr(sys, "_MEIPASS", "") or ""
-            if meipass:
-                bundled = os.path.join(meipass, "rapidocr", "models")
-                if os.path.isdir(bundled):
-                    models_dir = bundled
+        candidates = [models_dir]
+        meipass = getattr(sys, "_MEIPASS", "") or ""
+        if meipass:
+            candidates.append(os.path.join(meipass, "rapidocr", "models"))
+        try:
+            from runtime_paths import bundle_root
+            candidates.append(os.path.join(bundle_root(), "rapidocr", "models"))
+        except Exception:
+            pass
+        models_dir = next((path for path in candidates if path and os.path.isdir(path)), "")
+        print(f"[OCR] Model directory: {models_dir or '<not found>'}")
 
         required_models = [
             "ch_PP-OCRv4_det_mobile.onnx",

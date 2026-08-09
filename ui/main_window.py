@@ -202,6 +202,7 @@ class _BootstrapMediaBackend:
 class VideoTranslatorGUI(QMainWindow):
     VOICE_ENTRY_ID_ROLE = Qt.UserRole + 1
     runtime_log_received = Signal(str)
+    subtitle_ass_ready = Signal(int, str, str, object)
 
     def __init__(self):
         super().__init__()
@@ -660,6 +661,14 @@ class VideoTranslatorGUI(QMainWindow):
         self._allow_post_pipeline_preview_assets = False
         self._subtitle_custom_style_state = None
         self._subtitle_preset_apply_in_progress = False
+        # Exact full-block subtitle backgrounds are measured by libass.  Keep
+        # that expensive work out of the GUI thread; the active ASS track is
+        # intentionally retained until the newest debounced result is ready.
+        self._subtitle_ass_request_token = 0
+        self._subtitle_ass_worker_running = False
+        self._subtitle_ass_worker_threads = []
+        self._subtitle_ass_pending_snapshot = None
+        self.subtitle_ass_ready.connect(self._on_async_subtitle_ass_ready)
         self._video_filter_ui_sync = False
         self._video_filter_preset_key = "original"
         self._video_filter_intensity = 75
@@ -3149,6 +3158,7 @@ class VideoTranslatorGUI(QMainWindow):
             "outline": bool(getattr(self, "subtitle_outline_cb", None) and self.subtitle_outline_cb.isChecked()),
             "background_alpha": float(self.subtitle_bg_alpha_spin.value()) if hasattr(self, "subtitle_bg_alpha_spin") else 0.6,
             "background_padding": int(self.subtitle_background_padding_spin.value()) if hasattr(self, "subtitle_background_padding_spin") else 6,
+            "background_radius": int(self.subtitle_background_radius_spin.value()) if hasattr(self, "subtitle_background_radius_spin") else 0,
             "bold": bool(self.subtitle_bold_cb.isChecked()),
             "speaker_colors": self._uses_speaker_subtitle_colors(),
             "auto_keyword_highlight": bool(self.subtitle_keyword_highlight_cb.isChecked()),
@@ -3171,6 +3181,7 @@ class VideoTranslatorGUI(QMainWindow):
             "outline": bool(getattr(self, "subtitle_outline_cb", None) and self.subtitle_outline_cb.isChecked()),
             "background_alpha": float(self.subtitle_bg_alpha_spin.value()) if hasattr(self, "subtitle_bg_alpha_spin") else 0.6,
             "background_padding": int(self.subtitle_background_padding_spin.value()) if hasattr(self, "subtitle_background_padding_spin") else 6,
+            "background_radius": int(self.subtitle_background_radius_spin.value()) if hasattr(self, "subtitle_background_radius_spin") else 0,
             "bold": bool(self.subtitle_bold_cb.isChecked()),
             "speaker_colors": self._uses_speaker_subtitle_colors(),
             "auto_keyword_highlight": bool(self.subtitle_keyword_highlight_cb.isChecked()),
@@ -3204,6 +3215,8 @@ class VideoTranslatorGUI(QMainWindow):
             shape_index = self.subtitle_background_shape_combo.findData(str(state.get("background_shape", "rectangle")))
             self.subtitle_background_shape_combo.setCurrentIndex(max(0, shape_index))
             self.on_subtitle_background_width_changed()
+            if hasattr(self, "subtitle_background_radius_spin"):
+                self.subtitle_background_radius_spin.setValue(int(state.get("background_radius", 0)))
         if hasattr(self, "subtitle_outline_cb"):
             self.subtitle_outline_cb.setChecked(bool(state.get("outline", self.subtitle_outline_cb.isChecked())))
         if hasattr(self, "subtitle_bg_alpha_spin"):
@@ -4730,10 +4743,15 @@ class VideoTranslatorGUI(QMainWindow):
             hasattr(self, "subtitle_background_width_combo")
             and self.subtitle_background_width_combo.currentData() == "full_area"
         )
+        hint = getattr(self, "subtitle_background_exact_hint", None)
+        if hint is not None:
+            hint.setVisible(is_full_area)
+        # Shape selection was removed in favor of a consistent rounded
+        # rectangle controlled by Corner radius.
         for name in ("subtitle_background_shape_label", "subtitle_background_shape_combo"):
             widget = getattr(self, name, None)
             if widget is not None:
-                widget.setVisible(is_full_area)
+                widget.setVisible(False)
         self.update_subtitle_preview_style()
 
     def on_subtitle_font_scale_changed(self, _index: int = -1):
@@ -4979,6 +4997,7 @@ class VideoTranslatorGUI(QMainWindow):
             ),
             "background_alpha": float(self.subtitle_bg_alpha_spin.value()) if hasattr(self, "subtitle_bg_alpha_spin") else float(preset.get("background_alpha", 0.0)),
             "background_padding": int(self.subtitle_background_padding_spin.value()) if hasattr(self, "subtitle_background_padding_spin") else 6,
+            "background_radius": int(self.subtitle_background_radius_spin.value()) if hasattr(self, "subtitle_background_radius_spin") else 0,
             "background_width": str(self.subtitle_background_width_combo.currentData() if hasattr(self, "subtitle_background_width_combo") else "fit_text"),
             "background_shape": str(self.subtitle_background_shape_combo.currentData() if hasattr(self, "subtitle_background_shape_combo") else "rectangle"),
             "animation": self.subtitle_animation_combo.currentText().strip() or preset.get("animation", "Static"),
@@ -10839,12 +10858,158 @@ class VideoTranslatorGUI(QMainWindow):
                     segment["tts_group_end"] = float(base.get("tts_group_end", base.get("end", 0.0)) or 0.0)
         return parsed_segments
 
+    def _uses_exact_full_block_subtitle_background(self) -> bool:
+        """Whether the live ASS path needs exact, measured vector geometry."""
+        try:
+            return bool(
+                getattr(self, "subtitle_background_cb", None)
+                and self.subtitle_background_cb.isChecked()
+                and getattr(self, "subtitle_background_width_combo", None)
+                and str(self.subtitle_background_width_combo.currentData() or self.subtitle_background_width_combo.currentText()).strip().lower()
+                in {"full_area", "full subtitle area", "full block"}
+            )
+        except Exception:
+            return False
+
+    def _build_live_subtitle_ass_snapshot(self, segments):
+        """Capture all Qt-owned state before an ASS worker is started."""
+        video_path = self.video_path_edit.text().strip()
+        source_width = max(1, int(getattr(self.video_view, "video_source_width", 0) or 1920))
+        source_height = max(1, int(getattr(self.video_view, "video_source_height", 0) or 1080))
+        canvas_width, canvas_height = self._subtitle_render_dimensions()
+        subtitle_style = copy.deepcopy(self.get_subtitle_export_style(segments=segments))
+        if subtitle_style.get("custom_position_enabled") and (canvas_width != source_width or canvas_height != source_height):
+            try:
+                scale_mode = self.get_output_scale_mode_key()
+                focus_x, focus_y = self.get_output_fill_focus()
+                scale = max(canvas_width / source_width, canvas_height / source_height) if scale_mode == "fill" else min(canvas_width / source_width, canvas_height / source_height)
+                displayed_w, displayed_h = source_width * scale, source_height * scale
+                offset_x = (canvas_width - displayed_w) * (focus_x if scale_mode == "fill" else 0.5)
+                offset_y = (canvas_height - displayed_h) * (focus_y if scale_mode == "fill" else 0.5)
+                x_canvas = float(subtitle_style.get("custom_position_x", 50.0)) * canvas_width / 100.0
+                y_canvas = float(subtitle_style.get("custom_position_y", 86.0)) * canvas_height / 100.0
+                subtitle_style["custom_position_x"] = max(0.0, min(100.0, (x_canvas - offset_x) * 100.0 / displayed_w))
+                subtitle_style["custom_position_y"] = max(0.0, min(100.0, (y_canvas - offset_y) * 100.0 / displayed_h))
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+        signature = (video_path, source_width, source_height, repr(segments), repr(subtitle_style))
+        return {
+            "segments": copy.deepcopy(list(segments or [])),
+            "video_width": source_width,
+            "video_height": source_height,
+            "style": subtitle_style,
+            "signature": signature,
+            "preview_dir": self.get_project_temp_dir("preview"),
+        }
+
+    @staticmethod
+    def _write_subtitle_ass_from_snapshot(snapshot: dict, srt_path: str) -> str:
+        """Worker-safe ASS generation.  It intentionally touches no Qt state."""
+        from subtitle_builder import generate_srt
+        generate_srt(snapshot["segments"], srt_path)
+        style = snapshot["style"]
+        return srt_to_ass(
+            srt_path,
+            video_width=snapshot["video_width"], video_height=snapshot["video_height"],
+            alignment=style.get("alignment", 2), margin_v=style.get("margin_v", 30),
+            font_name=style.get("font_name", "Arial"), font_size=style.get("font_size", 18),
+            font_color=style.get("font_color", "&H00FFFFFF"), background_box=style.get("background_box", False),
+            animation_style=style.get("animation", "Static"), highlight_color=style.get("highlight_color", "&H00FFFFFF"),
+            outline_color=style.get("outline_color", "&H00000000"), outline_width=style.get("outline_width", 2.0),
+            shadow_color=style.get("shadow_color", "&H80000000"), shadow_depth=style.get("shadow_depth", 1.0),
+            background_color=style.get("background_color", "&H80000000"), background_alpha=style.get("background_alpha", 0.5),
+            background_width=style.get("background_width", "fit_text"), background_shape=style.get("background_shape", "rectangle"),
+            background_padding=style.get("background_padding", 6), background_radius=style.get("background_radius", 0),
+            bold=style.get("bold", False), preset_key=style.get("preset_key", ""),
+            auto_keyword_highlight=style.get("auto_keyword_highlight", False), animation_duration=style.get("animation_duration", 0.22),
+            manual_highlights=style.get("manual_highlights", []), word_timings=style.get("word_timings", []),
+            speaker_colors=style.get("speaker_colors", []), custom_position_enabled=style.get("custom_position_enabled", False),
+            custom_position_x=style.get("custom_position_x", 50), custom_position_y=style.get("custom_position_y", 86),
+            custom_position_bottom_y=style.get("custom_position_bottom_y"), single_line=style.get("single_line", False),
+            font_scale=style.get("font_scale", 1.0), log_generation=False,
+        )
+
+    def _schedule_deferred_subtitle_ass_build(self, segments) -> bool:
+        """Queue exact libass measurement after editing settles; never block UI."""
+        if not self._uses_exact_full_block_subtitle_background() or not segments:
+            return False
+        snapshot = self._build_live_subtitle_ass_snapshot(segments)
+        if snapshot["signature"] == getattr(self, "_live_preview_signature", None):
+            return True
+        self._subtitle_ass_request_token = int(getattr(self, "_subtitle_ass_request_token", 0)) + 1
+        snapshot["token"] = self._subtitle_ass_request_token
+        self._subtitle_ass_pending_snapshot = snapshot
+        timer = getattr(self, "subtitle_ass_debounce_timer", None)
+        if timer:
+            timer.start()
+        else:
+            self._start_deferred_subtitle_ass_build()
+        return True
+
+    def _start_deferred_subtitle_ass_build(self):
+        snapshot = getattr(self, "_subtitle_ass_pending_snapshot", None)
+        if not snapshot:
+            return
+        self._subtitle_ass_pending_snapshot = None
+        token = int(snapshot["token"])
+        preview_dir = snapshot["preview_dir"]
+        os.makedirs(preview_dir, exist_ok=True)
+        srt_path = os.path.join(preview_dir, f"live_preview_subtitle_{token}.srt")
+
+        def _worker():
+            try:
+                ass_path = self._write_subtitle_ass_from_snapshot(snapshot, srt_path)
+                self.subtitle_ass_ready.emit(token, srt_path, ass_path, snapshot["signature"])
+            except Exception as exc:
+                self.runtime_log_received.emit(f"[Subtitle Background] Exact libass layout failed: {exc}")
+                self.subtitle_ass_ready.emit(token, "", "", snapshot["signature"])
+
+        worker = threading.Thread(target=_worker, name=f"subtitle-ass-{token}", daemon=True)
+        self._subtitle_ass_worker_threads = [thread for thread in getattr(self, "_subtitle_ass_worker_threads", []) if thread.is_alive()]
+        self._subtitle_ass_worker_threads.append(worker)
+        worker.start()
+
+    def _on_async_subtitle_ass_ready(self, token: int, srt_path: str, ass_path: str, signature):
+        """Apply only the newest completed exact layout on the Qt thread."""
+        if int(token) != int(getattr(self, "_subtitle_ass_request_token", 0)):
+            return
+        if not ass_path or not os.path.exists(ass_path):
+            return
+        self.live_preview_subtitle_path = srt_path
+        self.live_preview_ass_path = ass_path
+        self._live_preview_signature = signature
+        self.processed_artifacts["subtitle_preview_srt"] = srt_path
+        self.processed_artifacts["subtitle_preview_ass"] = ass_path
+        try:
+            self.media_player.set_subtitle_file(ass_path)
+            self._loaded_live_ass_path = ass_path
+            self._loaded_live_ass_signature = signature
+            if hasattr(self, "video_view"):
+                self.video_view.subtitle_item.set_text_rendering(False)
+            self.update_playback_subtitle_highlight(int(self.media_player.position() or 0))
+        except Exception as exc:
+            self.runtime_log_received.emit(f"[Subtitle Background] Could not apply exact layout: {exc}")
+
     def _write_live_preview_assets(self, segments):
         if not segments:
             self.live_preview_subtitle_path = ""
             self.live_preview_ass_path = ""
             self._live_preview_signature = None
+            self._loaded_live_ass_path = ""
+            self._loaded_live_ass_signature = None
             return "", ""
+
+        # Full-block geometry is measured from libass itself.  Scheduling it
+        # here keeps all callers (style controls, playback callbacks, project
+        # load) non-blocking.  The previous exact track stays visible while a
+        # newer style is being measured after the debounce interval.
+        if self._uses_exact_full_block_subtitle_background():
+            self._schedule_deferred_subtitle_ass_build(segments)
+            return self.live_preview_subtitle_path, self.live_preview_ass_path
+
+        # A pending Full Block worker must never re-apply an older ASS file
+        # after the user switches the background off (or back to Fit Text).
+        self._subtitle_ass_request_token = int(getattr(self, "_subtitle_ass_request_token", 0)) + 1
 
         preview_dir = self.get_project_temp_dir("preview")
         preview_srt_path = os.path.join(preview_dir, "live_preview_subtitle.srt")
@@ -10928,6 +11093,7 @@ class VideoTranslatorGUI(QMainWindow):
             background_width=subtitle_style.get("background_width", "fit_text"),
             background_shape=subtitle_style.get("background_shape", "rectangle"),
             background_padding=subtitle_style.get("background_padding", 6),
+            background_radius=subtitle_style.get("background_radius", 0),
             bold=subtitle_style.get("bold", False),
             preset_key=subtitle_style.get("preset_key", ""),
             auto_keyword_highlight=subtitle_style.get("auto_keyword_highlight", False),
@@ -11182,7 +11348,16 @@ class VideoTranslatorGUI(QMainWindow):
                 self.live_preview_editor_name = editor_name
                 _srt_path, ass_path = self._write_live_preview_assets(segments)
                 if ass_path and os.path.exists(ass_path):
-                    self.media_player.set_subtitle_file(ass_path)
+                    # Re-adding an unchanged MPV subtitle track can briefly
+                    # stall playback.  Only reload it once the final ASS path
+                    # actually changes.
+                    if (
+                        ass_path != getattr(self, "_loaded_live_ass_path", "")
+                        or getattr(self, "_loaded_live_ass_signature", None) != getattr(self, "_live_preview_signature", None)
+                    ):
+                        self.media_player.set_subtitle_file(ass_path)
+                        self._loaded_live_ass_path = ass_path
+                        self._loaded_live_ass_signature = getattr(self, "_live_preview_signature", None)
                     if hasattr(self, "video_view"):
                         # The Qt item remains present for dragging but MPV's
                         # libass renderer supplies the visible subtitle.

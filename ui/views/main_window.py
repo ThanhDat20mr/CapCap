@@ -309,6 +309,8 @@ def _connect_ui_signals(gui):
         gui.subtitle_bg_alpha_spin.valueChanged.connect(gui.update_subtitle_preview_style)
     if hasattr(gui, "subtitle_background_padding_spin"):
         gui.subtitle_background_padding_spin.valueChanged.connect(gui.update_subtitle_preview_style)
+    if hasattr(gui, "subtitle_background_radius_spin"):
+        gui.subtitle_background_radius_spin.valueChanged.connect(gui.update_subtitle_preview_style)
     if hasattr(gui, "subtitle_background_width_combo"):
         gui.subtitle_background_width_combo.currentIndexChanged.connect(gui.on_subtitle_background_width_changed)
         gui.subtitle_background_shape_combo.currentIndexChanged.connect(gui.update_subtitle_preview_style)
@@ -329,6 +331,8 @@ def _connect_ui_signals(gui):
         gui.subtitle_bg_alpha_spin.valueChanged.connect(gui.on_subtitle_style_control_edited)
     if hasattr(gui, "subtitle_background_padding_spin"):
         gui.subtitle_background_padding_spin.valueChanged.connect(gui.on_subtitle_style_control_edited)
+    if hasattr(gui, "subtitle_background_radius_spin"):
+        gui.subtitle_background_radius_spin.valueChanged.connect(gui.on_subtitle_style_control_edited)
     if hasattr(gui, "subtitle_background_width_combo"):
         gui.subtitle_background_width_combo.currentIndexChanged.connect(gui.on_subtitle_style_control_edited)
         gui.subtitle_background_shape_combo.currentIndexChanged.connect(gui.on_subtitle_style_control_edited)
@@ -360,6 +364,12 @@ def _initialize_ui_state(gui):
     gui.live_subtitle_preview_timer.setSingleShot(True)
     gui.live_subtitle_preview_timer.setInterval(250)
     gui.live_subtitle_preview_timer.timeout.connect(gui.refresh_live_subtitle_preview)
+    gui.subtitle_ass_debounce_timer = QTimer(gui)
+    gui.subtitle_ass_debounce_timer.setSingleShot(True)
+    # Font and size controls can emit many intermediate values while being
+    # dragged.  Only the settled value needs an exact libass layout pass.
+    gui.subtitle_ass_debounce_timer.setInterval(360)
+    gui.subtitle_ass_debounce_timer.timeout.connect(gui._start_deferred_subtitle_ass_build)
     gui.video_filter_preview_timer = QTimer(gui)
     gui.video_filter_preview_timer.setSingleShot(True)
     gui.video_filter_preview_timer.setInterval(350)

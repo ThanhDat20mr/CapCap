@@ -509,6 +509,7 @@ class ExportWorkflow:
             background_color=str(style["background_color"]), background_alpha=float(style["background_alpha"]),
             background_width=str(style.get("background_width", "fit_text")), background_shape=str(style.get("background_shape", "rectangle")),
             background_padding=float(style.get("background_padding", 6)),
+            background_radius=float(style.get("background_radius", 0)),
             bold=bool(style["bold"]), preset_key=str(style["preset_key"]),
             auto_keyword_highlight=bool(style["auto_keyword_highlight"]),
             animation_duration=float(style["animation_duration"]), manual_highlights=style["manual_highlights"],
