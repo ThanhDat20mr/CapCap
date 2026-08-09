@@ -4302,6 +4302,14 @@ class VideoTranslatorGUI(QMainWindow):
         self._video_filter_adjust_overrides = base_overrides
         self._video_filter_user_modified = base_modified_flags
         self._refresh_video_filter_ui()
+        # Keep the inspector controls in sync as well.  The inspector has a
+        # separate set of sliders from the legacy filter panel; previously a
+        # Reset changed the underlying state but left those visible sliders at
+        # their old values until the inspector was reopened.
+        try:
+            self._sync_video_inspector_ui()
+        except Exception:
+            pass
         if hasattr(self, "media_player") and self._is_realtime_color_filter_state():
             self._apply_realtime_color_filter_preview()
         self.refresh_ui_state()
@@ -6209,6 +6217,13 @@ class VideoTranslatorGUI(QMainWindow):
         try:
             if hasattr(self, "persist_project_mask_state"):
                 self.persist_project_mask_state()
+        except Exception:
+            pass
+        # The mask-specific delete path returns before the shared Delete
+        # handler can persist the serialized timeline.  Write timeline.json
+        # here as well so a deleted M1 layer cannot reappear on reopen.
+        try:
+            self.persist_current_timeline_project_data()
         except Exception:
             pass
         if hasattr(self, "_show_default_inspector"):
