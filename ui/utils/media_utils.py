@@ -17,8 +17,8 @@ def setup_media_player(gui):
     gui.media_player.positionChanged.connect(gui.position_changed)
     gui.media_player.durationChanged.connect(gui.duration_changed)
 
-    # Re-apply the M1 mask filter on play / pause / stop so the mask
-    # only shows while the video is playing.
+    # Re-apply the managed visual effects on play/pause/stop. Effects remain
+    # visible on the paused frame; only their editing handles are stateful.
     if hasattr(gui.media_player, "stateChanged"):
         gui.media_player.stateChanged.connect(gui._on_preview_state_changed)
 
@@ -60,23 +60,14 @@ def toggle_play(gui):
             gui.media_player.pause()
             if hasattr(gui, "refresh_play_button_icon"):
                 gui.refresh_play_button_icon()
-            if hasattr(gui, "media_player"):
-                gui.media_player.clear_blur_region()
-            if hasattr(gui, "_sync_blur_controls"):
-                gui._sync_blur_controls()
             gui.timeline.set_playing(False)
-            # Clear the M1 mask filter on pause so the video shows
-            # through (the mask only renders while playing). We call
-            # clear_mask_region directly instead of
-            # _apply_mask_to_preview(force=True) because the latter
-            # would re-apply the mask when regions exist.
-            if hasattr(gui, "media_player") and hasattr(
-                gui.media_player, "clear_mask_region"
-            ):
-                try:
-                    gui.media_player.clear_mask_region()
-                except Exception:
-                    pass
+            # Keep Blur and Mask applied to the paused frame. The backend's
+            # stateChanged handler reapplies the current graph; clearing here
+            # caused a visible gap until another layer was selected.
+            if hasattr(gui, "apply_preview_blur_region"):
+                gui.apply_preview_blur_region(force=True)
+            if hasattr(gui, "_apply_mask_to_preview"):
+                gui._apply_mask_to_preview(force=True)
             if (
                 has_active_video_filters
                 and filter_workflow_active

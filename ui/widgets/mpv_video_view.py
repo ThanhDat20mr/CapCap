@@ -794,11 +794,10 @@ class _BlurRegionOverlayWindow(QWidget):
             # Blur regions are outlines only. Any translucent fill blends
             # with the frame beneath it and can look dark blue on inactive
             # regions, even though the logical overlay colour is identical.
-            painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 235), 2))
-            painter.drawRoundedRect(rect, 12, 12)
-
             if self._editable and index == self._active_index:
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 235), 2))
+                painter.drawRoundedRect(rect, 12, 12)
                 painter.setBrush(QColor(color.red(), color.green(), color.blue(), 235))
                 painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
                 for handle_rect in self._handle_rects(rect).values():
@@ -824,6 +823,31 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
         self._sync_timer = None
         self._opacity: float = 1.0
         self._rotation: float = 0.0
+
+    def set_editable(self, editable: bool):
+        """Keep the logo image visible while hiding edit chrome when idle."""
+        self._editable = bool(editable)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, not self._editable)
+        self.setCursor(Qt.OpenHandCursor if self._editable else Qt.ArrowCursor)
+        if self._regions and self._target_view and self._target_view.isVisible():
+            self.sync_to_view()
+            self.show()
+            self.raise_()
+        elif not self._regions:
+            self.hide()
+        self.update()
+
+    def sync_to_view(self):
+        """Keep the logo image positioned even when edit handles are hidden."""
+        if (self._suspended or not self._target_view
+                or not self._target_view.isVisible() or not self._regions):
+            self.hide()
+            return
+        top_left = self._target_view.mapToGlobal(QPoint(0, 0))
+        self.setGeometry(QRect(top_left, self._target_view.size()))
+        self.show()
+        self.raise_()
+        self.update()
 
     def attach_to_view(self, view: QWidget):
         # Inherit the base behavior (event filter on main window,
@@ -943,6 +967,9 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
         if self._target_view is not None:
             painter.setClipRect(self._target_view.get_preview_canvas_rect())
         for index, _region in enumerate(self._regions):
@@ -968,11 +995,12 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
             # border) so they remain axis-aligned and
             # fully opaque even when the logo is rotated or faded.
             painter.restore()
-            pen = QPen(QColor(110, 231, 214, int(255 * max(opacity, 0.4))),
-                       2, Qt.DashLine)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(rect)
+            if self._editable and index == self._active_index:
+                pen = QPen(QColor(110, 231, 214, int(255 * max(opacity, 0.4))),
+                           2, Qt.DashLine)
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(rect)
             if self._editable and index == self._active_index:
                 painter.setBrush(QColor(110, 231, 214))
                 painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
@@ -1083,24 +1111,24 @@ class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
         if self._target_view is not None:
             painter.setClipRect(self._target_view.get_preview_canvas_rect())
         for index, _region in enumerate(self._regions):
             rect = self.region_rect(index)
             if rect.width() <= 0 or rect.height() <= 0:
                 continue
-            # Translucent fill of the M1 accent colour (NOT the mask
-            # colour) so the user can see the region outline while
-            # positioning, regardless of the mask's actual colour.
-            # The actual mask colour is only applied to the video via
-            # the mpv filter when the layer is set to visible.
+            # The actual mask effect is rendered by MPV. The editor overlay
+            # must remain transparent so selecting a layer cannot tint or
+            # change the opacity of the video beneath it.
             accent = QColor(self.ACCENT)
-            painter.fillRect(rect, QColor(accent.red(), accent.green(), accent.blue(), 60))
             pen = QPen(accent, 2, Qt.DashLine)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(rect)
             if self._editable and index == self._active_index:
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(rect)
                 painter.setBrush(accent)
                 painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
                 for handle_rect in self._handle_rects(rect).values():
@@ -1179,9 +1207,28 @@ class _TextLayerOverlayWindow(QWidget):
         event.ignore()
     def mouseMoveEvent(self, event):
         if not self._drag_id or self.width() <= 0 or self.height() <= 0: return
-        point = QPointF(event.position()) - self._drag_offset; x, y = max(0., min(1., point.x() / self.width())), max(0., min(1., point.y() / self.height()))
-        for item in self._items:
-            if str(item.get("id", "")) == self._drag_id: item["x"], item["y"] = x, y; break
+        point = QPointF(event.position()) - self._drag_offset
+        item = next((candidate for candidate in self._items
+                     if str(candidate.get("id", "")) == self._drag_id), None)
+        if item is None:
+            return
+        # x/y are the text block's center, unlike a resize handle's top-left
+        # coordinates.  Clamping the center alone lets a wide/tall text block
+        # cross the canvas edge, which made Text behave differently from the
+        # other visual layers.  Keep the whole rendered block inside the
+        # preview canvas while preserving its current layout metrics.
+        rect, *_ = self._rect_for(item)
+        half_w = max(0.0, float(rect.width()) / (2.0 * self.width()))
+        half_h = max(0.0, float(rect.height()) / (2.0 * self.height()))
+        if half_w >= 0.5:
+            x = 0.5
+        else:
+            x = max(half_w, min(1.0 - half_w, point.x() / self.width()))
+        if half_h >= 0.5:
+            y = 0.5
+        else:
+            y = max(half_h, min(1.0 - half_h, point.y() / self.height()))
+        item["x"], item["y"] = x, y
         self.layerMoved.emit(self._drag_id, x, y); self.update(); event.accept()
     def mouseReleaseEvent(self, event):
         if self._drag_id:
@@ -1347,6 +1394,9 @@ class MpvVideoView(QWidget):
         self.mask_overlay.sync_to_view()
         if self.text_overlay is not None:
             self.text_overlay.sync_to_view()
+            if self.text_overlay._items and not self.text_overlay._suppressed:
+                self.text_overlay.show()
+                self.text_overlay.raise_()
         self.update()
 
     def moveEvent(self, event):
@@ -1371,12 +1421,28 @@ class MpvVideoView(QWidget):
         self._sync_preview_stack()
         self._update_ratio_badge()
         self.reposition_subtitle()
+        # Optional overlays may be restored before the native video surface
+        # receives its final geometry. Reconnect their visible content now;
+        # selection continues to control only edit chrome.
+        if self.text_overlay is not None and self.text_overlay._items and not self.text_overlay._suppressed:
+            self.text_overlay.sync_to_view()
+            self.text_overlay.show()
+            self.text_overlay.raise_()
+        if (getattr(self, "logo_overlay", None) is not None
+                and getattr(self.logo_overlay, "_regions", None)):
+            self.logo_overlay.sync_to_view()
+            self.logo_overlay.show()
+            self.logo_overlay.raise_()
         if self.subtitle_item.current_text:
             self.subtitle_item.show()
         if self.text_overlay is not None and self.text_overlay._items:
             self.text_overlay.sync_to_view()
             self.text_overlay.show()
             self.text_overlay.raise_()
+        if getattr(self, "logo_overlay", None) is not None and self.logo_overlay._regions:
+            self.logo_overlay.sync_to_view()
+            self.logo_overlay.show()
+            self.logo_overlay.raise_()
         self.blur_overlay.sync_to_view()
         self.mask_overlay.sync_to_view()
 
@@ -1800,12 +1866,12 @@ class MpvVideoView(QWidget):
         QTimer.singleShot(200, self.logo_overlay.sync_to_view)
         QTimer.singleShot(500, self.logo_overlay.sync_to_view)
 
-    def set_logos(self, logos, *, active_index: int = 0):
+    def set_logos(self, logos, *, active_index: int = 0, editable: bool = True):
         """Render all L1 logos; only the selected layer is editable."""
         if not hasattr(self, "logo_overlay") or self.logo_overlay is None:
             self.set_logo("", 0.1, 0.1, 0.2, 0.2)
         self.logo_overlay.set_logos(logos, active_index)
-        self.logo_overlay.set_editable(True)
+        self.logo_overlay.set_editable(bool(editable))
         self.logo_overlay.attach_to_view(self)
         self.logo_overlay.sync_to_view()
 

@@ -1370,28 +1370,13 @@ def build_preview_panel(gui):
     gui.blur_inspector_layer_count_label.setVisible(False)
     blur_layout.addWidget(gui.blur_inspector_layer_count_label)
     gui.blur_inspector_summary_label = QLabel(
-        "Blur regions in this track. Toggle 'Show on preview' to hide "
-        "the visual blur effect without removing the layer."
+        "Blur regions in this track. Use the B1 layer visibility control "
+        "in the timeline to show or hide the effect."
     )
     gui.blur_inspector_summary_label.setObjectName("helperLabel")
     gui.blur_inspector_summary_label.setWordWrap(True)
     blur_layout.addWidget(gui.blur_inspector_summary_label)
     _add_layer_timing_controls(blur_layout, "blur")
-
-    # Show on preview toggle
-    show_row = QHBoxLayout()
-    show_row.setSpacing(4)
-    show_row.setContentsMargins(0, 0, 0, 0)
-    gui.blur_inspector_show_cb = QCheckBox("Show on preview")
-    gui.blur_inspector_show_cb.setChecked(True)
-    gui.blur_inspector_show_cb.setToolTip(
-        "When unchecked, the blur effect is hidden on the video preview. "
-        "The blur layers are still present in the timeline; only the "
-        "visual rendering is disabled."
-    )
-    show_row.addWidget(gui.blur_inspector_show_cb)
-    show_row.addStretch(1)
-    blur_layout.addLayout(show_row)
 
     # --- Blur Radius ---
     radius_row = QHBoxLayout()

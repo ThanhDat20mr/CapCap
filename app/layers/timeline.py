@@ -13,6 +13,7 @@ from app.layers.image import ImageLayer
 from app.layers.sticker import StickerLayer
 from app.layers.blur import BlurLayer
 from app.layers.dub_subtitle import DubSubtitleLayer
+from app.layers.mask import MaskLayer
 
 LAYER_CLASS_MAP: dict[LayerType, type] = {
     LayerType.VIDEO: VideoLayer,
@@ -23,6 +24,7 @@ LAYER_CLASS_MAP: dict[LayerType, type] = {
     LayerType.IMAGE: ImageLayer,
     LayerType.STICKER: StickerLayer,
     LayerType.BLUR: BlurLayer,
+    LayerType.MASK: MaskLayer,
 }
 
 

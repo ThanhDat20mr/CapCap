@@ -3540,6 +3540,64 @@ class VideoTranslatorGUI(QMainWindow):
         if removed:
             self.log(f"[Timeline Cache] Retained core tracks only; discarded {len(removed)} optional track(s).")
 
+    def _restore_saved_timeline_model(self, state) -> bool:
+        """Restore the complete editor timeline, including optional layers.
+
+        The project bridge restores transcript artifacts, but those artifacts
+        only describe the core subtitle data.  Text/Logo/Blur/Mask tracks are
+        persisted separately in ``timeline/timeline.json`` and must be loaded
+        before the subtitle sync rebuilds TS1; otherwise reopening a project
+        silently drops the optional tracks from the in-memory model.
+        """
+        timeline = getattr(self, "timeline", None)
+        if timeline is None:
+            return False
+        artifacts = getattr(state, "artifacts", {}) or {}
+        timeline_path = str(artifacts.get("timeline", "") or "").strip()
+        if not timeline_path:
+            timeline_path = os.path.join(state.project_root, "timeline", "timeline.json")
+        timeline_path = self._normalize_local_file_path(timeline_path)
+        if not timeline_path or not os.path.isfile(timeline_path):
+            return False
+        try:
+            import json
+            from app.layers.timeline import Timeline
+
+            with open(timeline_path, "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+            loaded = Timeline.from_dict(saved)
+            if not loaded.tracks:
+                return False
+
+            timeline._timeline = loaded
+            # Track visibility toggles are an editor-view concern, not part
+            # of the serialized project model.  Do not let hidden IDs from a
+            # previous project affect the restored tracks.
+            timeline._timeline_hidden_track_ids.clear()
+            # The source/video duration is refreshed later by set_video_source;
+            # retain the saved duration until then so optional layer geometry
+            # can be drawn immediately during project restoration.
+            timeline._duration = max(
+                float(getattr(timeline, "_duration", 0.0) or 0.0),
+                float(getattr(loaded, "duration", 0.0) or 0.0),
+            )
+            timeline._track_heights = {
+                str(track.id): int(getattr(track, "height", timeline.TRACK_DEFAULT_H))
+                for track in loaded.tracks
+            }
+            timeline._segment_indices.clear()
+            timeline._overlap_layout_cache.clear()
+            timeline._overlap_row_assignments.clear()
+            timeline._redraw()
+            self.log(
+                f"[Timeline] Restored {len(loaded.tracks)} saved track(s) "
+                f"from {timeline_path}"
+            )
+            return True
+        except Exception as exc:
+            self.log(f"[Timeline] Could not restore saved timeline: {exc}")
+            return False
+
     def load_project_context(self, state):
         if not state:
             return
@@ -3583,6 +3641,10 @@ class VideoTranslatorGUI(QMainWindow):
             self.timeline.set_segments([])
             self.timeline.set_video_thumbnails([])
             self.timeline.set_playing(False)
+            # Restore optional tracks before apply_segments_to_timeline().
+            # That method refreshes TS1, while preserving the restored Text,
+            # Logo, Blur, and Mask tracks.
+            self._restore_saved_timeline_model(state)
         self._timeline_video_thumb_cache_key = None
         self._timeline_video_thumbnails = []
         self.processed_artifacts.update(context["artifacts"])
@@ -3651,6 +3713,44 @@ class VideoTranslatorGUI(QMainWindow):
                 self._restore_project_mask_state(state)
             except Exception:
                 pass
+        # Always start a reopened project focused on the source video layer,
+        # never on an optional overlay that happened to be restored first.
+        try:
+            video_layer = None
+            for track in self.timeline._timeline.tracks:
+                if str(getattr(track, "name", "")) == "V1 Video" and track.layers:
+                    video_layer = track.layers[0]
+                    break
+            if video_layer is not None:
+                self.timeline.select_layer(video_layer.id)
+                self.on_timeline_layer_selected(video_layer.id)
+        except Exception:
+            pass
+        # Reconnect optional timeline layers to their preview overlays after
+        # restoring the serialized model.  Timeline restoration alone is not
+        # enough because these overlays are maintained by the video view.
+        try:
+            self._refresh_text_layer_preview(getattr(self.timeline, "_selected_layer_id", ""))
+        except Exception:
+            pass
+        try:
+            logo_track = next(
+                (
+                    track for track in self.timeline._timeline.tracks
+                    if str(getattr(track, "name", "")) == "L1 Logo"
+                    and getattr(track, "layers", None)
+                ),
+                None,
+            )
+            if logo_track is not None:
+                logo_layer = next(
+                    (candidate for candidate in logo_track.layers
+                     if self._layer_is_active_at_preview_time(candidate)),
+                    logo_track.layers[0],
+                )
+                self._show_logo_overlay(logo_track, logo_layer)
+        except Exception:
+            pass
         # Force the dual-track sidecar player to re-initialize for this
         # project. Without this, reopening a project would leave the
         # original/dubbed QMediaPlayer sidecars pointing at the previous
@@ -5574,8 +5674,9 @@ class VideoTranslatorGUI(QMainWindow):
             if str(getattr(track, "name", "")) == "L1 Logo":
                 active = [l for l in track.layers if self._layer_is_active_at_preview_time(l, time_seconds)]
                 if active:
+                    is_selected_logo = selected_id in {l.id for l in active}
                     target = next((l for l in active if l.id == selected_id), active[0])
-                    self._show_logo_overlay(track, target)
+                    self._show_logo_overlay(track, target, editable=is_selected_logo)
                 elif hasattr(self.video_view, "clear_logo"):
                     self.video_view.clear_logo()
             elif str(getattr(track, "name", "")) == "M1":
@@ -5584,6 +5685,9 @@ class VideoTranslatorGUI(QMainWindow):
                 if hasattr(self.video_view, "set_mask_regions"):
                     active_index = next((i for i, l in enumerate(active_layers) if l.id == selected_id), 0)
                     self.video_view.set_mask_regions(regions, active_index=active_index, editable=bool(active_layers and selected_id in {l.id for l in active_layers}))
+                # The mask effect is independent of selection/edit handles.
+                # Keep it applied when the preview is paused as well.
+                self._apply_mask_to_preview(regions=regions)
             elif str(getattr(track, "name", "")) == "B1":
                 regions = []
                 active_layers = [l for l in track.layers if self._layer_is_active_at_preview_time(l, time_seconds)]
@@ -5598,6 +5702,18 @@ class VideoTranslatorGUI(QMainWindow):
                     })
                 if hasattr(self.video_view, "set_blur_regions_normalized"):
                     self.video_view.set_blur_regions_normalized(regions)
+                if hasattr(self.video_view, "set_blur_edit_enabled"):
+                    # B1's effect remains rendered, but its border/handles
+                    # are shown only while a B1 layer is selected and the
+                    # preview is paused.
+                    is_selected_blur = selected_id in {l.id for l in active_layers}
+                    try:
+                        is_playing = bool(self.media_player.is_playing())
+                    except Exception:
+                        is_playing = False
+                    self.video_view.set_blur_edit_enabled(
+                        bool(is_selected_blur and not is_playing and self._blur_effect_enabled())
+                    )
                 # Blur has a separate MPV filter in addition to its editable
                 # outline. Update that filter with the same time-filtered
                 # regions; otherwise a filter applied at playback start
@@ -5698,8 +5814,10 @@ class VideoTranslatorGUI(QMainWindow):
             self.video_view.subtitle_item.set_editable(layer_type in {"subtitle", "dub_subtitle"})
         if not layer:
             self._show_default_inspector()
-            if hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
-                self.video_view.clear_logo()
+            # Deselecting a layer only removes edit chrome. Effects and
+            # rendered layer content remain visible in the preview.
+            self._timed_layer_preview_signature = None
+            self.refresh_timed_layer_preview()
             return
         # A selection must respect timing immediately, including before the
         # next playback positionChanged signal is emitted.
@@ -5738,12 +5856,12 @@ class VideoTranslatorGUI(QMainWindow):
         else:
             # Image, sticker: show default with info
             self._show_default_inspector_for_layer(track, layer)
-            if hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
-                self.video_view.clear_logo()
-            if hasattr(self, "video_view") and hasattr(self.video_view, "clear_mask_region"):
-                self.video_view.clear_mask_region()
+            # Do not clear unrelated visual layers when changing inspector
+            # panels. Their effects are independent of selection.
+            self._timed_layer_preview_signature = None
+            self.refresh_timed_layer_preview()
 
-    def _show_logo_overlay(self, track, layer):
+    def _show_logo_overlay(self, track, layer, *, editable=True):
         """Show the draggable logo overlay for the selected logo layer."""
         if not hasattr(self, "video_view"):
             return
@@ -5824,7 +5942,7 @@ class VideoTranslatorGUI(QMainWindow):
             if hasattr(self.video_view, "clear_logo"):
                 self.video_view.clear_logo()
             return
-        self.video_view.set_logos(logos, active_index=active_index)
+        self.video_view.set_logos(logos, active_index=active_index, editable=bool(editable))
 
         # Push opacity + rotation from the layer to the overlay. We
         # default to fully opaque + 0° for a freshly created logo.
@@ -5977,6 +6095,22 @@ class VideoTranslatorGUI(QMainWindow):
             return
         try:
             self._apply_mask_to_preview()
+        except Exception:
+            pass
+        # Some backends emit stateChanged before their native surface has
+        # finished the pause transition. Re-run the visual-layer sync on the
+        # next event-loop turn so the mask remains applied and edit chrome is
+        # derived from the final selected layer.
+        QTimer.singleShot(0, self._resync_visual_layers_after_state)
+        QTimer.singleShot(80, self._resync_visual_layers_after_state)
+
+    def _resync_visual_layers_after_state(self):
+        """Finalize overlay effects/handles after a playback state change."""
+        try:
+            self._timed_layer_preview_signature = None
+            self.refresh_timed_layer_preview()
+            self._apply_mask_to_preview()
+            self._sync_blur_controls()
         except Exception:
             pass
         # Both project settings and timeline JSON are disk-backed.  Defer
@@ -6216,13 +6350,6 @@ class VideoTranslatorGUI(QMainWindow):
                 self.blur_inspector_layer_count_label.setText(
                     f"{count} blur region(s) in track"
                 )
-        # Load show-on-preview state from track metadata
-        meta = getattr(track, "metadata", None) or {}
-        show = bool(meta.get("_show_on_preview", True))
-        if hasattr(self, "blur_inspector_show_cb"):
-            self.blur_inspector_show_cb.blockSignals(True)
-            self.blur_inspector_show_cb.setChecked(show)
-            self.blur_inspector_show_cb.blockSignals(False)
         # Load radius / opacity / pixelate from the selected layer
         # (fall back to defaults when no layer is selected).
         if layer is not None:
@@ -6271,10 +6398,9 @@ class VideoTranslatorGUI(QMainWindow):
             self.blur_inspector_pixel_size_value_label.setText(str(pixel_size))
 
         if hasattr(self, "blur_inspector_summary_label"):
-            state = "shown" if show else "hidden"
             self.blur_inspector_summary_label.setText(
-                f"Blur regions in '{track_name}'. The visual blur is "
-                f"currently {state} on the video preview."
+                f"Blur regions in '{track_name}'. Use the B1 layer "
+                "visibility control in the timeline to show or hide it."
             )
 
     def _wire_blur_inspector_controls(self):
@@ -9509,10 +9635,19 @@ class VideoTranslatorGUI(QMainWindow):
         # when the blur effect is ON. Turning the effect OFF hides
         # the rectangle; turning it ON shows it again for drag.
         has_regions = bool(self._current_blur_regions_payload())
+        selected_id = str(getattr(getattr(self, "timeline", None), "_selected_layer_id", "") or "")
+        selected_blur = False
+        timeline_model = getattr(getattr(self, "timeline", None), "_timeline", None)
+        for track in getattr(timeline_model, "tracks", []):
+            if str(getattr(track, "name", "")) != "B1":
+                continue
+            selected_blur = any(str(getattr(layer, "id", "")) == selected_id for layer in getattr(track, "layers", []))
+            break
         editing_allowed = (
             blur_enabled
             and has_video
             and has_regions
+            and selected_blur
             and not is_playing
             and not bool(getattr(self, "_filter_thumbnail_visible", False))
         )
@@ -9539,11 +9674,14 @@ class VideoTranslatorGUI(QMainWindow):
             self.blur_area_btn.blockSignals(False)
             QMessageBox.warning(self, "Blur Area", "Please load a video before adding a blur area.")
             return
-        # Only show/hide the blur area (overlay rectangle). The actual
-        # mpv blur effect is NOT applied on toggle - it is only applied
-        # when the video plays, to keep toggling fast and avoid
-        # rendering artifacts at the toggle position.
+        # The B1 header visibility control is the single visibility source.
+        # Update the managed MPV effect immediately, including while paused.
         self._sync_blur_controls()
+        if hasattr(self, "media_player"):
+            if checked:
+                self.apply_preview_blur_region(force=True)
+            else:
+                self.media_player.clear_blur_region()
         self.persist_project_blur_state()
         # Sync the B1 track label so the ON/OFF indicator matches
         if hasattr(self, "track_label_bar"):
@@ -9887,9 +10025,7 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "video_view") and hasattr(self.video_view, "set_blur_regions_normalized"):
             self.video_view.set_blur_regions_normalized(regions)
         # Always default the blur toggle to ON on project reopen so the
-        # blur area is displayed by default. The mpv blur effect is
-        # NOT auto-applied on reopen - it is only applied when the
-        # video plays.
+        # blur effect is displayed by default.
         if hasattr(self, "blur_area_btn"):
             self.blur_area_btn.blockSignals(True)
             self.blur_area_btn.setChecked(True)
@@ -9903,7 +10039,10 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "timeline"):
             self.timeline.sync_blur_regions(regions)
         if hasattr(self, "media_player"):
-            self.media_player.clear_blur_region()
+            try:
+                self.apply_preview_blur_region(force=True)
+            except Exception:
+                self.media_player.clear_blur_region()
 
     # ---- Mask layer (M1) ----
     def _current_mask_regions_payload(self, *, time_seconds=None, include_inactive=False):
@@ -9945,11 +10084,11 @@ class VideoTranslatorGUI(QMainWindow):
     def _apply_mask_to_preview(self, *, regions=None, force: bool = False):
         """Push the M1 mask track into the mpv filter chain.
 
-        The mask is only applied to the video while the player is
-        playing. When the video is paused / stopped, the mask is
-        cleared from the mpv filter chain so the original frame shows
-        through. The draggable overlay remains visible either way so
-        the user can position / resize the region while paused.
+        The mask effect is independent of timeline selection and playback
+        state.  Pausing or selecting another layer must not remove it from
+        the preview; only the dedicated M1 visibility control (or an empty
+        mask track) may clear the effect.  The editable outline/handles are
+        managed separately by the timeline selection.
 
         `force=True` bypasses the play-state gate (used by direct
         calls from `toggle_play` so the mask is applied/cleared in
@@ -9965,12 +10104,7 @@ class VideoTranslatorGUI(QMainWindow):
             else:
                 self.media_player.clear_mask_region()
             return
-        is_playing = False
-        try:
-            is_playing = bool(self.media_player.is_playing())
-        except Exception:
-            is_playing = False
-        if regions and is_playing:
+        if regions:
             self.media_player.set_mask_region(regions)
         else:
             self.media_player.clear_mask_region()
@@ -10002,11 +10136,30 @@ class VideoTranslatorGUI(QMainWindow):
                 self.timeline.set_playing(is_playing)
         except Exception:
             pass
-        # Lock / unlock the mask overlay based on play state.
+        # Lock / unlock editing based on both play state and timeline
+        # selection. Pausing must not make every region editable.
         try:
-            overlay = getattr(self.video_view, "mask_overlay", None)
-            if overlay is not None and overlay._regions:
-                overlay.set_editable(not is_playing)
+            selected_id = str(getattr(getattr(self, "timeline", None), "_selected_layer_id", "") or "")
+            selected_type = ""
+            selected_track_name = ""
+            for track in getattr(getattr(self.timeline, "_timeline", None), "tracks", []) if hasattr(self, "timeline") else []:
+                for layer in getattr(track, "layers", []):
+                    if str(getattr(layer, "id", "")) == selected_id:
+                        selected_type = str(getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))).lower()
+                        selected_track_name = str(getattr(track, "name", ""))
+                        break
+                if selected_type:
+                    break
+            mask_overlay = getattr(self.video_view, "mask_overlay", None)
+            if mask_overlay is not None and mask_overlay._regions:
+                mask_overlay.set_editable(bool(not is_playing and selected_type == "mask" and selected_track_name == "M1"))
+            if hasattr(self, "video_view") and hasattr(self.video_view, "set_blur_edit_enabled"):
+                self.video_view.set_blur_edit_enabled(
+                    bool(not is_playing and selected_type == "blur" and self._blur_effect_enabled())
+                )
+            logo_overlay = getattr(self.video_view, "logo_overlay", None)
+            if logo_overlay is not None and getattr(logo_overlay, "_regions", None):
+                logo_overlay.set_editable(bool(not is_playing and selected_type == "image" and selected_track_name == "L1 Logo"))
         except Exception:
             pass
         # When playback just ended, pause both audio sidecars so they
@@ -10088,9 +10241,9 @@ class VideoTranslatorGUI(QMainWindow):
                 if hasattr(self.timeline, "_track_heights"):
                     self.timeline._track_heights[track.id] = 60
                 self.timeline._redraw()
-                # Show the draggable overlay for the first restored
-                # mask so the user can immediately move / resize it
-                # after reopening the project (like the blur overlay).
+                # Keep the restored mask available for preview/editing. The
+                # caller selects V1 after all tracks are restored, so this
+                # does not steal the default project focus.
                 if track.layers:
                     try:
                         first_layer = track.layers[0]
@@ -13231,7 +13384,13 @@ class VideoTranslatorGUI(QMainWindow):
         self._return_to_launcher(project_removed_from_recent=True)
 
     def _return_to_launcher(self, project_removed_from_recent=True):
-        self._cache_core_timeline_tracks_only()
+        # Keep the complete saved timeline when returning to the launcher.
+        # Optional tracks (Text, Logo, Blur, Mask) are part of the project
+        # state and must be available when that project is reopened.
+        try:
+            self.persist_current_timeline_project_data()
+        except Exception:
+            pass
         video_path = getattr(self, "_current_video_path", "")
         if not video_path:
             video_path = os.path.normpath(self.video_path_edit.text().strip())
@@ -13323,7 +13482,9 @@ class VideoTranslatorGUI(QMainWindow):
                     self.persist_project_mask_state()
                 except Exception:
                     pass
-            self._cache_core_timeline_tracks_only()
+            # Preserve the complete project timeline on a normal application
+            # close, including Text and Logo tracks. Optional layers are
+            # removed only by the explicit clean/return workflow.
             if hasattr(self, "video_view"):
                 self.video_view.clear_blur_region()
             if hasattr(self, "media_player") and hasattr(self.media_player, "clear_mask_region"):

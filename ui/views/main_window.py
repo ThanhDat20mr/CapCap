@@ -262,7 +262,10 @@ def _connect_ui_signals(gui):
         gui.subtitle_words_per_segment_spin.valueChanged.connect(lambda _value: gui.on_single_line_toggled(gui.subtitle_single_line_cb.isChecked()))
     gui.use_existing_audio_radio.toggled.connect(gui.on_audio_source_mode_changed)
     gui.blur_area_btn.toggled.connect(gui.toggle_blur_effect_enabled)
-    gui.blur_add_btn.clicked.connect(gui.add_blur_region)
+    # The visible Blur button creates a timeline-backed B1 layer.  Keeping
+    # creation in one path ensures multiple Blur layers receive independent
+    # timing, selection, persistence, and preview state.
+    gui.blur_add_btn.clicked.connect(lambda: gui.on_add_timeline_layer("blur"))
     gui.ocr_region_btn.clicked.connect(gui.toggle_ocr_overlay_visibility)
     if hasattr(gui, "ocr_translator_btn"):
         gui.ocr_translator_btn.toggled.connect(gui.toggle_ocr_translator)

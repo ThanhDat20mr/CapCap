@@ -9,18 +9,20 @@ def save_user_settings(gui):
     # cached values so reopening another project always starts from defaults.
     for key in ("output_quality", "output_fps", "output_ratio", "output_scale_mode"):
         s.remove(key)
-    if hasattr(gui, "get_video_filter_state"):
-        filter_state = gui.get_video_filter_state()
-        s.setValue("video_filter_preset", filter_state.get("preset", "original"))
-        s.setValue("video_filter_intensity", int(filter_state.get("intensity", 75)))
-        s.setValue(
-            "video_filter_overrides",
-            json.dumps(filter_state.get("overrides", {}), ensure_ascii=True, sort_keys=True),
-        )
-        s.setValue(
-            "video_filter_modified",
-            json.dumps(filter_state.get("modified", {}), ensure_ascii=True, sort_keys=True),
-        )
+    # Project-dependent output/filter/style/voice values are intentionally
+    # not stored in global QSettings. Remove keys written by older builds.
+    for key in (
+        "video_filter_preset", "video_filter_intensity", "video_filter_overrides", "video_filter_modified",
+        "free_voice_name", "free_voice_value", "voice_engine", "premium_voice_name", "premium_voice_value",
+        "voice_tier", "subtitle_font", "subtitle_size", "subtitle_animation", "subtitle_animation_time",
+        "subtitle_preset", "subtitle_position_mode", "subtitle_align", "subtitle_custom_x", "subtitle_custom_y",
+        "subtitle_x_offset", "subtitle_vertical_offset", "subtitle_color", "subtitle_background_color",
+        "subtitle_background", "subtitle_background_width", "subtitle_background_shape", "subtitle_background_radius",
+        "subtitle_outline", "subtitle_background_alpha", "subtitle_bold", "subtitle_speaker_colors",
+        "subtitle_auto_keyword_highlight", "subtitle_highlight_color", "subtitle_highlight_mode",
+        "voice_speed", "audio_handling_mode", "voice_gender", "voice_timing_sync_mode",
+    ):
+        s.remove(key)
     s.setValue("source_lang", gui.lang_whisper_combo.currentText())
     s.setValue("whisper_model_name", getattr(gui, "selected_whisper_model_name", "auto"))
     s.setValue("final_output_folder", gui.final_output_folder_edit.text())
@@ -33,60 +35,11 @@ def save_user_settings(gui):
     s.remove("speaker_diarization_num_speakers")
     s.setValue("background_audio", gui.bg_music_edit.text())
     s.setValue("mixed_audio", gui.mixed_audio_edit.text())
-    s.setValue("free_voice_name", gui.free_voice_combo.currentText())
-    s.setValue("free_voice_value", gui.free_voice_combo.currentData())
-    if hasattr(gui, "voice_engine_combo"):
-        s.setValue("voice_engine", gui.voice_engine_combo.currentData())
-    s.setValue("premium_voice_name", "")
-    s.setValue("premium_voice_value", "")
-    s.setValue("voice_tier", "free")
-    s.setValue("use_existing_audio", gui.use_existing_audio_radio.isChecked())
-    s.setValue("keep_audio", gui.keep_audio_cb.isChecked())
-    s.setValue("keep_timeline", gui.keep_timeline_cb.isChecked())
+    for key in ("use_existing_audio", "keep_audio", "keep_timeline"):
+        s.remove(key)
     if hasattr(gui, "anchor_inspector_cb"):
         s.setValue("anchor_inspector", gui.anchor_inspector_cb.isChecked())
     s.setValue("auto_preview_frame", gui.auto_preview_frame_cb.isChecked())
-    s.setValue("subtitle_font", gui.subtitle_font_combo.currentText())
-    s.setValue("subtitle_size", gui.subtitle_font_size_spin.value())
-    s.setValue("subtitle_animation", gui.subtitle_animation_combo.currentText())
-    s.setValue("subtitle_animation_time", gui.subtitle_animation_time_spin.value())
-    s.setValue("subtitle_preset", gui.get_selected_subtitle_preset())
-    s.setValue("subtitle_position_mode", gui.subtitle_position_mode_combo.currentData())
-    s.setValue("subtitle_align", gui.subtitle_align_combo.currentText())
-    s.setValue("subtitle_custom_x", gui.subtitle_custom_x_spin.value())
-    s.setValue("subtitle_custom_y", gui.subtitle_custom_y_spin.value())
-    s.setValue("subtitle_x_offset", gui.subtitle_x_offset_spin.value())
-    s.setValue("subtitle_vertical_offset", gui.subtitle_bottom_offset_spin.value())
-    s.setValue("subtitle_color", gui.subtitle_color_hex)
-    s.setValue("subtitle_background_color", getattr(gui, "subtitle_background_color_hex", "#000000"))
-    s.setValue("subtitle_background", gui.subtitle_background_cb.isChecked())
-    if hasattr(gui, "subtitle_background_width_combo"):
-        s.setValue("subtitle_background_width", gui.subtitle_background_width_combo.currentData())
-    if hasattr(gui, "subtitle_background_shape_combo"):
-        s.setValue("subtitle_background_shape", gui.subtitle_background_shape_combo.currentData())
-    if hasattr(gui, "subtitle_background_radius_spin"):
-        s.setValue("subtitle_background_radius", gui.subtitle_background_radius_spin.value())
-    s.setValue(
-        "subtitle_outline",
-        getattr(gui, "subtitle_outline_cb", None).isChecked() if hasattr(gui, "subtitle_outline_cb") else True,
-    )
-    s.setValue(
-        "subtitle_background_alpha",
-        getattr(gui, "subtitle_bg_alpha_spin", None).value() if hasattr(gui, "subtitle_bg_alpha_spin") else 0.6,
-    )
-    s.setValue("subtitle_bold", gui.subtitle_bold_cb.isChecked())
-    s.setValue(
-        "subtitle_speaker_colors",
-        getattr(gui, "subtitle_speaker_colors_cb", None).isChecked()
-        if hasattr(gui, "subtitle_speaker_colors_cb") else False,
-    )
-    s.setValue("subtitle_auto_keyword_highlight", gui.subtitle_keyword_highlight_cb.isChecked())
-    s.setValue("subtitle_highlight_color", gui.subtitle_highlight_color_combo.currentText())
-    s.setValue("subtitle_highlight_mode", gui.subtitle_highlight_mode_combo.currentText())
-    s.setValue("voice_speed", gui.voice_speed_spin.currentText())
-    s.setValue("audio_handling_mode", gui.get_audio_handling_mode())
-    s.setValue("voice_gender", gui.voice_gender_combo.currentText())
-    s.setValue("voice_timing_sync_mode", gui.voice_timing_sync_combo.currentText())
     if hasattr(gui, "ai_dubbing_rewrite_cb"):
         s.setValue("ai_dubbing_rewrite", gui.ai_dubbing_rewrite_cb.isChecked())
     if hasattr(gui, "toggle_advanced_btn"):
@@ -133,17 +86,12 @@ def load_user_settings(gui):
     gui.audio_source_edit.setText(s.value("audio_source", gui.audio_source_edit.text()))
     gui.bg_music_edit.setText(s.value("background_audio", gui.bg_music_edit.text()))
     gui.mixed_audio_edit.setText(s.value("mixed_audio", gui.mixed_audio_edit.text()))
-    gui.set_voice_combo_value(gui.free_voice_combo, s.value("free_voice_value", gui.free_voice_combo.currentData()))
-    if hasattr(gui, "voice_engine_combo"):
-        voice_engine = str(s.value("voice_engine", gui.voice_engine_combo.currentData() or "fast")).strip()
-        index = gui.voice_engine_combo.findData(voice_engine)
-        if index >= 0:
-            gui.voice_engine_combo.setCurrentIndex(index)
+    # Voice selection, audio mode, subtitle style, and filters use the widget
+    # defaults for a new session/project; they are not inherited globally.
     if hasattr(gui, "use_premium_voice_radio"):
         gui.use_premium_voice_radio.setChecked(False)
     if hasattr(gui, "use_free_voice_radio"):
         gui.use_free_voice_radio.setChecked(True)
-    gui.keep_audio_cb.setChecked(str(s.value("keep_audio", gui.keep_audio_cb.isChecked())).lower() == "true")
     gui.keep_timeline_cb.setChecked(True)
     if hasattr(gui, "anchor_inspector_cb"):
         gui.anchor_inspector_cb.setChecked(
@@ -154,73 +102,7 @@ def load_user_settings(gui):
         auto_preview_enabled = False
         s.setValue("auto_preview_frame", False)
     gui.auto_preview_frame_cb.setChecked(auto_preview_enabled)
-    gui.subtitle_font_combo.setCurrentText(s.value("subtitle_font", gui.subtitle_font_combo.currentText()))
-    gui.subtitle_font_size_spin.setValue(int(s.value("subtitle_size", gui.subtitle_font_size_spin.value())))
-    gui.subtitle_animation_combo.setCurrentText(s.value("subtitle_animation", gui.subtitle_animation_combo.currentText()))
-    gui.subtitle_animation_time_spin.setValue(float(s.value("subtitle_animation_time", gui.subtitle_animation_time_spin.value())))
-    preset_key = str(s.value("subtitle_preset", "youtube")).lower()
-    if preset_key == "youtube":
-        gui.subtitle_preset_youtube_radio.setChecked(True)
-    elif preset_key == "minimal":
-        gui.subtitle_preset_minimal_radio.setChecked(True)
-    elif preset_key == "custom" and getattr(gui, "subtitle_preset_custom_radio", None):
-        gui.subtitle_preset_custom_radio.setChecked(True)
-    elif preset_key == "tiktok":
-        gui.subtitle_preset_tiktok_radio.setChecked(True)
-    else:
-        gui.subtitle_preset_youtube_radio.setChecked(True)
-    position_mode = str(s.value("subtitle_position_mode", gui.subtitle_position_mode_combo.currentData() or "anchor")).strip().lower()
-    position_mode_index = gui.subtitle_position_mode_combo.findData(position_mode)
-    if position_mode_index >= 0:
-        gui.subtitle_position_mode_combo.setCurrentIndex(position_mode_index)
-    gui.subtitle_align_combo.setCurrentText(s.value("subtitle_align", gui.subtitle_align_combo.currentText()))
-    gui.subtitle_custom_x_spin.setValue(int(s.value("subtitle_custom_x", gui.subtitle_custom_x_spin.value())))
-    gui.subtitle_custom_y_spin.setValue(int(s.value("subtitle_custom_y", gui.subtitle_custom_y_spin.value())))
-    gui.subtitle_x_offset_spin.setValue(int(s.value("subtitle_x_offset", gui.subtitle_x_offset_spin.value())))
-    gui.subtitle_bottom_offset_spin.setValue(int(s.value("subtitle_vertical_offset", gui.subtitle_bottom_offset_spin.value())))
-    gui.subtitle_color_hex = str(s.value("subtitle_color", gui.subtitle_color_hex)).upper()
-    gui.subtitle_color_btn.setText(gui.subtitle_color_hex)
-    gui.subtitle_background_color_hex = str(
-        s.value("subtitle_background_color", getattr(gui, "subtitle_background_color_hex", "#000000"))
-    ).upper()
-    if hasattr(gui, "subtitle_background_color_btn"):
-        gui.subtitle_background_color_btn.setText(gui.subtitle_background_color_hex)
-    gui.subtitle_background_cb.setChecked(str(s.value("subtitle_background", gui.subtitle_background_cb.isChecked())).lower() == "true")
-    if hasattr(gui, "subtitle_background_width_combo"):
-        width_index = gui.subtitle_background_width_combo.findData(
-            str(s.value("subtitle_background_width", "fit_text"))
-        )
-        if width_index >= 0:
-            gui.subtitle_background_width_combo.setCurrentIndex(width_index)
-    if hasattr(gui, "subtitle_background_shape_combo"):
-        shape_index = gui.subtitle_background_shape_combo.findData(
-            str(s.value("subtitle_background_shape", "rectangle"))
-        )
-        if shape_index >= 0:
-            gui.subtitle_background_shape_combo.setCurrentIndex(shape_index)
-    if hasattr(gui, "on_subtitle_background_width_changed"):
-        gui.on_subtitle_background_width_changed()
-    if hasattr(gui, "subtitle_background_radius_spin"):
-        gui.subtitle_background_radius_spin.setValue(int(s.value("subtitle_background_radius", 0)))
-    if hasattr(gui, "subtitle_outline_cb"):
-        gui.subtitle_outline_cb.setChecked(str(s.value("subtitle_outline", gui.subtitle_outline_cb.isChecked())).lower() == "true")
-    if hasattr(gui, "subtitle_bg_alpha_spin"):
-        gui.subtitle_bg_alpha_spin.setValue(float(s.value("subtitle_background_alpha", gui.subtitle_bg_alpha_spin.value())))
-    gui.subtitle_bold_cb.setChecked(str(s.value("subtitle_bold", gui.subtitle_bold_cb.isChecked())).lower() == "true")
-    if hasattr(gui, "subtitle_speaker_colors_cb"):
-        gui.subtitle_speaker_colors_cb.setChecked(
-            str(s.value("subtitle_speaker_colors", False)).lower() == "true"
-        )
-    gui.subtitle_keyword_highlight_cb.setChecked(
-        str(s.value("subtitle_auto_keyword_highlight", gui.subtitle_keyword_highlight_cb.isChecked())).lower() == "true"
-    )
-    gui.subtitle_highlight_color_combo.setCurrentText(str(s.value("subtitle_highlight_color", gui.subtitle_highlight_color_combo.currentText())))
-    gui.subtitle_highlight_mode_combo.setCurrentText(str(s.value("subtitle_highlight_mode", gui.subtitle_highlight_mode_combo.currentText())))
-    gui.voice_speed_spin.setCurrentText(s.value("voice_speed", gui.voice_speed_spin.currentText()))
-    audio_handling_mode = str(s.value("audio_handling_mode", gui.get_audio_handling_mode())).strip().lower()
-    audio_handling_index = gui.audio_handling_combo.findData(audio_handling_mode)
-    if audio_handling_index >= 0:
-        gui.audio_handling_combo.setCurrentIndex(audio_handling_index)
+    # Subtitle style controls retain their UI defaults for a new session.
     if hasattr(gui, "speaker_diarization_cb"):
         gui.speaker_diarization_cb.setChecked(False)
         if hasattr(gui, "update_speaker_diarization_availability"):
@@ -229,16 +111,13 @@ def load_user_settings(gui):
         index = gui.speaker_diarization_speakers_combo.findData(-1)
         if index >= 0:
             gui.speaker_diarization_speakers_combo.setCurrentIndex(index)
-    gui.voice_gender_combo.setCurrentText(s.value("voice_gender", gui.voice_gender_combo.currentText()))
-    gui.voice_timing_sync_combo.setCurrentText(s.value("voice_timing_sync_mode", gui.voice_timing_sync_combo.currentText()))
     if hasattr(gui, "timeline"):
         gui.timeline.set_voice_sync_mode(gui.voice_timing_sync_combo.currentText())
     
     if hasattr(gui, "ai_dubbing_rewrite_cb"):
         gui.ai_dubbing_rewrite_cb.setChecked(str(s.value("ai_dubbing_rewrite", "true")).lower() == "true")
-    use_existing = str(s.value("use_existing_audio", "false")).lower() == "true"
-    gui.use_existing_audio_radio.setChecked(use_existing)
-    gui.use_generated_audio_radio.setChecked(not use_existing)
+    gui.use_generated_audio_radio.setChecked(True)
+    gui.use_existing_audio_radio.setChecked(False)
     advanced_open = str(s.value("advanced_section_open", "false")).lower() == "true"
     if hasattr(gui, "toggle_advanced_btn"):
         gui.toggle_advanced_btn.setChecked(advanced_open)
