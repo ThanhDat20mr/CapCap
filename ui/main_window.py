@@ -11795,7 +11795,7 @@ class VideoTranslatorGUI(QMainWindow):
             # just selected on TS1 (which commonly reset the inspector to
             # segment 1 at position 0).  Follow playback only while it is
             # actually running.
-            is_playing = bool(getattr(self.media_player, "is_playing", lambda: False)())
+            is_playing = self._preview_is_playing()
             if is_playing and hasattr(self.timeline, "_timeline") and self.timeline._timeline:
                 # Review Mode follows the active subtitle track so the
                 # Subtitle Inspector can refresh with the cue under the
@@ -11818,7 +11818,11 @@ class VideoTranslatorGUI(QMainWindow):
                 if subtitle_layer_id and str(getattr(self.timeline, "_selected_layer_id", "") or "") != subtitle_layer_id:
                     self.timeline._selected_layer_id = subtitle_layer_id
                     self.on_timeline_layer_selected(subtitle_layer_id)
-            if inspector_visible and is_playing and active_index >= 0 and active_index != getattr(self, "_selected_segment_index", -1):
+            # Keep the selected TS1 cue synchronized with the playhead during
+            # review playback even when the inspector was previously focused
+            # on another panel.  set_selected_segment_index() updates the
+            # inspector when it is visible and remains harmless otherwise.
+            if is_playing and active_index >= 0 and active_index != getattr(self, "_selected_segment_index", -1):
                 self.set_selected_segment_index(active_index, sync_ui=True)
 
             if inspector_visible:
