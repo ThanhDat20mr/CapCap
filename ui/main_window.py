@@ -7972,15 +7972,12 @@ class VideoTranslatorGUI(QMainWindow):
             stagger = idx % 4
             base_y = 0.75 - stagger * 0.06
             base_x = 0.30 + (stagger % 2) * 0.08
-            try:
-                blur_start = max(0.0, float(self.media_player.position()) / 1000.0)
-            except Exception:
-                blur_start = 0.0
-            blur_end = blur_start + 5.0
-            if tl.duration > 0:
-                blur_end = min(float(tl.duration), blur_end)
-                if blur_end - blur_start < 0.20:
-                    blur_start = max(0.0, blur_end - 5.0)
+            # New Blur layers are global by default.  Their geometry can be
+            # narrowed later in the inspector/timeline, but creating one must
+            # not unexpectedly limit it to a five-second window at the
+            # current playhead.
+            blur_start = 0.0
+            blur_end = float(tl.duration) if float(getattr(tl, "duration", 0.0) or 0.0) > 0.0 else 10.0
             layer = BlurLayer(
                 name=f"Blur {idx + 1}",
                 position_x=float(base_x),
@@ -12117,6 +12114,7 @@ class VideoTranslatorGUI(QMainWindow):
             if hasattr(self, "timeline_clear_selection_btn"):
                 self.timeline_clear_selection_btn.setEnabled(selection_exists)
             if hasattr(self, "timeline_alt_transcribe_btn"):
+                self.timeline_alt_transcribe_btn.setVisible(selection_exists)
                 self.timeline_alt_transcribe_btn.setEnabled(selection_exists and not bool(getattr(self, "_alternate_range_transcription_worker", None)))
         if hasattr(self, "inspector_stack"):
             self.inspector_stack.setEnabled(not review_mode)

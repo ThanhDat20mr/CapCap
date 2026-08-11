@@ -149,7 +149,13 @@ class PipelineController:
                 subprocess, "CREATE_NEW_PROCESS_GROUP", 0
             )
 
-        worker_command = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, server_script]
+        # A frozen GUI executable must be launched in an explicit worker mode.
+        # Starting it with no arguments would open a second launcher window;
+        # the worker entrypoint then runs the HTTP server without importing the
+        # GUI or creating a QApplication.
+        worker_command = ([sys.executable, "--worker-server"]
+                          if getattr(sys, "frozen", False)
+                          else [sys.executable, server_script])
         self.local_worker_process = subprocess.Popen(
             worker_command,
             cwd=app_root,

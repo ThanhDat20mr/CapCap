@@ -7,6 +7,15 @@ import traceback
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtWidgets import QApplication
 
+# Keep the worker entrypoint before the GUI import.  In a windowed PyInstaller
+# build importing main_window first can initialize Qt/UI resources and hide the
+# actual worker startup error before the remote API server is reached.
+if __name__ == "__main__" and ("--worker-server" in sys.argv or os.getenv("CAPCAP_RUN_REMOTE_API_SERVER") == "1"):
+    from remote_api_server import main as remote_api_server_main
+
+    remote_api_server_main()
+    raise SystemExit(0)
+
 from main_window import VideoTranslatorGUI
 
 __all__ = ["VideoTranslatorGUI"]
@@ -150,12 +159,6 @@ def _bootstrap_env(app_root: str) -> None:
 
 
 if __name__ == "__main__":
-    if os.getenv("CAPCAP_RUN_REMOTE_API_SERVER") == "1":
-        from remote_api_server import main as remote_api_server_main
-
-        remote_api_server_main()
-        sys.exit(0)
-
     app_root = _app_root()
     _bootstrap_env(app_root)
     os.chdir(app_root)
