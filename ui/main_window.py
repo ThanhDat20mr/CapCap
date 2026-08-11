@@ -5698,6 +5698,14 @@ class VideoTranslatorGUI(QMainWindow):
         return end <= start or (start <= float(time_seconds) < end)
 
     def _preview_is_playing(self) -> bool:
+        # The timeline keeps an explicit review/edit state synchronized from
+        # the media-state callback. Prefer it here: native backends can report
+        # a transient PlayingState while a pause/seek event is still being
+        # delivered, which used to disable range actions immediately after a
+        # range was created.
+        timeline = getattr(self, "timeline", None)
+        if timeline is not None and hasattr(timeline, "_playing"):
+            return bool(getattr(timeline, "_playing", False))
         try:
             return bool(self.media_player.is_playing())
         except Exception:

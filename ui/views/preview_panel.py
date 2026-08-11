@@ -1017,6 +1017,11 @@ def build_preview_panel(gui):
         if hasattr(gui, "_update_alt_transcribe_button_label"):
             gui._update_alt_transcribe_button_label()
         gui.timeline_alt_transcribe_btn.show()
+        # Range signals can arrive in the middle of the media-state update.
+        # Refresh once on the next event-loop turn so the action is enabled
+        # after the timeline has entered paused/edit mode.
+        if hasattr(gui, "refresh_ui_state"):
+            QtCore.QTimer.singleShot(0, gui.refresh_ui_state)
     def _on_range_cleared():
         gui.timeline_clear_selection_btn.setEnabled(False)
         gui.timeline_clear_selection_btn.hide()
