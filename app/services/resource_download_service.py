@@ -55,7 +55,13 @@ class ResourceDownloadService:
         provider_voice = str(voice_entry.get("provider_voice", "")).strip().replace("/", os.sep)
         normalized = os.path.normpath(provider_voice)
         if normalized.startswith(f"models{os.sep}"):
-            model_path = join_root(normalized)
+            # Resolve bundled resources through models_path(), which checks
+            # both the writable project directory and PyInstaller's
+            # _internal/models directory.  join_root() only points at the
+            # executable directory in a frozen build and therefore made the
+            # bundled default voice look missing.
+            relative = normalized[len("models" + os.sep):]
+            model_path = models_path(*Path(relative).parts)
         else:
             model_path = models_path("piper", os.path.basename(normalized))
         config_path = f"{model_path}.json"
