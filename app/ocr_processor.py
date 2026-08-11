@@ -6,7 +6,7 @@ import time
 import cv2
 import numpy as np
 
-from runtime_paths import bin_path
+from runtime_paths import bin_path, subprocess_hidden_kwargs
 
 _OCR_ENGINE = None
 _OCR_ENGINE_LOCK = None
@@ -176,23 +176,29 @@ def _load_ocr_engine():
             )
 
         from rapidocr import RapidOCR
+        # Always pass the resolved directory explicitly.  RapidOCR otherwise
+        # derives it from its installed-package path, which is unreliable in
+        # a PyInstaller bundle and can surface as a generic "No such file or
+        # directory" error in the OCR Translator worker.
+        base_params = {
+            "Global.log_level": "error",
+            "Global.model_root_dir": models_dir,
+        }
         cuda_ready, cuda_reason = _onnx_cuda_provider_ready()
         if cuda_ready:
             try:
                 _OCR_ENGINE = RapidOCR(params={
-                    # Empty sampled frames are normal. Keep real errors, but
-                    # do not emit a warning for every frame without text.
-                    "Global.log_level": "error",
+                    **base_params,
                     "EngineConfig.onnxruntime.use_cuda": True,
                 })
                 print("[OCR] RapidOCR engine loaded (PP-OCRv4 ONNX, CUDA GPU)")
             except Exception as exc:
                 # This covers a genuine RapidOCR initialization failure after
                 # the provider itself loaded successfully.
-                _OCR_ENGINE = RapidOCR()
+                _OCR_ENGINE = RapidOCR(params=base_params)
                 print(f"[OCR] CUDA initialization failed; using CPU: {exc}")
         else:
-            _OCR_ENGINE = RapidOCR(params={"Global.log_level": "error"})
+            _OCR_ENGINE = RapidOCR(params=base_params)
             detail = f" ({cuda_reason})" if cuda_reason else ""
             print(f"[OCR] CUDA unavailable; using CPU OCR{detail}")
         _enable_reusable_detector_preprocess(_OCR_ENGINE)
@@ -377,7 +383,7 @@ def transcribe_video_ocr(video_path, *, region="bottom", fps=None, ocr_engine=No
         try:
             result = subprocess.run(
                 [_ffmpeg_path(), "-i", video_path, "-f", "null", "-"],
-                capture_output=True, text=True,
+                capture_output=True, text=True, **subprocess_hidden_kwargs(),
             )
             for line in (result.stderr or "").splitlines():
                 if "Duration:" in line:

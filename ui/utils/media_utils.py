@@ -64,10 +64,12 @@ def toggle_play(gui):
             # Keep Blur and Mask applied to the paused frame. The backend's
             # stateChanged handler reapplies the current graph; clearing here
             # caused a visible gap until another layer was selected.
-            if hasattr(gui, "apply_preview_blur_region"):
-                gui.apply_preview_blur_region(force=True)
-            if hasattr(gui, "_apply_mask_to_preview"):
-                gui._apply_mask_to_preview(force=True)
+            # A selected Blur/Mask remains in lightweight edit mode while
+            # paused. Refresh through the shared timed-layer path so that
+            # only that selected effect stays suppressed; other effects keep
+            # rendering normally.
+            if hasattr(gui, "refresh_timed_layer_preview"):
+                gui.refresh_timed_layer_preview()
             if (
                 has_active_video_filters
                 and filter_workflow_active
@@ -103,6 +105,12 @@ def toggle_play(gui):
                 gui.hide_filter_thumbnail_preview()
             if realtime_color_filters and hasattr(gui, "_apply_realtime_color_filter_preview"):
                 gui._apply_realtime_color_filter_preview()
+            # Pressing Play is the commit boundary for paused Blur/Mask
+            # edits. Restore their latest geometry before MPV resumes.
+            if hasattr(gui, "prepare_preview_for_review_mode"):
+                gui.prepare_preview_for_review_mode()
+            elif hasattr(gui, "commit_deferred_effect_editing"):
+                gui.commit_deferred_effect_editing(refresh=False)
             if hasattr(gui, "apply_preview_blur_region"):
                 gui.apply_preview_blur_region(force=True)
             if (

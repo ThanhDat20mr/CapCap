@@ -9,6 +9,7 @@ import urllib.request
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QMessageBox
 from worker_adapters import PrepareWorkflowWorker
+from runtime_paths import subprocess_hidden_kwargs
 
 # Robust import for the progress widget
 try:
@@ -69,6 +70,7 @@ class PipelineController:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     check=False,
+                    **subprocess_hidden_kwargs(),
                 )
             else:
                 process.terminate()
@@ -141,9 +143,11 @@ class PipelineController:
         env["CAPCAP_REMOTE_PRELOAD_MODELS"] = "0"
         env["CAPCAP_RUN_REMOTE_API_SERVER"] = "1" if getattr(sys, "frozen", False) else "0"
 
-        creationflags = 0
+        process_kwargs = subprocess_hidden_kwargs()
         if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            process_kwargs["creationflags"] = int(process_kwargs.get("creationflags", 0)) | getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+            )
 
         worker_command = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, server_script]
         self.local_worker_process = subprocess.Popen(
@@ -153,8 +157,8 @@ class PipelineController:
             stdin=subprocess.DEVNULL,
             stdout=None,
             stderr=None,
-            creationflags=creationflags,
             close_fds=False,
+            **process_kwargs,
         )
         self.local_worker_api_url = f"http://127.0.0.1:{port}"
         self.local_worker_api_token = token

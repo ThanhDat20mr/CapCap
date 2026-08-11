@@ -7,7 +7,7 @@ import threading
 import time
 from pathlib import Path
 
-from runtime_paths import app_path, join_root, models_path
+from runtime_paths import app_path, join_root, models_path, subprocess_hidden_kwargs
 
 
 class ResourceDownloadService:
@@ -286,6 +286,7 @@ class ResourceDownloadService:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                 capture_output=True, text=True, timeout=10,
+                **subprocess_hidden_kwargs(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 return True

@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from runtime_paths import subprocess_hidden_kwargs
+
 
 def _recent_projects_path():
     return os.path.join(os.path.dirname(__file__), "..", "..", "recent_projects.json")
@@ -78,7 +80,7 @@ def _extract_thumbnail(video_path: str, output_path: str) -> str:
             [_ffmpeg_path(), "-y", "-i", video_path, "-vframes", "1", "-q:v", "3",
              "-vf", "scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2",
              output_path],
-            capture_output=True, timeout=30,
+            capture_output=True, timeout=30, **subprocess_hidden_kwargs(),
         )
         if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             return output_path
@@ -99,7 +101,7 @@ def _get_video_duration(video_path: str) -> float:
         result = subprocess.run(
             [ffprobe, "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", video_path],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, **subprocess_hidden_kwargs(),
         )
         if result.returncode == 0:
             return float(result.stdout.strip() or 0)
@@ -199,7 +201,7 @@ def _extract_waveform_audio(video_path: str, temp_root: str) -> str:
         subprocess.run(
             [_ffmpeg_path(), "-y", "-loglevel", "error", "-i", video_path,
              "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", audio_path],
-            check=True, timeout=60,
+            check=True, timeout=60, **subprocess_hidden_kwargs(),
         )
         print(f"[Launcher] Waveform audio extracted: {audio_path}")
     except Exception as exc:
@@ -285,6 +287,7 @@ def _prepare_timeline_visual_cache(video_path: str, temp_root: str) -> None:
                      "-i", source, "-frames:v", "1", "-q:v", "4",
                      "-vf", "scale=180:-1:force_original_aspect_ratio=decrease", output_path],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=20,
+                    **subprocess_hidden_kwargs(),
                 )
             return [float(timestamp_s), output_path] if os.path.exists(output_path) and os.path.getsize(output_path) > 0 else None
 
@@ -572,8 +575,11 @@ class LauncherWindow(QDialog):
 
         LauncherWindow._selected_device = self.selected_device
         self.loading_label.show()
+        self.loading_label.setText("Preparing thumbnails and waveform...\nLarge videos may continue preparing in the editor.")
         self.new_btn.setEnabled(False)
         self._extraction_done = False
+        self._preprocess_started_at = time.monotonic()
+        self._preprocess_continued_in_background = False
         import threading
         def _preprocess():
             from runtime_paths import workspace_root
@@ -587,6 +593,16 @@ class LauncherWindow(QDialog):
 
     def _on_loader_tick(self):
         if not getattr(self, "_extraction_done", False):
+            # Do not hold the launcher hostage while a long video is being
+            # sampled.  The cache worker is filesystem-only and can safely
+            # finish after the editor opens; the editor has its own cache
+            # consumers/fallback workers for any assets not ready yet.
+            started = float(getattr(self, "_preprocess_started_at", 0.0) or 0.0)
+            if started and time.monotonic() - started >= 12.0:
+                self._preprocess_continued_in_background = True
+                print("[Launcher] Timeline visual cache is still preparing; continuing in background.")
+                self._loader_timer.stop()
+                self._finish_accept()
             return
         self._loader_timer.stop()
         self._finish_accept()
@@ -646,6 +662,7 @@ class LauncherWindow(QDialog):
                 result = subprocess.run(
                     ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                     capture_output=True, text=True, timeout=10,
+                    **subprocess_hidden_kwargs(),
                 )
                 if result.returncode == 0 and result.stdout.strip():
                     gpu_name = result.stdout.strip().split("\n")[0].strip()
@@ -789,7 +806,7 @@ class LauncherWindow(QDialog):
                     [_ffmpeg_path(), "-y", "-i", path, "-c", "copy",
                      "-f", "segment", "-segment_time", str(seg_seconds),
                      "-reset_timestamps", "1", out_pattern],
-                    capture_output=True, timeout=3600,
+                    capture_output=True, timeout=3600, **subprocess_hidden_kwargs(),
                 )
                 progress.accept()
             except Exception as e:
@@ -814,6 +831,7 @@ class LauncherWindow(QDialog):
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                 capture_output=True, text=True, timeout=10,
+                **subprocess_hidden_kwargs(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 gpu_name = result.stdout.strip().split("\n")[0].strip()

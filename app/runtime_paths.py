@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -67,3 +68,22 @@ def temp_path(*parts: str) -> str:
 
 def output_path(*parts: str) -> str:
     return join_root("output", *parts)
+
+
+def subprocess_hidden_kwargs() -> dict:
+    """Return Windows flags that keep console child processes invisible.
+
+    The GUI build has no console of its own.  Without these flags, console
+    programs such as FFmpeg/FFprobe create a temporary console window every
+    time they start, which causes visible flashes and adds process-launch
+    overhead.  The debug console build remains unaffected.
+    """
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }

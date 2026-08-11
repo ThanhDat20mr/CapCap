@@ -13,7 +13,7 @@ APP_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "app")
 if APP_PATH not in sys.path:
     sys.path.insert(0, APP_PATH)
 
-from runtime_paths import bin_path
+from runtime_paths import bin_path, subprocess_hidden_kwargs
 from services import EngineRuntime, ResourceDownloadService
 
 
@@ -120,7 +120,7 @@ class AlternateRangeTranscriptionWorker(QThread):
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", str(self.start_time),
                     "-t", str(max(0.1, self.end_time - self.start_time)), "-i", self.video_path,
                     "-vn", "-ac", "1", "-ar", "16000", temp_audio,
-                ], check=True)
+                ], check=True, **subprocess_hidden_kwargs())
                 segments = engine.transcribe_audio(temp_audio, self.model_path, language=self.language)
                 for segment in segments or []:
                     segment["start"] = float(segment.get("start", 0.0)) + self.start_time
@@ -412,6 +412,7 @@ class TimelineWaveformWorker(QThread):
                         ],
                         check=True,
                         timeout=60,
+                        **subprocess_hidden_kwargs(),
                     )
                 if temp_audio and os.path.exists(temp_audio):
                     audio_path = temp_audio
@@ -1035,7 +1036,10 @@ class VoiceSamplePreviewWorker(QThread):
                     "1",
                     normalized_path,
                 ]
-                proc = subprocess.run(cmd, capture_output=True, text=True)
+                proc = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    **subprocess_hidden_kwargs(),
+                )
                 if proc.returncode == 0 and self._is_preview_audio_usable(normalized_path):
                     return normalized_path
         except Exception:
@@ -1056,6 +1060,7 @@ class VoiceSamplePreviewWorker(QThread):
                 [str(ffprobe_path), "-v", "error", "-show_streams", candidate],
                 capture_output=True,
                 text=True,
+                **subprocess_hidden_kwargs(),
             )
             return proc.returncode == 0 and bool((proc.stdout or "").strip())
         except Exception:

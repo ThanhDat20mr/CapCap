@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView, QPushButton
 from app.layers.base import BaseLayer, LayerType
 from app.layers.timeline import Timeline, Track, Clip
 from app.layers.dub_subtitle import DubSubtitleLayer
+from app.runtime_paths import subprocess_hidden_kwargs
 
 
 class EditorTimeline(QGraphicsView):
@@ -303,7 +304,14 @@ class EditorTimeline(QGraphicsView):
     set_duration = set_duration_ms
 
     def set_playing(self, playing: bool) -> None:
-        self._playing = playing
+        self._playing = bool(playing)
+        if self._playing:
+            # Playback is review mode. Never carry an in-progress segment
+            # drag/resize into it; seeking remains handled separately below.
+            self._drag_state = None
+            self._selection_drag = None
+            self._manual_subtitle_selection = False
+            self.setCursor(Qt.ArrowCursor)
         if not playing:
             self._manual_navigation_active = False
             self._return_to_playhead_button.hide()
@@ -390,6 +398,7 @@ class EditorTimeline(QGraphicsView):
                 [ffprobe, "-v", "error", "-show_entries", "format=duration",
                  "-of", "csv=p=0", path],
                 capture_output=True, text=True, timeout=30,
+                **subprocess_hidden_kwargs(),
             )
             if result.returncode == 0:
                 return float(result.stdout.strip() or 0)
@@ -1570,6 +1579,20 @@ class EditorTimeline(QGraphicsView):
             scroll_x = self.horizontalScrollBar().value()
             scroll_y = self.verticalScrollBar().value()
             in_ruler = pos.y() < self.RULER_HEIGHT
+            if self._playing:
+                # Review mode: any click in the timed content area is
+                # navigation only. Segment bodies and resize edges must never
+                # start an edit while video playback is active.
+                if pos.x() >= self.CONTENT_LEFT_PAD:
+                    t = self._pos_to_time(pos.x(), scroll_x)
+                    if t >= 0:
+                        self._manual_subtitle_selection = False
+                        self.set_playhead(t)
+                        self.seekRequested.emit(t)
+                        self.seekRequestedMs.emit(int(t * 1000))
+                        self._selection_drag = {"mode": "scrub"}
+                event.accept()
+                return
             if in_ruler:
                 t = self._pos_to_time(pos.x(), scroll_x)
                 if t >= 0:
@@ -1706,6 +1729,19 @@ class EditorTimeline(QGraphicsView):
         pos = event.position()
         scroll_x = self.horizontalScrollBar().value()
         scroll_y = self.verticalScrollBar().value()
+        if self._playing:
+            # The only allowed left-button interaction during playback is
+            # scrub navigation established by mousePressEvent.
+            if event.buttons() & Qt.LeftButton and self._selection_drag is not None:
+                t = self._pos_to_time(pos.x(), scroll_x)
+                if t >= 0:
+                    self.set_playhead(t)
+                    self.seekRequested.emit(t)
+                    self.seekRequestedMs.emit(int(t * 1000))
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+
         if self._drag_state:
             drag = self._drag_state
             t = self._pos_to_time(pos.x(), scroll_x)
@@ -1775,6 +1811,12 @@ class EditorTimeline(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def keyPressEvent(self, event) -> None:
+        if self._playing:
+            # Selection Range creation/clearing changes editing state; keep
+            # it unavailable in review mode while allowing normal playback
+            # shortcuts to propagate to the parent application.
+            event.ignore()
+            return
         if event.key() == Qt.Key_Escape:
             self.clear_selection_range(); event.accept(); return
         if event.modifiers() & Qt.ControlModifier and event.key() == Qt.Key_BracketLeft:

@@ -2,6 +2,7 @@ import os
 import shutil
 import sys
 import threading
+import traceback
 
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtWidgets import QApplication
@@ -17,11 +18,34 @@ class _RuntimeLogCollector:
     def __init__(self):
         self._pending = []
         self._window = None
+        self._file_path = ""
+        # A windowed PyInstaller build has no terminal. Keep a small
+        # session log beside the executable so startup failures are not
+        # silently lost before the in-app Logs panel is available.
+        try:
+            root = (
+                os.path.dirname(os.path.abspath(sys.executable))
+                if getattr(sys, "frozen", False)
+                else os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            )
+            log_dir = os.path.join(root, "temp")
+            os.makedirs(log_dir, exist_ok=True)
+            self._file_path = os.path.join(log_dir, "capcap_runtime.log")
+            with open(self._file_path, "w", encoding="utf-8") as handle:
+                handle.write("[CapCap] Runtime log started.\n")
+        except OSError:
+            self._file_path = ""
 
     def add(self, message: str) -> None:
         text = str(message or "").strip()
         if not text:
             return
+        if self._file_path:
+            try:
+                with open(self._file_path, "a", encoding="utf-8") as handle:
+                    handle.write(text + "\n")
+            except OSError:
+                pass
         if self._window is None:
             self._pending.append(text)
             self._pending = self._pending[-10000:]
@@ -43,7 +67,14 @@ class _LogTee:
 
     def write(self, data):
         text = str(data or "")
-        self._stream.write(text)
+        if self._stream is not None:
+            try:
+                self._stream.write(text)
+            except Exception:
+                # Windowed PyInstaller builds may expose stdout/stderr as
+                # None or as an already-closed stream. Runtime logs should
+                # still reach the in-app collector in that case.
+                pass
         self._partial += text
         lines = self._partial.splitlines(keepends=True)
         self._partial = ""
@@ -55,15 +86,21 @@ class _LogTee:
         return len(text)
 
     def flush(self):
-        self._stream.flush()
+        if self._stream is not None:
+            try:
+                self._stream.flush()
+            except Exception:
+                pass
         if self._partial:
             self._collector.add(self._partial)
             self._partial = ""
 
     def isatty(self):
-        return bool(getattr(self._stream, "isatty", lambda: False)())
+        return bool(self._stream is not None and getattr(self._stream, "isatty", lambda: False)())
 
     def fileno(self):
+        if self._stream is None:
+            raise OSError("No console stream is attached")
         return self._stream.fileno()
 
     def __getattr__(self, name):
@@ -137,22 +174,31 @@ if __name__ == "__main__":
     window.show()
 
     def _init_video():
-        window._current_video_path = os.path.abspath(video_path)
-        window.ensure_media_backend_ready()
-        window.video_path_edit.setText(video_path)
-        window.media_player.setSource(QUrl.fromLocalFile(video_path))
-        if hasattr(window, "refresh_video_dimensions"):
-            window.refresh_video_dimensions(video_path)
-        window.current_project_state = window.ensure_current_project()
-        window.load_project_context(window.current_project_state)
+        try:
+            window._current_video_path = os.path.abspath(video_path)
+            window.ensure_media_backend_ready()
+            window.video_path_edit.setText(video_path)
+            window.media_player.setSource(QUrl.fromLocalFile(video_path))
+            if hasattr(window, "refresh_video_dimensions"):
+                window.refresh_video_dimensions(video_path)
+            window.current_project_state = window.ensure_current_project()
+            window.load_project_context(window.current_project_state)
 
-        if hasattr(window, "timeline") and hasattr(window.timeline, "set_video_source"):
-            try:
-                dur = window.media_player.duration() / 1000.0
-            except Exception:
-                dur = 60.0
-            window.timeline.set_video_source(window._current_video_path, dur)
-        window.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
+            if hasattr(window, "timeline") and hasattr(window.timeline, "set_video_source"):
+                try:
+                    dur = window.media_player.duration() / 1000.0
+                except Exception:
+                    dur = 60.0
+                window.timeline.set_video_source(window._current_video_path, dur)
+                ensure_tracks = getattr(window.timeline, "_ensure_tracks_populated", None)
+                if callable(ensure_tracks):
+                    ensure_tracks()
+                redraw = getattr(window.timeline, "_redraw", None)
+                if callable(redraw):
+                    redraw()
+            window.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
+        except Exception:
+            runtime_logs.add("[Startup Error]\n" + traceback.format_exc())
 
     QTimer.singleShot(100, _init_video)
     sys.exit(app.exec())

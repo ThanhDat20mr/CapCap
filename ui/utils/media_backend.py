@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
-from runtime_paths import asset_path, bin_path
+from runtime_paths import asset_path, bin_path, subprocess_hidden_kwargs
 from video_processor import srt_to_ass
 try:
     # The normal launcher places ``app`` directly on sys.path.
@@ -87,6 +87,7 @@ def _ffprobe_video_duration(video_path: str) -> float:
             [ffprobe, "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", video_path],
             capture_output=True, text=True, timeout=10,
+            **subprocess_hidden_kwargs(),
         )
         if result.returncode == 0 and result.stdout.strip():
             return float(result.stdout.strip())

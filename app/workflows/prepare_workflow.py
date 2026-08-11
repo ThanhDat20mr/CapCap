@@ -5,7 +5,7 @@ import re
 import subprocess
 import time
 
-from runtime_paths import bin_path
+from runtime_paths import bin_path, subprocess_hidden_kwargs
 from runtime_profile import is_remote_profile
 from services import ChunkingService, EngineRuntime, ProjectService, SegmentRegroupService, SegmentService
 
@@ -75,7 +75,7 @@ class PrepareWorkflow:
                 [ffmpeg, "-hide_banner", "-i", source, "-af", "volumedetect", "-f", "null", "-"],
                 capture_output=True,
                 text=True,
-                check=False,
+                check=False, **subprocess_hidden_kwargs(),
             )
             output = f"{probe.stdout}\n{probe.stderr}"
             mean_match = re.search(r"mean_volume:\s*([-+]?\d+(?:\.\d+)?)\s*dB", output)
@@ -120,7 +120,7 @@ class PrepareWorkflow:
                     ],
                     capture_output=True,
                     text=True,
-                    check=True,
+                    check=True, **subprocess_hidden_kwargs(),
                 )
                 profile["path"] = normalized_path
                 print(
@@ -381,7 +381,7 @@ class PrepareWorkflow:
             subprocess.run(
                 [ffmpeg_bin, "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le",
                  "-ar", "16000", "-ac", "1", audio_output_path],
-                capture_output=True,
+                capture_output=True, **subprocess_hidden_kwargs(),
             )
             project_state.set_artifact("extracted_audio", audio_output_path)
             project_state.set_step_status("extract_audio", "completed")
@@ -541,7 +541,10 @@ class PrepareWorkflow:
                         "-y",
                         processed_vocal_path,
                     ]
-                    subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+                    subprocess.run(
+                        ffmpeg_cmd, check=True, capture_output=True,
+                        **subprocess_hidden_kwargs(),
+                    )
                     working_audio_path = processed_vocal_path
                     print(f"[Audio Handling] Enhanced vocals (denoise + loudnorm): {processed_vocal_path}")
                 except Exception as e:

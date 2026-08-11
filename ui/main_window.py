@@ -704,6 +704,16 @@ class VideoTranslatorGUI(QMainWindow):
         self._video_filter_apply_requested = False
         self._blur_edit_finish_syncing = False
         self._blur_region_preview_dirty = False
+        # Blur/Mask are MPV filter effects. During a paused geometry edit we
+        # suppress only the active layer from the filter graph so an old,
+        # stale effect is never left behind the lightweight edit overlay.
+        self._deferred_effect_edit_type = ""
+        self._deferred_effect_edit_layer_id = ""
+        # A selected layer becomes editable only after an explicit paused
+        # selection.  Playback and its pause transition never implicitly
+        # restore edit chrome for the previously selected layer.
+        self._preview_edit_layer_id = ""
+        self._review_mode_active = False
         # Overlay drags can emit dozens of events per second.  Persisting the
         # full project/timeline for each one causes synchronous JSON and
         # project-file writes on the UI thread, so collect rapid edits and
@@ -900,6 +910,8 @@ class VideoTranslatorGUI(QMainWindow):
         self.on_timeline_layer_selected(str(layer_id))
 
     def _on_text_layer_moved(self, layer_id, x, y):
+        if self._preview_is_playing():
+            return
         layer = next((item for item in self._text_layers() if item.id == layer_id), None)
         if layer is None:
             return
@@ -2601,19 +2613,41 @@ class VideoTranslatorGUI(QMainWindow):
             return None
         try:
             stat = os.stat(video_path)
-            digest = hashlib.md5(os.path.abspath(video_path).encode("utf-8")).hexdigest()[:12]
-            manifest_path = os.path.join(
-                self.get_workspace_temp_root(create=True), "timeline_visuals", f"{digest}.json"
-            )
-            with open(manifest_path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-            if (
-                data.get("source") != os.path.abspath(video_path)
-                or int(data.get("size", -1)) != int(stat.st_size)
-                or int(data.get("mtime_ns", -1)) != int(getattr(stat, "st_mtime_ns", 0))
-            ):
-                return None
-            return data
+            source_abs = os.path.abspath(video_path)
+            cache_dir = os.path.join(self.get_workspace_temp_root(create=True), "timeline_visuals")
+            digest = hashlib.md5(source_abs.encode("utf-8")).hexdigest()[:12]
+            manifest_path = os.path.join(cache_dir, f"{digest}.json")
+            candidates = [manifest_path]
+            # A packaged build can be launched with a copied video (for
+            # example, the same file moved from media/ to Downloads).  The
+            # launcher cache is still reusable in that case, but its
+            # path-based digest no longer matches.  Fall back to a manifest
+            # with the same filename and byte size, while retaining the
+            # normal exact path/mtime validation as the first choice.
+            if os.path.isdir(cache_dir):
+                candidates.extend(
+                    path for path in glob.glob(os.path.join(cache_dir, "*.json"))
+                    if path != manifest_path
+                )
+            for candidate in candidates:
+                try:
+                    with open(candidate, "r", encoding="utf-8") as handle:
+                        data = json.load(handle)
+                except (OSError, ValueError, TypeError):
+                    continue
+                exact = (
+                    data.get("source") == source_abs
+                    and int(data.get("size", -1)) == int(stat.st_size)
+                    and int(data.get("mtime_ns", -1)) == int(getattr(stat, "st_mtime_ns", 0))
+                )
+                compatible_copy = (
+                    os.path.basename(str(data.get("source", ""))).lower()
+                    == os.path.basename(source_abs).lower()
+                    and int(data.get("size", -1)) == int(stat.st_size)
+                )
+                if exact or compatible_copy:
+                    return data
+            return None
         except (OSError, ValueError, TypeError):
             return None
 
@@ -3094,6 +3128,8 @@ class VideoTranslatorGUI(QMainWindow):
 
     def on_subtitle_drag_started(self):
         """Swap to the Qt layer only while dragging for immediate feedback."""
+        if self._preview_is_playing():
+            return
         if getattr(self, "_preview_video_has_burned_subtitles", False):
             return
         if hasattr(self, "media_player"):
@@ -3103,6 +3139,8 @@ class VideoTranslatorGUI(QMainWindow):
 
     def on_subtitle_position_dragged(self, x_percent: int, y_percent: int):
         """Commit a drag from the live subtitle overlay to style controls."""
+        if self._preview_is_playing():
+            return
         x_percent = max(0, min(100, int(x_percent)))
         y_percent = max(0, min(100, int(y_percent)))
         if hasattr(self, "subtitle_position_mode_combo"):
@@ -5659,6 +5697,89 @@ class VideoTranslatorGUI(QMainWindow):
         # Legacy layers without a valid duration continue to be visible.
         return end <= start or (start <= float(time_seconds) < end)
 
+    def _preview_is_playing(self) -> bool:
+        try:
+            return bool(self.media_player.is_playing())
+        except Exception:
+            return False
+
+    def _deferred_effect_layer_id_for(self, layer_type: str) -> str:
+        """Return the one effect clip temporarily hidden during an edit."""
+        if self._preview_is_playing():
+            return ""
+        if str(getattr(self, "_deferred_effect_edit_type", "") or "") != str(layer_type):
+            return ""
+        return str(getattr(self, "_deferred_effect_edit_layer_id", "") or "")
+
+    def _set_deferred_effect_edit_target(self, track=None, layer=None) -> bool:
+        """Suppress exactly one selected Blur/Mask effect while paused.
+
+        Overlay geometry continues to update normally; only the MPV filter
+        contribution of the selected clip is deferred until it is committed.
+        """
+        next_type = ""
+        next_id = ""
+        if layer is not None and not self._preview_is_playing():
+            layer_type = str(getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))).lower()
+            track_name = str(getattr(track, "name", "") or "")
+            if layer_type == "blur" and track_name == "B1":
+                next_type, next_id = "blur", str(getattr(layer, "id", "") or "")
+            elif layer_type == "mask" and track_name == "M1":
+                next_type, next_id = "mask", str(getattr(layer, "id", "") or "")
+        changed = (
+            next_type != str(getattr(self, "_deferred_effect_edit_type", "") or "")
+            or next_id != str(getattr(self, "_deferred_effect_edit_layer_id", "") or "")
+        )
+        if changed:
+            previous_id = str(getattr(self, "_deferred_effect_edit_layer_id", "") or "")
+            # Restore the previously edited layer before changing the shared
+            # target. This prevents a stale suppression from surviving a
+            # Blur A -> Blur B or Mask A -> Mask B selection switch.
+            if previous_id and not self._preview_is_playing():
+                self._deferred_effect_edit_type = ""
+                self._deferred_effect_edit_layer_id = ""
+                self._timed_layer_preview_signature = None
+                self.refresh_timed_layer_preview()
+            self._deferred_effect_edit_type = next_type
+            self._deferred_effect_edit_layer_id = next_id
+            self._timed_layer_preview_signature = None
+        return changed
+
+    def commit_deferred_effect_editing(self, *, refresh: bool = True) -> bool:
+        """Restore a deferred Blur/Mask effect using its final geometry."""
+        if not getattr(self, "_deferred_effect_edit_layer_id", ""):
+            return False
+        self._deferred_effect_edit_type = ""
+        self._deferred_effect_edit_layer_id = ""
+        self._timed_layer_preview_signature = None
+        if refresh:
+            self.refresh_timed_layer_preview()
+        return True
+
+    def prepare_preview_for_review_mode(self) -> None:
+        """Commit paused edits and remove every preview editing affordance.
+
+        Called immediately before playback starts so the frame entering
+        Review Mode already contains the final Blur/Mask graph, rather than
+        waiting for the asynchronous media-player state notification.
+        """
+        self._preview_edit_layer_id = ""
+        self.commit_deferred_effect_editing(refresh=False)
+        if hasattr(self, "video_view"):
+            if hasattr(self.video_view, "subtitle_item"):
+                self.video_view.subtitle_item.set_editable(False)
+            if hasattr(self.video_view, "set_blur_edit_enabled"):
+                self.video_view.set_blur_edit_enabled(False)
+            mask_overlay = getattr(self.video_view, "mask_overlay", None)
+            if mask_overlay is not None:
+                mask_overlay.set_editable(False)
+            logo_overlay = getattr(self.video_view, "logo_overlay", None)
+            if logo_overlay is not None:
+                logo_overlay.set_editable(False)
+        self._timed_layer_preview_signature = None
+        self._refresh_text_layer_preview("")
+        self.refresh_timed_layer_preview()
+
     def refresh_timed_layer_preview(self, position_ms=None) -> None:
         """Show only overlay layers whose timeline interval contains the playhead."""
         if not hasattr(self, "timeline") or not self.timeline._timeline:
@@ -5685,25 +5806,46 @@ class VideoTranslatorGUI(QMainWindow):
             if str(getattr(track, "name", "")) == "L1 Logo":
                 active = [l for l in track.layers if self._layer_is_active_at_preview_time(l, time_seconds)]
                 if active:
-                    is_selected_logo = selected_id in {l.id for l in active}
+                    is_selected_logo = (
+                        selected_id in {l.id for l in active}
+                        and selected_id == str(getattr(self, "_preview_edit_layer_id", "") or "")
+                        and not self._preview_is_playing()
+                    )
                     target = next((l for l in active if l.id == selected_id), active[0])
                     self._show_logo_overlay(track, target, editable=is_selected_logo)
                 elif hasattr(self.video_view, "clear_logo"):
                     self.video_view.clear_logo()
             elif str(getattr(track, "name", "")) == "M1":
                 active_layers = [l for l in track.layers if self._layer_is_active_at_preview_time(l, time_seconds)]
-                regions = self._current_mask_regions_payload(time_seconds=time_seconds)
+                # Keep the selected region in the editor overlay, but remove
+                # only that one layer from the expensive rendered effect
+                # while it is being edited on a paused frame.
+                overlay_regions = self._current_mask_regions_payload(time_seconds=time_seconds)
+                suppressed_id = self._deferred_effect_layer_id_for("mask")
+                effect_regions = self._current_mask_regions_payload(
+                    time_seconds=time_seconds, exclude_layer_id=suppressed_id,
+                )
                 if hasattr(self.video_view, "set_mask_regions"):
                     active_index = next((i for i, l in enumerate(active_layers) if l.id == selected_id), 0)
-                    self.video_view.set_mask_regions(regions, active_index=active_index, editable=bool(active_layers and selected_id in {l.id for l in active_layers}))
+                    self.video_view.set_mask_regions(
+                        overlay_regions,
+                        active_index=active_index,
+                        editable=bool(
+                            active_layers
+                            and selected_id in {l.id for l in active_layers}
+                            and selected_id == str(getattr(self, "_preview_edit_layer_id", "") or "")
+                            and self._deferred_effect_layer_id_for("mask") == selected_id
+                            and not self._preview_is_playing()
+                        ),
+                    )
                 # The mask effect is independent of selection/edit handles.
                 # Keep it applied when the preview is paused as well.
-                self._apply_mask_to_preview(regions=regions)
+                self._apply_mask_to_preview(regions=effect_regions)
             elif str(getattr(track, "name", "")) == "B1":
-                regions = []
+                overlay_regions = []
                 active_layers = [l for l in track.layers if self._layer_is_active_at_preview_time(l, time_seconds)]
                 for layer in active_layers:
-                    regions.append({
+                    overlay_regions.append({
                         "x": float(getattr(layer, "position_x", 0.0)), "y": float(getattr(layer, "position_y", 0.0)),
                         "width": float(getattr(layer, "width", 0.0)), "height": float(getattr(layer, "height", 0.0)),
                         "blur_strength": float(getattr(layer, "blur_strength", 20.0)),
@@ -5712,7 +5854,7 @@ class VideoTranslatorGUI(QMainWindow):
                         "pixelate_size": int(getattr(layer, "pixelate_size", 12)),
                     })
                 if hasattr(self.video_view, "set_blur_regions_normalized"):
-                    self.video_view.set_blur_regions_normalized(regions)
+                    self.video_view.set_blur_regions_normalized(overlay_regions)
                 if hasattr(self.video_view, "set_blur_edit_enabled"):
                     # B1's effect remains rendered, but its border/handles
                     # are shown only while a B1 layer is selected and the
@@ -5722,14 +5864,56 @@ class VideoTranslatorGUI(QMainWindow):
                         is_playing = bool(self.media_player.is_playing())
                     except Exception:
                         is_playing = False
-                    self.video_view.set_blur_edit_enabled(
-                        bool(is_selected_blur and not is_playing and self._blur_effect_enabled())
-                    )
+                    self.video_view.set_blur_edit_enabled(bool(
+                        is_selected_blur
+                        and selected_id == str(getattr(self, "_preview_edit_layer_id", "") or "")
+                        and self._deferred_effect_layer_id_for("blur") == selected_id
+                        and not is_playing
+                        and self._blur_effect_enabled()
+                    ))
                 # Blur has a separate MPV filter in addition to its editable
                 # outline. Update that filter with the same time-filtered
                 # regions; otherwise a filter applied at playback start
                 # continues blurring after the outline has disappeared.
-                self.apply_preview_blur_region(regions=regions)
+                suppressed_id = self._deferred_effect_layer_id_for("blur")
+                effect_regions = [
+                    region for region, layer in zip(overlay_regions, active_layers)
+                    if str(getattr(layer, "id", "")) != suppressed_id
+                ]
+                self.apply_preview_blur_region(regions=effect_regions)
+
+        # Rebuild both managed effect payloads once from the complete active
+        # timeline after all overlay bookkeeping. This is the authoritative
+        # multi-layer path: one selected layer may be suppressed, but every
+        # other active Blur/Mask layer is always included.
+        suppressed_mask_id = self._deferred_effect_layer_id_for("mask")
+        self._apply_mask_to_preview(
+            regions=self._current_mask_regions_payload(
+                time_seconds=time_seconds,
+                exclude_layer_id=suppressed_mask_id,
+            )
+        )
+        blur_effect_regions = []
+        suppressed_blur_id = self._deferred_effect_layer_id_for("blur")
+        for track in self.timeline._timeline.tracks:
+            if str(getattr(track, "name", "")) != "B1":
+                continue
+            for layer in track.layers:
+                if not self._layer_is_active_at_preview_time(layer, time_seconds):
+                    continue
+                if str(getattr(layer, "id", "") or "") == suppressed_blur_id:
+                    continue
+                blur_effect_regions.append({
+                    "x": float(getattr(layer, "position_x", 0.0)),
+                    "y": float(getattr(layer, "position_y", 0.0)),
+                    "width": float(getattr(layer, "width", 0.0)),
+                    "height": float(getattr(layer, "height", 0.0)),
+                    "blur_strength": float(getattr(layer, "blur_strength", 20.0)),
+                    "blur_opacity": float(getattr(layer, "blur_opacity", 1.0)),
+                    "pixelate": bool(getattr(layer, "pixelate", False)),
+                    "pixelate_size": int(getattr(layer, "pixelate_size", 12)),
+                })
+        self.apply_preview_blur_region(regions=blur_effect_regions)
 
     def _wire_layer_timing_controls(self, prefix: str) -> None:
         """Wire one inspector's common Start/End controls once."""
@@ -5777,6 +5961,8 @@ class VideoTranslatorGUI(QMainWindow):
 
     def on_timeline_layer_timing_changed(self, layer_id: str, start: float, end: float):
         """Persist timeline-handle duration edits for all non-subtitle layers."""
+        if self._preview_is_playing():
+            return
         if not hasattr(self, "timeline") or not self.timeline._timeline:
             return
         for track in self.timeline._timeline.tracks:
@@ -5820,9 +6006,20 @@ class VideoTranslatorGUI(QMainWindow):
         # subtitle segment (TS1/S1) is selected in the timeline.  Otherwise
         # it stays click-through, preventing accidental moves while editing
         # other video layers.
+        is_review_mode = self._preview_is_playing()
         if hasattr(self, "video_view") and hasattr(self.video_view, "subtitle_item"):
             layer_type = str(getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))).lower() if layer else ""
-            self.video_view.subtitle_item.set_editable(layer_type in {"subtitle", "dub_subtitle"})
+            self.video_view.subtitle_item.set_editable(
+                not is_review_mode and layer_type in {"subtitle", "dub_subtitle"}
+            )
+        # During review mode a layer may still be inspected/focused, but it
+        # must never acquire preview drag handles. A real paused selection is
+        # the only entry point into preview editing.
+        self._preview_edit_layer_id = "" if is_review_mode else str(layer_id or "")
+        # Selection changes are the commit boundary for deferred Blur/Mask
+        # geometry. Selecting a Blur/Mask while paused starts a new light-
+        # weight edit session; selecting anything else restores the old one.
+        self._set_deferred_effect_edit_target(track, layer)
         if not layer:
             self._show_default_inspector()
             # Deselecting a layer only removes edit chrome. Effects and
@@ -5838,12 +6035,12 @@ class VideoTranslatorGUI(QMainWindow):
         can_modify_layer = not bool(getattr(track, "locked", False)) and not bool(getattr(layer, "locked", False))
         if hasattr(self, "timeline_split_btn"):
             self.timeline_split_btn.setEnabled(
-                can_modify_layer and (layer_type in {"subtitle", "dub_subtitle", "blur", "mask", "text"}
+                not is_review_mode and can_modify_layer and (layer_type in {"subtitle", "dub_subtitle", "blur", "mask", "text"}
                 or (layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo")
                 )
             )
         if hasattr(self, "timeline_delete_btn"):
-            self.timeline_delete_btn.setEnabled(can_modify_layer)
+            self.timeline_delete_btn.setEnabled(not is_review_mode and can_modify_layer)
         if layer_type == "subtitle":
             self._show_subtitle_inspector_for_layer(layer_id)
         elif layer_type == "dub_subtitle":
@@ -5953,7 +6150,12 @@ class VideoTranslatorGUI(QMainWindow):
             if hasattr(self.video_view, "clear_logo"):
                 self.video_view.clear_logo()
             return
-        self.video_view.set_logos(logos, active_index=active_index, editable=bool(editable))
+        self.video_view.set_logos(
+            logos,
+            active_index=active_index,
+            editable=bool(editable and not self._preview_is_playing()
+                          and str(getattr(layer, "id", "") or "") == str(getattr(self, "_preview_edit_layer_id", "") or "")),
+        )
 
         # Push opacity + rotation from the layer to the overlay. We
         # default to fully opaque + 0° for a freshly created logo.
@@ -6008,6 +6210,8 @@ class VideoTranslatorGUI(QMainWindow):
 
     def _on_logo_moved(self, layer, x, y, w, h):
         """Update the ImageLayer's transform from the logo overlay drag."""
+        if self._preview_is_playing():
+            return
         try:
             from app.layers.transform import Transform
             transform = Transform(
@@ -6070,9 +6274,11 @@ class VideoTranslatorGUI(QMainWindow):
         self.video_view.maskRegionChanged.connect(_region_changed_handler)
         self.video_view.maskDeleted.connect(_deleted_handler)
 
+        visible_layers = [candidate for candidate in track.layers
+                          if self._layer_is_active_at_preview_time(candidate)]
         regions = self._current_mask_regions_payload()
         try:
-            active_index = list(track.layers).index(layer)
+            active_index = visible_layers.index(layer)
         except ValueError:
             active_index = 0
         # The overlay is always shown so the user can move / resize
@@ -6091,12 +6297,23 @@ class VideoTranslatorGUI(QMainWindow):
         self.video_view.set_mask_regions(
             regions, active_index=active_index, editable=not is_playing,
         )
+        # Re-apply the complete active M1 payload after rebinding the
+        # editable overlay. set_mask_regions only updates editor chrome; it
+        # must never leave the other mask effects cleared when selection
+        # changes between multiple layers.
+        try:
+            self._apply_mask_to_preview(
+                regions=self._current_mask_regions_payload(
+                    exclude_layer_id=self._deferred_effect_layer_id_for("mask")
+                )
+            )
+        except Exception:
+            pass
 
     def _on_mask_moved(self, layer, x, y, w, h):
-        """Update the MaskLayer's geometry from the mask overlay drag.
-
-        Then push the change into the mpv filter chain and persist it.
-        """
+        """Update Mask geometry without rebuilding its MPV effect per move."""
+        if self._preview_is_playing():
+            return
         try:
             layer.position_x = float(x)
             layer.position_y = float(y)
@@ -6104,16 +6321,23 @@ class VideoTranslatorGUI(QMainWindow):
             layer.height = float(h)
         except Exception:
             return
+        # Persist coalesced geometry only. The selected M1 effect has already
+        # been removed from the filter graph for this paused edit session.
+        self.schedule_timeline_project_persist(mask_state=True)
         try:
-            self._apply_mask_to_preview()
+            if (hasattr(self, "mask_inspector_x_spin")
+                    and self.timeline._selected_layer_id == layer.id):
+                for control, value in (
+                    (self.mask_inspector_x_spin, x),
+                    (self.mask_inspector_y_spin, y),
+                    (self.mask_inspector_w_spin, w),
+                    (self.mask_inspector_h_spin, h),
+                ):
+                    control.blockSignals(True)
+                    control.setValue(float(value))
+                    control.blockSignals(False)
         except Exception:
             pass
-        # Some backends emit stateChanged before their native surface has
-        # finished the pause transition. Re-run the visual-layer sync on the
-        # next event-loop turn so the mask remains applied and edit chrome is
-        # derived from the final selected layer.
-        QTimer.singleShot(0, self._resync_visual_layers_after_state)
-        QTimer.singleShot(80, self._resync_visual_layers_after_state)
 
     def _resync_visual_layers_after_state(self):
         """Finalize overlay effects/handles after a playback state change."""
@@ -6127,25 +6351,6 @@ class VideoTranslatorGUI(QMainWindow):
         # Both project settings and timeline JSON are disk-backed.  Defer
         # those writes during the drag while keeping all preview state live.
         self.schedule_timeline_project_persist(mask_state=True)
-        # Keep the spinboxes in sync so the inspector shows the new
-        # values as the user drags the overlay.
-        try:
-            if (hasattr(self, "mask_inspector_x_spin")
-                    and self.timeline._selected_layer_id == layer.id):
-                self.mask_inspector_x_spin.blockSignals(True)
-                self.mask_inspector_x_spin.setValue(float(x))
-                self.mask_inspector_x_spin.blockSignals(False)
-                self.mask_inspector_y_spin.blockSignals(True)
-                self.mask_inspector_y_spin.setValue(float(y))
-                self.mask_inspector_y_spin.blockSignals(False)
-                self.mask_inspector_w_spin.blockSignals(True)
-                self.mask_inspector_w_spin.setValue(float(w))
-                self.mask_inspector_w_spin.blockSignals(False)
-                self.mask_inspector_h_spin.blockSignals(True)
-                self.mask_inspector_h_spin.setValue(float(h))
-                self.mask_inspector_h_spin.blockSignals(False)
-        except Exception:
-            pass
 
     def _on_mask_overlay_changed(self, track, layer):
         """Read the current overlay region and update the layer
@@ -6155,7 +6360,7 @@ class VideoTranslatorGUI(QMainWindow):
         layer position is pushed to mpv via `_apply_mask_to_preview`
         (called from `toggle_play` and the stateChanged handler).
         """
-        if not hasattr(self, "video_view"):
+        if self._preview_is_playing() or not hasattr(self, "video_view"):
             return
         overlay = getattr(self.video_view, "mask_overlay", None)
         if overlay is None or not overlay._regions:
@@ -6176,13 +6381,12 @@ class VideoTranslatorGUI(QMainWindow):
             layer.height = h
         except Exception:
             return
+        self.schedule_timeline_project_persist(mask_state=True)
 
     def _delete_mask_layer(self, layer):
         """Remove the mask layer from the M1 track and clean up."""
         if not hasattr(self, "timeline") or not self.timeline._timeline:
             return
-        remaining_track = None
-        remaining_layer = None
         for track in self.timeline._timeline.tracks:
             if layer in track.layers:
                 track.layers.remove(layer)
@@ -6193,22 +6397,11 @@ class VideoTranslatorGUI(QMainWindow):
                         pass
                     if hasattr(self.timeline, "_track_heights") and track.id in self.timeline._track_heights:
                         del self.timeline._track_heights[track.id]
-                else:
-                    remaining_track = track
-                    remaining_layer = track.layers[0]
                 break
-        try:
-            self.timeline._selected_layer_id = remaining_layer.id if remaining_layer else ""
-        except Exception:
-            pass
         if hasattr(self.timeline, "_redraw"):
             self.timeline._redraw()
         if hasattr(self.timeline, "viewport"):
             self.timeline.viewport().update()
-        if remaining_layer is not None:
-            self._show_mask_overlay(remaining_track, remaining_layer)
-        elif hasattr(self, "video_view") and hasattr(self.video_view, "clear_mask_region"):
-            self.video_view.clear_mask_region()
         try:
             if hasattr(self, "_apply_mask_to_preview"):
                 self._apply_mask_to_preview()
@@ -6228,6 +6421,49 @@ class VideoTranslatorGUI(QMainWindow):
             pass
         if hasattr(self, "_show_default_inspector"):
             self._show_default_inspector()
+        self._clear_effect_selection_after_delete()
+
+    def _clear_effect_selection_after_delete(self):
+        """Leave deleted Blur/Mask layers in a neutral, non-editing state."""
+        self._deferred_effect_edit_type = ""
+        self._deferred_effect_edit_layer_id = ""
+        self._preview_edit_layer_id = ""
+        self._timed_layer_preview_signature = None
+        timeline = getattr(self, "timeline", None)
+        model = getattr(timeline, "_timeline", None) if timeline is not None else None
+        video_layer_id = ""
+        video_track = None
+        video_layer = None
+        for track in getattr(model, "tracks", []) or []:
+            track_type = str(getattr(getattr(track, "type", ""), "value", getattr(track, "type", ""))).lower()
+            if track_type != "video" and str(getattr(track, "name", "")) != "V1 Video":
+                continue
+            if track.layers:
+                video_track, video_layer = track, track.layers[0]
+                video_layer_id = str(getattr(video_layer, "id", "") or "")
+                break
+        # If the M1 track was removed with its final layer, clear the
+        # independent top-level overlay as well as the MPV effect. The
+        # overlay is not owned by the timeline scene and can otherwise keep
+        # painting its last region after the model is empty.
+        has_mask_layers = any(
+            str(getattr(track, "name", "")) == "M1" and bool(getattr(track, "layers", []))
+            for track in getattr(model, "tracks", []) or []
+        )
+        if not has_mask_layers and hasattr(self, "video_view"):
+            try:
+                if hasattr(self.video_view, "clear_mask_region"):
+                    self.video_view.clear_mask_region()
+                elif getattr(self.video_view, "mask_overlay", None) is not None:
+                    self.video_view.mask_overlay.clear_region()
+            except Exception:
+                pass
+        if video_layer_id:
+            timeline._selected_layer_id = video_layer_id
+            self.on_timeline_layer_selected(video_layer_id)
+        else:
+            timeline._selected_layer_id = ""
+            self.refresh_timed_layer_preview()
 
     def _show_subtitle_inspector_for_layer(self, layer_id: str):
         """Show subtitle inspector and select the matching segment."""
@@ -6351,7 +6587,9 @@ class VideoTranslatorGUI(QMainWindow):
         if layer is not None:
             self._set_layer_timing_controls("blur", layer)
             try:
-                active_index = list(track.layers).index(layer)
+                visible_layers = [candidate for candidate in track.layers
+                                  if self._layer_is_active_at_preview_time(candidate)]
+                active_index = visible_layers.index(layer) if layer in visible_layers else 0
                 self.video_view.set_blur_active_index(active_index)
             except (AttributeError, ValueError):
                 pass
@@ -6592,6 +6830,12 @@ class VideoTranslatorGUI(QMainWindow):
         preview_scale = max(1.0, float(preview_rect.height() or self.video_view.height() or 1.0)) / max(1, render_h)
         preview_text_scale = preview_scale * TEXT_LAYER_EXPORT_SCALE
         items = []
+        is_editable = (
+            not self._preview_is_playing()
+            and str(active_id or "")
+            and str(active_id or "") == str(getattr(self, "_preview_edit_layer_id", "") or "")
+        )
+        effective_active_id = str(active_id or "") if is_editable else ""
         if not bool(getattr(self, "_text_track_preview_visible", True)):
             self.video_view.set_text_layers([], active_id or getattr(self.timeline, "_selected_layer_id", ""))
             return
@@ -6616,7 +6860,9 @@ class VideoTranslatorGUI(QMainWindow):
                 "x": getattr(transform, "x", .5) if transform else .5,
                 "y": getattr(transform, "y", .5) if transform else .5,
             })
-        self.video_view.set_text_layers(items, active_id or getattr(self.timeline, "_selected_layer_id", ""))
+        self.video_view.set_text_layers(items, effective_active_id)
+        if getattr(self.video_view, "text_overlay", None) is not None:
+            self.video_view.text_overlay.set_editable(bool(is_editable))
 
     def _show_text_inspector_for_track(self, track, layer):
         self._switch_inspector("text")
@@ -7535,6 +7781,8 @@ class VideoTranslatorGUI(QMainWindow):
     def on_add_timeline_layer(self, layer_type: str = "subtitle"):
         if not hasattr(self, "timeline"):
             return
+        if self._preview_is_playing():
+            return
 
         if layer_type in {"blur", "logo", "mask", "text", "image", "sticker"} and not bool(
             getattr(self, "_optional_layer_controls_ready", False)
@@ -7827,7 +8075,11 @@ class VideoTranslatorGUI(QMainWindow):
                 pass
             try:
                 self.timeline._selected_layer_id = layer.id
-                self._show_blur_inspector_for_track(blur_track, layer)
+                # Route newly-created layers through the same paused
+                # selection path as existing B1 layers. This starts the
+                # deferred edit session and removes only this layer's
+                # rendered effect while its geometry is edited.
+                self.on_timeline_layer_selected(layer.id)
             except Exception:
                 pass
 
@@ -7881,11 +8133,10 @@ class VideoTranslatorGUI(QMainWindow):
             try:
                 self.timeline._selected_layer_id = layer.id
                 self.timeline._redraw()
-                self._show_mask_inspector_for_track(mask_track, layer)
-                # Show the draggable mask overlay (move + resize handles)
-                # immediately so the user can position the mask without
-                # having to click the timeline first.
-                self._show_mask_overlay(mask_track, layer)
+                # Use the normal paused-layer selection path so the new M1
+                # layer gets the same deferred effect/edit-handle behavior
+                # as a layer selected after reopening a project.
+                self.on_timeline_layer_selected(layer.id)
             except Exception:
                 pass
         
@@ -8104,6 +8355,8 @@ class VideoTranslatorGUI(QMainWindow):
         self.refresh_ui_state()
 
     def split_selected_timeline_segment(self):
+        if self._preview_is_playing():
+            return
         selection = getattr(self.timeline, "selection_range", lambda: None)() if hasattr(self, "timeline") else None
         # A selected overlay always owns Split. The selection supplies cut
         # times only; it must never redirect the command to TS1.
@@ -8677,6 +8930,8 @@ class VideoTranslatorGUI(QMainWindow):
                     return
 
     def delete_selected_timeline_segment(self):
+        if self._preview_is_playing():
+            return
         # If a layer is currently selected in the timeline, remove it
         # from its track. Handles blur (with overlay sync), image/logo,
         # text, and any other layer type.
@@ -8821,11 +9076,7 @@ class VideoTranslatorGUI(QMainWindow):
                         elif hasattr(self, "video_view") and hasattr(self.video_view, "clear_logo"):
                             self.video_view.clear_logo()
                     if str(getattr(track, "name", "")) == "M1":
-                        if track.layers:
-                            next_layer = track.layers[min(layer_idx, len(track.layers) - 1)]
-                            self.timeline._selected_layer_id = next_layer.id
-                            self._show_mask_overlay(track, next_layer)
-                        elif hasattr(self, "video_view") and hasattr(self.video_view, "clear_mask_region"):
+                        if not track.layers and hasattr(self, "video_view") and hasattr(self.video_view, "clear_mask_region"):
                             self.video_view.clear_mask_region()
                         try:
                             if hasattr(self, "_apply_mask_to_preview"):
@@ -8837,6 +9088,11 @@ class VideoTranslatorGUI(QMainWindow):
                                 self.persist_project_mask_state()
                         except Exception:
                             pass
+                    if layer_type == "blur":
+                        # Do not auto-select a surviving B1 layer. Leave the
+                        # editor focused on V1 so the remaining effect is
+                        # visible but not implicitly put into edit mode.
+                        self._clear_effect_selection_after_delete()
                     if layer_type == "text":
                         # The preview overlay owns a list of all text layers;
                         # refresh it after deletion so only the selected
@@ -8991,6 +9247,8 @@ class VideoTranslatorGUI(QMainWindow):
             self.timeline_redo_btn.setEnabled(bool(self._timeline_timing_redo_stack))
 
     def undo_last_timeline_timing_edit(self):
+        if self._preview_is_playing():
+            return False
         if not self._timeline_timing_undo_stack:
             return False
         entry = self._timeline_timing_undo_stack.pop()
@@ -9033,6 +9291,8 @@ class VideoTranslatorGUI(QMainWindow):
         return True
 
     def redo_last_timeline_timing_edit(self):
+        if self._preview_is_playing():
+            return False
         if not self._timeline_timing_redo_stack:
             return False
         entry = self._timeline_timing_redo_stack.pop()
@@ -9885,6 +10145,8 @@ class VideoTranslatorGUI(QMainWindow):
         dialog.exec()
 
     def on_preview_blur_region_changed(self):
+        if self._preview_is_playing():
+            return
         if self._blur_effect_enabled():
             self._blur_region_preview_dirty = True
             # Even when the blur effect is on, the B1 track in the
@@ -9912,9 +10174,23 @@ class VideoTranslatorGUI(QMainWindow):
             return
         self._blur_region_preview_dirty = False
         blur_enabled = self._blur_effect_enabled()
-        blur_region = regions if regions is not None else (
-            self.video_view.get_blur_region_normalized() if hasattr(self.video_view, "get_blur_region_normalized") else None
-        )
+        if regions is not None:
+            blur_region = regions
+        else:
+            blur_region = self._current_blur_regions_payload()
+            suppressed_id = self._deferred_effect_layer_id_for("blur")
+            if suppressed_id and isinstance(blur_region, list):
+                blur_layers = []
+                timeline_model = getattr(getattr(self, "timeline", None), "_timeline", None)
+                for track in list(getattr(timeline_model, "tracks", []) or []):
+                    if str(getattr(track, "name", "") or "") == "B1":
+                        blur_layers = list(getattr(track, "layers", []) or [])
+                        break
+                if len(blur_layers) == len(blur_region):
+                    blur_region = [
+                        region for region, layer in zip(blur_region, blur_layers)
+                        if str(getattr(layer, "id", "") or "") != suppressed_id
+                    ]
         # Always apply the blur when enabled and regions exist, even
         # when the video is paused, so the user can see the cached
         # blur effect on the video preview.
@@ -10090,7 +10366,8 @@ class VideoTranslatorGUI(QMainWindow):
                 self.media_player.clear_blur_region()
 
     # ---- Mask layer (M1) ----
-    def _current_mask_regions_payload(self, *, time_seconds=None, include_inactive=False):
+    def _current_mask_regions_payload(self, *, time_seconds=None, include_inactive=False,
+                                      exclude_layer_id: str = ""):
         """Build the mask payload from the M1 track's MaskLayers.
 
         Visibility is NOT checked here — the play-state gate in
@@ -10106,6 +10383,8 @@ class VideoTranslatorGUI(QMainWindow):
             if tr.name != "M1":
                 continue
             for layer in tr.layers:
+                if exclude_layer_id and str(getattr(layer, "id", "") or "") == str(exclude_layer_id):
+                    continue
                 if not include_inactive and not self._layer_is_active_at_preview_time(layer, time_seconds):
                     continue
                 try:
@@ -10142,7 +10421,10 @@ class VideoTranslatorGUI(QMainWindow):
         if not hasattr(self, "media_player"):
             return
         if regions is None:
-            regions = self._current_mask_regions_payload(include_inactive=True)
+            regions = self._current_mask_regions_payload(
+                include_inactive=True,
+                exclude_layer_id=self._deferred_effect_layer_id_for("mask"),
+            )
         if force:
             if regions:
                 self.media_player.set_mask_region(regions)
@@ -10170,6 +10452,21 @@ class VideoTranslatorGUI(QMainWindow):
             is_playing = bool(self.media_player.is_playing())
         except Exception:
             is_playing = False
+        was_review_mode = bool(getattr(self, "_review_mode_active", False))
+        self._review_mode_active = is_playing
+        if is_playing:
+            # Entering review mode is an explicit commit boundary. This
+            # restores a deferred Blur/Mask at its final geometry before the
+            # next frame is shown, then removes every preview edit target.
+            self._preview_edit_layer_id = ""
+        if is_playing or was_review_mode:
+            # Borders are selection chrome, not rendered layer content.
+            # Clear their active state on both Review entry and its pause
+            # transition; a subsequent explicit paused selection re-enables
+            # only the requested layer.
+            if hasattr(self, "video_view") and hasattr(self.video_view, "subtitle_item"):
+                self.video_view.subtitle_item.set_editable(False)
+            self._refresh_text_layer_preview("")
         if hasattr(self, "track_label_bar"):
             self.track_label_bar.set_controls_enabled(not is_playing)
         # Sync the timeline's "playing" flag to the real player state.
@@ -10187,24 +10484,60 @@ class VideoTranslatorGUI(QMainWindow):
             selected_id = str(getattr(getattr(self, "timeline", None), "_selected_layer_id", "") or "")
             selected_type = ""
             selected_track_name = ""
+            selected_track = None
+            selected_layer = None
             for track in getattr(getattr(self.timeline, "_timeline", None), "tracks", []) if hasattr(self, "timeline") else []:
                 for layer in getattr(track, "layers", []):
                     if str(getattr(layer, "id", "")) == selected_id:
                         selected_type = str(getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))).lower()
                         selected_track_name = str(getattr(track, "name", ""))
+                        selected_track, selected_layer = track, layer
                         break
                 if selected_type:
                     break
+            if is_playing:
+                effect_edit_changed = self.commit_deferred_effect_editing(refresh=False)
+            else:
+                # Pausing enters Edit Mode, but does not automatically start
+                # editing the layer selected before playback. Effects remain
+                # rendered and handles remain hidden until the user selects
+                # a layer again.
+                effect_edit_changed = False
+            if effect_edit_changed:
+                self.refresh_timed_layer_preview()
             mask_overlay = getattr(self.video_view, "mask_overlay", None)
             if mask_overlay is not None and mask_overlay._regions:
-                mask_overlay.set_editable(bool(not is_playing and selected_type == "mask" and selected_track_name == "M1"))
+                mask_overlay.set_editable(bool(
+                    not is_playing
+                    and selected_type == "mask"
+                    and selected_track_name == "M1"
+                    and selected_id == str(getattr(self, "_preview_edit_layer_id", "") or "")
+                    and self._deferred_effect_layer_id_for("mask") == selected_id
+                ))
             if hasattr(self, "video_view") and hasattr(self.video_view, "set_blur_edit_enabled"):
                 self.video_view.set_blur_edit_enabled(
-                    bool(not is_playing and selected_type == "blur" and self._blur_effect_enabled())
+                    bool(
+                        not is_playing
+                        and selected_type == "blur"
+                        and selected_id == str(getattr(self, "_preview_edit_layer_id", "") or "")
+                        and self._deferred_effect_layer_id_for("blur") == selected_id
+                        and self._blur_effect_enabled()
+                    )
                 )
             logo_overlay = getattr(self.video_view, "logo_overlay", None)
             if logo_overlay is not None and getattr(logo_overlay, "_regions", None):
-                logo_overlay.set_editable(bool(not is_playing and selected_type == "image" and selected_track_name == "L1 Logo"))
+                logo_overlay.set_editable(bool(
+                    not is_playing
+                    and selected_type == "image"
+                    and selected_track_name == "L1 Logo"
+                    and selected_id == str(getattr(self, "_preview_edit_layer_id", "") or "")
+                ))
+            if hasattr(self, "video_view") and getattr(self.video_view, "text_overlay", None) is not None:
+                # Keep text content visible but make its top-level overlay
+                # click-through in review mode and immediately after pause.
+                self.video_view.text_overlay.set_editable(False if (is_playing or was_review_mode) else bool(
+                    selected_type == "text" and selected_id == str(getattr(self, "_preview_edit_layer_id", "") or "")
+                ))
         except Exception:
             pass
         # When playback just ended, pause both audio sidecars so they
@@ -10224,6 +10557,7 @@ class VideoTranslatorGUI(QMainWindow):
             self._apply_mask_to_preview()
         except Exception:
             pass
+        QTimer.singleShot(0, self.refresh_ui_state)
 
     def persist_project_mask_state(self, *, regions=None):
         state = getattr(self, "current_project_state", None)
@@ -11457,6 +11791,28 @@ class VideoTranslatorGUI(QMainWindow):
             # segment 1 at position 0).  Follow playback only while it is
             # actually running.
             is_playing = bool(getattr(self.media_player, "is_playing", lambda: False)())
+            if is_playing and hasattr(self.timeline, "_timeline") and self.timeline._timeline:
+                # Review Mode follows the active subtitle track so the
+                # Subtitle Inspector can refresh with the cue under the
+                # playhead. This intentionally overrides a paused edit
+                # selection only while playback is running.
+                subtitle_layer_id = ""
+                if active_index >= 0:
+                    for layer_id, segment_index in getattr(self.timeline, "_segment_indices", {}).items():
+                        if int(segment_index) == int(active_index):
+                            subtitle_layer_id = str(layer_id)
+                            break
+                if not subtitle_layer_id:
+                    for track in self.timeline._timeline.tracks:
+                        track_type = str(getattr(getattr(track, "type", ""), "value", getattr(track, "type", ""))).lower()
+                        if track_type not in {"subtitle", "dub_subtitle"} and str(getattr(track, "name", "")) != "TS1":
+                            continue
+                        if track.layers:
+                            subtitle_layer_id = str(getattr(track.layers[0], "id", "") or "")
+                            break
+                if subtitle_layer_id and str(getattr(self.timeline, "_selected_layer_id", "") or "") != subtitle_layer_id:
+                    self.timeline._selected_layer_id = subtitle_layer_id
+                    self.on_timeline_layer_selected(subtitle_layer_id)
             if inspector_visible and is_playing and active_index >= 0 and active_index != getattr(self, "_selected_segment_index", -1):
                 self.set_selected_segment_index(active_index, sync_ui=True)
 
@@ -11588,6 +11944,7 @@ class VideoTranslatorGUI(QMainWindow):
 
     def refresh_ui_state(self):
         """Basic enable/disable rules to guide user flow."""
+        review_mode = self._preview_is_playing()
         v_ok = bool(self.video_path_edit.text().strip()) and os.path.exists(self.video_path_edit.text().strip())
         a_ok = bool(self.audio_source_edit.text().strip()) and os.path.exists(self.audio_source_edit.text().strip())
         has_translated_text = bool(self.translated_text.toPlainText().strip())
@@ -11670,11 +12027,11 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "stop_btn"):
             self.stop_btn.setEnabled(v_ok and not voice_running)
         if hasattr(self, "blur_area_btn"):
-            self.blur_area_btn.setEnabled(can_export)
+            self.blur_area_btn.setEnabled(can_export and not review_mode)
         # Overlay tracks are only meaningful once the generated output is
         # ready. Keep their controls disabled before that point so users
         # cannot create layers against an incomplete video workflow.
-        self._optional_layer_controls_ready = bool(can_export and not voice_running)
+        self._optional_layer_controls_ready = bool(can_export and not voice_running and not review_mode)
         for button_name in ("blur_add_btn", "add_logo_btn", "add_mask_btn", "add_text_btn"):
             button = getattr(self, button_name, None)
             if button is not None:
@@ -11684,7 +12041,7 @@ class VideoTranslatorGUI(QMainWindow):
         # without unlocking the unrelated overlay-layer actions early.
         if hasattr(self, "add_layer_btn"):
             has_subtitle_segments = bool(self.current_segments or self.current_translated_segments)
-            self.add_layer_btn.setEnabled(self._optional_layer_controls_ready or has_subtitle_segments)
+            self.add_layer_btn.setEnabled((self._optional_layer_controls_ready or has_subtitle_segments) and not review_mode)
         if hasattr(self, "blur_add_btn"):
             self.blur_add_btn.setEnabled(
                 self._optional_layer_controls_ready
@@ -11734,11 +12091,35 @@ class VideoTranslatorGUI(QMainWindow):
             self.timeline_split_btn.setEnabled(
                 (has_timeline_segments or selected_overlay_is_splittable)
                 and (not has_selected_timeline_layer or not selected_layer_locked)
+                and not review_mode
             )
         if hasattr(self, "timeline_delete_btn"):
             self.timeline_delete_btn.setEnabled(
                 has_timeline_segments and (not has_selected_timeline_layer or not selected_layer_locked)
+                and not review_mode
             )
+
+        # Keep the timeline readable and fully seekable during playback, but
+        # make every state-changing control unavailable in Review Mode.
+        if review_mode:
+            for button_name in (
+                "timeline_undo_btn", "timeline_redo_btn", "timeline_selection_mode_btn",
+                "timeline_clear_selection_btn", "timeline_alt_transcribe_btn",
+            ):
+                button = getattr(self, button_name, None)
+                if button is not None:
+                    button.setEnabled(False)
+        else:
+            self._refresh_timeline_history_buttons()
+            selection_exists = bool(getattr(self.timeline, "selection_range", lambda: None)()) if hasattr(self, "timeline") else False
+            if hasattr(self, "timeline_selection_mode_btn"):
+                self.timeline_selection_mode_btn.setEnabled(bool(v_ok))
+            if hasattr(self, "timeline_clear_selection_btn"):
+                self.timeline_clear_selection_btn.setEnabled(selection_exists)
+            if hasattr(self, "timeline_alt_transcribe_btn"):
+                self.timeline_alt_transcribe_btn.setEnabled(selection_exists and not bool(getattr(self, "_alternate_range_transcription_worker", None)))
+        if hasattr(self, "inspector_stack"):
+            self.inspector_stack.setEnabled(not review_mode)
 
         self._update_generate_button_menu(has_data=has_translated_text or has_timeline_segments)
         self.update_workflow_stage_badges()

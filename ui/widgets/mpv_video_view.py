@@ -710,6 +710,10 @@ class _BlurRegionOverlayWindow(QWidget):
             self.setCursor(Qt.ClosedHandCursor)
         elif self._drag_mode:
             self.setCursor(Qt.SizeAllCursor)
+        if self._drag_mode:
+            # Keep receiving the drag even when the pointer crosses a
+            # narrow region edge or a native MPV child window boundary.
+            self.grabMouse()
         event.accept()
 
     def mouseMoveEvent(self, event):
@@ -761,6 +765,8 @@ class _BlurRegionOverlayWindow(QWidget):
         finished_drag = bool(self._drag_mode)
         self._drag_mode = ""
         self._drag_index = -1
+        if self.mouseGrabber() is self:
+            self.releaseMouse()
         if self._editable:
             self.setCursor(Qt.OpenHandCursor)
         if finished_drag and callable(self._on_edit_finished):
@@ -795,9 +801,12 @@ class _BlurRegionOverlayWindow(QWidget):
             # with the frame beneath it and can look dark blue on inactive
             # regions, even though the logical overlay colour is identical.
             if self._editable and index == self._active_index:
-                painter.setBrush(Qt.NoBrush)
-                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 235), 2))
-                painter.drawRoundedRect(rect, 12, 12)
+                # Keep a nearly transparent hit surface across the whole
+                # region. Native layered windows otherwise hit-test only
+                # the visible dashed border, making center drags unreliable.
+                painter.setBrush(QColor(0, 0, 0, 1))
+                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 235), 2, Qt.DashLine))
+                painter.drawRect(rect)
                 painter.setBrush(QColor(color.red(), color.green(), color.blue(), 235))
                 painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
                 for handle_rect in self._handle_rects(rect).values():
@@ -1127,7 +1136,9 @@ class _MaskRegionOverlayWindow(_BlurRegionOverlayWindow):
             pen = QPen(accent, 2, Qt.DashLine)
             if self._editable and index == self._active_index:
                 painter.setPen(pen)
-                painter.setBrush(Qt.NoBrush)
+                # Preserve a full-region hit target while keeping the mask
+                # editor visually transparent over the video.
+                painter.setBrush(QColor(0, 0, 0, 1))
                 painter.drawRect(rect)
                 painter.setBrush(accent)
                 painter.setPen(QPen(QColor(12, 24, 38, 220), 1))
@@ -1144,6 +1155,7 @@ class _TextLayerOverlayWindow(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self._target_view, self._items, self._active_id = None, [], ""
         self._drag_id, self._drag_offset, self._suppressed = "", QPointF(), False
+        self._editable = False
         self.hide()
 
     def attach_to_view(self, view): self._target_view = view
@@ -1153,6 +1165,15 @@ class _TextLayerOverlayWindow(QWidget):
             super().hide()
         elif self._items and self._target_view and self._target_view.isVisible():
             self.sync_to_view(); super().show(); self.raise_()
+    def set_editable(self, editable):
+        """Make the tool overlay interactive only in paused Edit Mode."""
+        self._editable = bool(editable)
+        if not self._editable:
+            self._drag_id = ""
+            self.setCursor(Qt.ArrowCursor)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, not self._editable)
+        self._update_input_mask()
+        self.update()
     def set_items(self, items, active_id=""):
         self._items, self._active_id = list(items or []), str(active_id or "")
         self.sync_to_view(); self._update_input_mask(); self.update()
@@ -1169,6 +1190,9 @@ class _TextLayerOverlayWindow(QWidget):
     def _update_input_mask(self):
         """Let clicks pass through unused parts of this full-canvas tool window."""
         region = QRegion()
+        if not self._editable:
+            self.setMask(region)
+            return
         for item in self._items:
             rect, *_ = self._rect_for(item)
             region |= QRegion(rect.adjusted(-4, -4, 4, 4).toAlignedRect())
@@ -1187,6 +1211,8 @@ class _TextLayerOverlayWindow(QWidget):
             if str(item.get("id", "")) == self._active_id:
                 painter.setPen(QPen(QColor("#6ee7d6"), 1, Qt.DashLine)); painter.setBrush(Qt.NoBrush); painter.drawRect(rect)
     def mousePressEvent(self, event):
+        if not self._editable:
+            event.ignore(); return
         if event.button() == Qt.LeftButton:
             pos = QPointF(event.position())
             for item in reversed(self._items):
@@ -1206,6 +1232,8 @@ class _TextLayerOverlayWindow(QWidget):
                     self.setCursor(Qt.ClosedHandCursor); self.update(); event.accept(); return
         event.ignore()
     def mouseMoveEvent(self, event):
+        if not self._editable:
+            event.ignore(); return
         if not self._drag_id or self.width() <= 0 or self.height() <= 0: return
         point = QPointF(event.position()) - self._drag_offset
         item = next((candidate for candidate in self._items

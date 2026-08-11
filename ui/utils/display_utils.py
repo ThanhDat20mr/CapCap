@@ -10,9 +10,16 @@ def log_message(gui, message: str):
     if not message:
         return
     text = str(message)
-    stream = getattr(sys, "__stdout__", sys.stdout)
-    stream.write(text + "\n")
-    stream.flush()
+    # PyInstaller's windowed bootloader sets both __stdout__ and stdout to
+    # None. Logging must never interrupt media/timeline initialization just
+    # because there is no attached console.
+    stream = getattr(sys, "__stdout__", None) or getattr(sys, "stdout", None)
+    if stream is not None:
+        try:
+            stream.write(text + "\n")
+            stream.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
     if hasattr(gui, "runtime_log_received"):
         gui.runtime_log_received.emit(text)
 

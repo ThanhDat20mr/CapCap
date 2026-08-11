@@ -5,7 +5,7 @@ import threading
 import traceback
 from pathlib import Path
 
-from runtime_paths import bin_path, models_path, workspace_root
+from runtime_paths import bin_path, models_path, workspace_root, subprocess_hidden_kwargs
 from services.resource_download_service import ResourceDownloadService
 
 
@@ -363,6 +363,7 @@ def _gpu_memory_mb() -> int:
             text=True,
             stderr=subprocess.DEVNULL,
             timeout=2,
+            **subprocess_hidden_kwargs(),
         )
         return max(0, int(str(output).splitlines()[0].strip()))
     except Exception:
