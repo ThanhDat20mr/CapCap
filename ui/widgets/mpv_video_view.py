@@ -832,6 +832,14 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
         self._sync_timer = None
         self._opacity: float = 1.0
         self._rotation: float = 0.0
+        self._logical_visible = True
+
+    def set_logical_visible(self, visible: bool):
+        self._logical_visible = bool(visible)
+        if not self._logical_visible:
+            self.hide()
+        elif self._regions:
+            self.sync_to_view()
 
     def set_editable(self, editable: bool):
         """Keep the logo image visible while hiding edit chrome when idle."""
@@ -848,7 +856,7 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
 
     def sync_to_view(self):
         """Keep the logo image positioned even when edit handles are hidden."""
-        if (self._suspended or not self._target_view
+        if (not self._logical_visible or self._suspended or not self._target_view
                 or not self._target_view.isVisible() or not self._regions):
             self.hide()
             return
@@ -1302,6 +1310,11 @@ class MpvVideoView(QWidget):
         self._framing_drag_start = QPointF()
         self._framing_drag_focus = (0.5, 0.5)
         self._subtitle_event_filter_installed = False
+        # Logical TS1 visibility is owned by the project/timeline.  Native
+        # top-level overlays may be hidden by Windows during Alt-Tab or a
+        # modal dialog, but restoring the window must never override this.
+        self._subtitle_track_visible = True
+        self._logo_track_visible = True
         # A top-level overlay is required here: MPV renders into a native
         # child window that can otherwise cover ordinary Qt child widgets.
         self.subtitle_item = _SubtitleOverlayWidget()
@@ -1456,21 +1469,14 @@ class MpvVideoView(QWidget):
             self.text_overlay.sync_to_view()
             self.text_overlay.show()
             self.text_overlay.raise_()
-        if (getattr(self, "logo_overlay", None) is not None
+        if (self._logo_track_visible
+                and getattr(self, "logo_overlay", None) is not None
                 and getattr(self.logo_overlay, "_regions", None)):
             self.logo_overlay.sync_to_view()
             self.logo_overlay.show()
             self.logo_overlay.raise_()
-        if self.subtitle_item.current_text:
+        if self._subtitle_track_visible and self.subtitle_item.current_text:
             self.subtitle_item.show()
-        if self.text_overlay is not None and self.text_overlay._items:
-            self.text_overlay.sync_to_view()
-            self.text_overlay.show()
-            self.text_overlay.raise_()
-        if getattr(self, "logo_overlay", None) is not None and self.logo_overlay._regions:
-            self.logo_overlay.sync_to_view()
-            self.logo_overlay.show()
-            self.logo_overlay.raise_()
         self.blur_overlay.sync_to_view()
         self.mask_overlay.sync_to_view()
 
@@ -1499,14 +1505,34 @@ class MpvVideoView(QWidget):
         modal = QApplication.activeModalWidget()
         if modal is not None and modal.isVisible():
             return
-        if self.subtitle_item.current_text:
+        if self._subtitle_track_visible and self.subtitle_item.current_text:
             self.reposition_subtitle()
             self.subtitle_item.show()
             self.subtitle_item.raise_()
-        if self.text_overlay is not None and self.text_overlay._items:
+        if (self.text_overlay is not None and self.text_overlay._items
+                and not self.text_overlay._suppressed):
             self.text_overlay.sync_to_view()
             self.text_overlay.show()
             self.text_overlay.raise_()
+
+    def set_subtitle_track_visible(self, visible: bool):
+        """Set logical TS1 visibility independently of native window focus."""
+        self._subtitle_track_visible = bool(visible)
+        if not self._subtitle_track_visible:
+            self.subtitle_item.hide()
+        elif self.subtitle_item.current_text and self.isVisible():
+            self.reposition_subtitle()
+            self.subtitle_item.show()
+            self.subtitle_item.raise_()
+
+    def set_logo_track_visible(self, visible: bool):
+        """Preserve L1 Hide/Show across native surface show/focus events."""
+        self._logo_track_visible = bool(visible)
+        overlay = getattr(self, "logo_overlay", None)
+        if overlay is None:
+            return
+        if hasattr(overlay, "set_logical_visible"):
+            overlay.set_logical_visible(self._logo_track_visible)
 
     def set_subtitle_render_dimensions(self, width: int, height: int):
         self.subtitle_render_width = max(0, int(width or 0))
@@ -1899,6 +1925,10 @@ class MpvVideoView(QWidget):
         if not hasattr(self, "logo_overlay") or self.logo_overlay is None:
             self.set_logo("", 0.1, 0.1, 0.2, 0.2)
         self.logo_overlay.set_logos(logos, active_index)
+        # The overlay may have existed while L1 was hidden in a previous
+        # project/session. Always apply the current logical track state when
+        # replacing its content so a visible L1 reliably becomes visible.
+        self.logo_overlay.set_logical_visible(self._logo_track_visible)
         self.logo_overlay.set_editable(bool(editable))
         self.logo_overlay.attach_to_view(self)
         self.logo_overlay.sync_to_view()

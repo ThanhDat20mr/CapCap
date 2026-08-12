@@ -2417,7 +2417,7 @@ class VideoTranslatorGUI(QMainWindow):
                 return "dubbed"
         return "original"
 
-    def sync_preview_audio_track_to_output(self, *, apply_to_player: bool = True):
+    def sync_preview_audio_track_to_output(self, *, apply_to_player: bool = True, force: bool = False):
         target_mode = self._preferred_preview_audio_track_mode()
         self._preview_audio_track_mode = target_mode
 
@@ -2426,9 +2426,9 @@ class VideoTranslatorGUI(QMainWindow):
 
         source_video = self._resolve_preview_original_video_path()
         current_source = self._normalize_local_file_path(str(getattr(self.media_player, "_source_path", "") or ""))
-        should_apply = not current_source
+        should_apply = bool(force) or not current_source
         if source_video and current_source:
-            should_apply = os.path.abspath(current_source) == os.path.abspath(source_video)
+            should_apply = bool(force) or os.path.abspath(current_source) == os.path.abspath(source_video)
 
         if should_apply:
             self._apply_preview_audio_track_selection()
@@ -3125,6 +3125,8 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "subtitle_bottom_offset_spin"):
             self.subtitle_bottom_offset_spin.setVisible(not is_custom)
         self.update_subtitle_preview_style()
+        if getattr(self, "current_project_state", None) is not None:
+            self.schedule_timeline_project_persist()
 
     def on_subtitle_drag_started(self):
         """Swap to the Qt layer only while dragging for immediate feedback."""
@@ -3206,6 +3208,7 @@ class VideoTranslatorGUI(QMainWindow):
 
     def _current_subtitle_style_controls_state(self) -> dict:
         return {
+            "preset": self.get_selected_subtitle_preset(),
             "font": self.subtitle_font_combo.currentText().strip(),
             "size": int(self.subtitle_font_size_spin.value()),
             "color": self.subtitle_color_hex,
@@ -3226,6 +3229,7 @@ class VideoTranslatorGUI(QMainWindow):
             "highlight_color": self.subtitle_highlight_color_combo.currentText().strip(),
             "highlight_mode": self.subtitle_highlight_mode_combo.currentText().strip(),
             "single_line": bool(getattr(self, "subtitle_single_line_cb", None) and self.subtitle_single_line_cb.isChecked()),
+            "position": self.get_subtitle_position_config(),
         }
 
     def _apply_subtitle_style_controls_state(self, state: dict) -> None:
@@ -3259,6 +3263,10 @@ class VideoTranslatorGUI(QMainWindow):
             self.subtitle_outline_cb.setChecked(bool(state.get("outline", self.subtitle_outline_cb.isChecked())))
         if hasattr(self, "subtitle_bg_alpha_spin"):
             self.subtitle_bg_alpha_spin.setValue(float(state.get("background_alpha", self.subtitle_bg_alpha_spin.value())))
+        if hasattr(self, "subtitle_background_padding_spin"):
+            self.subtitle_background_padding_spin.setValue(
+                int(state.get("background_padding", self.subtitle_background_padding_spin.value()))
+            )
         self.subtitle_bold_cb.setChecked(bool(state.get("bold", self.subtitle_bold_cb.isChecked())))
         if hasattr(self, "subtitle_speaker_colors_cb"):
             self.subtitle_speaker_colors_cb.setChecked(
@@ -3275,6 +3283,26 @@ class VideoTranslatorGUI(QMainWindow):
         )
         if hasattr(self, "subtitle_single_line_cb"):
             self.subtitle_single_line_cb.setChecked(bool(state.get("single_line", self.subtitle_single_line_cb.isChecked())))
+        position = dict(state.get("position") or {})
+        if position:
+            mode_combo = getattr(self, "subtitle_position_mode_combo", None)
+            if mode_combo is not None:
+                index = mode_combo.findData(str(position.get("position_mode", "anchor")))
+                if index >= 0:
+                    mode_combo.setCurrentIndex(index)
+            align_combo = getattr(self, "subtitle_align_combo", None)
+            if align_combo is not None:
+                align_combo.setCurrentText(str(position.get("alignment_label", align_combo.currentText())))
+            for widget_name, value_key in (
+                ("subtitle_bottom_offset_spin", "margin_v"),
+                ("subtitle_x_offset_spin", "x_offset"),
+                ("subtitle_custom_x_spin", "custom_position_x"),
+                ("subtitle_custom_y_spin", "custom_position_y"),
+            ):
+                widget = getattr(self, widget_name, None)
+                if widget is not None and value_key in position:
+                    widget.setValue(int(position[value_key]))
+            self.on_subtitle_position_mode_changed()
 
     def _capture_subtitle_custom_style_state(self) -> None:
         self._subtitle_custom_style_state = self._current_subtitle_style_controls_state()
@@ -3289,6 +3317,8 @@ class VideoTranslatorGUI(QMainWindow):
             custom_radio.setChecked(True)
             custom_radio.blockSignals(False)
             self.on_subtitle_preset_changed()
+        if getattr(self, "current_project_state", None) is not None:
+            self.schedule_timeline_project_persist()
 
     def _read_saved_subtitle_style_presets(self) -> dict:
         raw_value = self.settings.value("saved_subtitle_styles", "{}")
@@ -3492,6 +3522,18 @@ class VideoTranslatorGUI(QMainWindow):
             )
             if voice_signature:
                 state.set_setting("voice_signature", voice_signature)
+
+        # These states belong to the project editor view.  The track-label
+        # widget itself is rebuilt on startup, so it cannot be their source
+        # of truth.
+        state.set_setting("preview_track_visibility", {
+            "TS1": bool(getattr(self, "_subtitle_track_preview_visible", True)),
+            "T1 Text": bool(getattr(self, "_text_track_preview_visible", True)),
+            "L1 Logo": bool(getattr(self, "_logo_track_preview_visible", True)),
+            "M1": bool(getattr(self, "_mask_track_preview_visible", True)),
+            "B1": bool(self._blur_effect_enabled()),
+        })
+        state.set_setting("subtitle_style_controls", self._current_subtitle_style_controls_state())
         
         # Save timeline data (includes mask and logo layers)
         if hasattr(self, "timeline") and self.timeline._timeline:
@@ -3652,10 +3694,21 @@ class VideoTranslatorGUI(QMainWindow):
                 self.audio_handling_combo.setCurrentIndex(combo_index)
         context = self.project_bridge.load_context(state)
         self.processed_artifacts = {}
-        # Preview-only layer visibility is reset when opening a project; the
-        # underlying layers remain unchanged for export.
-        self._subtitle_track_preview_visible = True
-        self._text_track_preview_visible = True
+        # Restore project-scoped visibility. Old projects remain visible by
+        # default because they have no saved value yet.
+        preview_visibility = dict(getattr(state, "settings", {}).get("preview_track_visibility") or {})
+        self._subtitle_track_preview_visible = bool(preview_visibility.get("TS1", True))
+        self._text_track_preview_visible = bool(preview_visibility.get("T1 Text", True))
+        self._logo_track_preview_visible = bool(preview_visibility.get("L1 Logo", True))
+        self._mask_track_preview_visible = bool(preview_visibility.get("M1", True))
+        saved_subtitle_style = dict(getattr(state, "settings", {}).get("subtitle_style_controls") or {})
+        if saved_subtitle_style:
+            self._apply_subtitle_style_controls_state(saved_subtitle_style)
+            self._subtitle_custom_style_state = dict(saved_subtitle_style)
+        if hasattr(self, "video_view") and hasattr(self.video_view, "set_subtitle_track_visible"):
+            self.video_view.set_subtitle_track_visible(self._subtitle_track_preview_visible)
+        if hasattr(self, "video_view") and hasattr(self.video_view, "set_logo_track_visible"):
+            self.video_view.set_logo_track_visible(self._logo_track_preview_visible)
         self.last_original_srt_path = ""
         self.last_translated_srt_path = ""
         self.last_extracted_audio = ""
@@ -3799,7 +3852,7 @@ class VideoTranslatorGUI(QMainWindow):
         # until they press Generate.
         try:
             if hasattr(self, "sync_preview_audio_track_to_output"):
-                self.sync_preview_audio_track_to_output(apply_to_player=True)
+                self.sync_preview_audio_track_to_output(apply_to_player=True, force=True)
         except Exception:
             pass
         # Stop any active playback so the user re-presses Play after
@@ -5812,6 +5865,13 @@ class VideoTranslatorGUI(QMainWindow):
 
         for track in self.timeline._timeline.tracks:
             if str(getattr(track, "name", "")) == "L1 Logo":
+                # The L1 header Hide/Show state is independent from playback
+                # and timing.  Do not let a timed refresh recreate a hidden
+                # logo when playback advances or resumes.
+                if not bool(getattr(self, "_logo_track_preview_visible", True)):
+                    if hasattr(self.video_view, "clear_logo"):
+                        self.video_view.clear_logo()
+                    continue
                 active = [l for l in track.layers if self._layer_is_active_at_preview_time(l, time_seconds)]
                 if active:
                     is_selected_logo = (
@@ -6081,6 +6141,12 @@ class VideoTranslatorGUI(QMainWindow):
         """Show the draggable logo overlay for the selected logo layer."""
         if not hasattr(self, "video_view"):
             return
+        # This method is also called by selection/project-restoration paths,
+        # so guard it here as well as in the timed playback refresh.
+        if not bool(getattr(self, "_logo_track_preview_visible", True)):
+            if hasattr(self.video_view, "clear_logo"):
+                self.video_view.clear_logo()
+            return
         path = str(getattr(layer, "source", "") or "")
         if not path:
             return
@@ -6237,6 +6303,12 @@ class VideoTranslatorGUI(QMainWindow):
     def _show_mask_overlay(self, track, layer):
         """Show the draggable mask overlay for the selected mask layer."""
         if not hasattr(self, "video_view"):
+            return
+        if not bool(getattr(self, "_mask_track_preview_visible", True)):
+            # Hide/Show controls both the visual effect and its edit chrome.
+            # A later focus/selection event must not resurrect either one.
+            if hasattr(self.video_view, "clear_mask_region"):
+                self.video_view.clear_mask_region()
             return
         # Disconnect any previous handlers to avoid the libpyside
         # RuntimeWarning that occurs when calling disconnect() with no
@@ -7635,31 +7707,23 @@ class VideoTranslatorGUI(QMainWindow):
             self.toggle_blur_effect_enabled(bool(is_on))
         except Exception:
             pass
+        self.schedule_timeline_project_persist(blur_state=True)
 
     def on_track_logo_toggled(self, track_name: str, is_shown: bool):
         """Handle L1 track label click - hide or show the logo overlay."""
+        self._logo_track_preview_visible = bool(is_shown)
+        if hasattr(self, "video_view") and hasattr(self.video_view, "set_logo_track_visible"):
+            self.video_view.set_logo_track_visible(self._logo_track_preview_visible)
+        # Force the next timed refresh to respect the new track state even if
+        # the playhead remains at the same timestamp.
+        self._timed_layer_preview_signature = None
+        self.schedule_timeline_project_persist()
         if not hasattr(self, "video_view"):
             return
         if is_shown:
-            # Re-show the selected L1 layer when possible.  This matters
-            # now that L1 can contain more than one independent logo.
-            if hasattr(self, "timeline") and self.timeline._timeline:
-                selected_id = getattr(self.timeline, "_selected_layer_id", "")
-                for track in self.timeline._timeline.tracks:
-                    if track.name == "L1 Logo" and track.layers:
-                        try:
-                            layer = next(
-                                (item for item in track.layers
-                                 if item.id == selected_id),
-                                track.layers[0],
-                            )
-                            self._show_logo_overlay(track, layer)
-                        except Exception:
-                            pass
-                        return
-            # No layer found - nothing to show
-            if hasattr(self.video_view, "clear_logo"):
-                self.video_view.clear_logo()
+            # Restore only logos active at the current playhead.  This keeps
+            # Hide/Show consistent with timed logo segments.
+            self.refresh_timed_layer_preview()
         else:
             # Hide the logo overlay
             if hasattr(self.video_view, "clear_logo"):
@@ -7667,6 +7731,8 @@ class VideoTranslatorGUI(QMainWindow):
 
     def on_track_mask_toggled(self, track_name: str, is_shown: bool):
         """Handle M1 track label click - show or hide the mask filter."""
+        self._mask_track_preview_visible = bool(is_shown)
+        self.schedule_timeline_project_persist(mask_state=True)
         if not hasattr(self, "media_player"):
             return
         if is_shown:
@@ -7711,16 +7777,25 @@ class VideoTranslatorGUI(QMainWindow):
                     if hasattr(self, "track_label_bar"):
                         self.track_label_bar.set_text_shown(track_name, bool(is_shown))
                     self.log(f"[Timeline] {'Shown' if is_shown else 'Hidden'} text track: {track_name}")
+                    self.schedule_timeline_project_persist()
                     return
 
     def on_track_subtitle_toggled(self, track_name: str, is_shown: bool):
         """Temporarily show or hide TS1 subtitle output without deleting data."""
         self._subtitle_track_preview_visible = bool(is_shown)
+        if hasattr(self, "video_view") and hasattr(self.video_view, "set_subtitle_track_visible"):
+            self.video_view.set_subtitle_track_visible(self._subtitle_track_preview_visible)
         if not is_shown:
             try:
                 self.media_player.clear_subtitle()
             except Exception:
                 pass
+            # clear_subtitle() removes MPV's external ASS track.  Its source
+            # path may still be the same on Show, so invalidate the UI-level
+            # cache as well; otherwise sync_live_subtitle_preview() believes
+            # the removed track is already loaded and never restores it.
+            self._loaded_live_ass_path = ""
+            self._loaded_live_ass_signature = None
             if hasattr(self, "video_view"):
                 try:
                     self.video_view.subtitle_item.hide()
@@ -7734,6 +7809,7 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "track_label_bar"):
             self.track_label_bar.set_subtitle_shown(track_name, bool(is_shown))
         self.log(f"[Timeline] {'Shown' if is_shown else 'Hidden'} subtitle track: {track_name}")
+        self.schedule_timeline_project_persist()
 
     def on_track_label_selected(self, track_name: str):
         """Select the first layer in a track; label clicks never toggle state."""
@@ -10350,23 +10426,27 @@ class VideoTranslatorGUI(QMainWindow):
                     continue
         if hasattr(self, "video_view") and hasattr(self.video_view, "set_blur_regions_normalized"):
             self.video_view.set_blur_regions_normalized(regions)
-        # Always default the blur toggle to ON on project reopen so the
-        # blur effect is displayed by default.
+        # Restore the B1 track visibility instead of forcing Blur back on.
+        # Older projects did not save this value and therefore default to ON.
+        blur_enabled = bool(blur_state.get("enabled", True))
         if hasattr(self, "blur_area_btn"):
             self.blur_area_btn.blockSignals(True)
-            self.blur_area_btn.setChecked(True)
+            self.blur_area_btn.setChecked(blur_enabled)
             self.blur_area_btn.blockSignals(False)
         self._sync_blur_controls()
         if hasattr(self, "track_label_bar"):
             try:
-                self.track_label_bar.set_blur_on("B1", True)
+                self.track_label_bar.set_blur_on("B1", blur_enabled)
             except Exception:
                 pass
         if hasattr(self, "timeline") and not getattr(self, "_saved_timeline_model_restored", False):
             self.timeline.sync_blur_regions(regions)
         if hasattr(self, "media_player"):
             try:
-                self.apply_preview_blur_region(force=True)
+                if blur_enabled:
+                    self.apply_preview_blur_region(force=True)
+                else:
+                    self.media_player.clear_blur_region()
             except Exception:
                 self.media_player.clear_blur_region()
 
@@ -10425,6 +10505,11 @@ class VideoTranslatorGUI(QMainWindow):
         """
         if not hasattr(self, "media_player"):
             return
+        # M1 Hide/Show must survive play/pause, project restoration, and
+        # native-window focus changes.  Never rebuild a hidden mask graph.
+        if not bool(getattr(self, "_mask_track_preview_visible", True)):
+            self.media_player.clear_mask_region()
+            return
         if regions is None:
             regions = self._current_mask_regions_payload(
                 include_inactive=True,
@@ -10474,6 +10559,15 @@ class VideoTranslatorGUI(QMainWindow):
             self._refresh_text_layer_preview("")
         if hasattr(self, "track_label_bar"):
             self.track_label_bar.set_controls_enabled(not is_playing)
+        splitter = getattr(self, "preview_timeline_splitter", None)
+        if splitter is not None:
+            try:
+                # Review Mode keeps the preview geometry stable so native
+                # overlays and MPV effects cannot be disturbed mid-playback.
+                # Disable only the handle; never disable the child widgets.
+                splitter.handle(1).setEnabled(not is_playing)
+            except Exception:
+                pass
         # Sync the timeline's "playing" flag to the real player state.
         # Without this the timeline keeps animating past the end of the
         # video because the player auto-pauses (keep_open="always") but
@@ -10570,7 +10664,10 @@ class VideoTranslatorGUI(QMainWindow):
             return
         if regions is None:
             regions = self._current_mask_regions_payload()
-        mask_state = {"enabled": True, "regions": list(regions or [])}
+        mask_state = {
+            "enabled": bool(getattr(self, "_mask_track_preview_visible", True)),
+            "regions": list(regions or []),
+        }
         if state.settings.get("mask_state") == mask_state:
             return
         state.set_setting("mask_state", mask_state)
@@ -10585,14 +10682,13 @@ class VideoTranslatorGUI(QMainWindow):
             # M1 track means the user deleted the final mask and must not be
             # reconstructed from the legacy mask_state setting.
             regions = self._current_mask_regions_payload(include_inactive=True)
-        if hasattr(self, "media_player") and hasattr(self.media_player, "set_mask_region"):
-            if regions:
-                self.media_player.set_mask_region(regions)
-            else:
-                self.media_player.clear_mask_region()
+        if hasattr(self, "media_player"):
+            self._apply_mask_to_preview(regions=regions, force=True)
         if hasattr(self, "track_label_bar"):
             try:
-                self.track_label_bar.set_mask_shown("M1", True)
+                self.track_label_bar.set_mask_shown(
+                    "M1", bool(getattr(self, "_mask_track_preview_visible", True))
+                )
             except Exception:
                 pass
         # Sync the M1 track from legacy settings only when no serialized
@@ -11922,9 +12018,12 @@ class VideoTranslatorGUI(QMainWindow):
                     # Re-adding an unchanged MPV subtitle track can briefly
                     # stall playback.  Only reload it once the final ASS path
                     # actually changes.
+                    live_track_id = getattr(self.media_player, "_sub_track_id", -1)
+                    has_live_mpv_track = isinstance(live_track_id, int) and live_track_id >= 0
                     if (
                         ass_path != getattr(self, "_loaded_live_ass_path", "")
                         or getattr(self, "_loaded_live_ass_signature", None) != getattr(self, "_live_preview_signature", None)
+                        or not has_live_mpv_track
                     ):
                         self.media_player.set_subtitle_file(ass_path)
                         self._loaded_live_ass_path = ass_path
@@ -12130,6 +12229,14 @@ class VideoTranslatorGUI(QMainWindow):
                 self.timeline_alt_transcribe_btn.setEnabled(selection_exists and not bool(getattr(self, "_alternate_range_transcription_worker", None)))
         if hasattr(self, "inspector_stack"):
             self.inspector_stack.setEnabled(not review_mode)
+        # Lock only the layout handle while playing.  The splitter's child
+        # widgets remain enabled so playback/seek controls still work.
+        splitter = getattr(self, "preview_timeline_splitter", None)
+        if splitter is not None:
+            try:
+                splitter.handle(1).setEnabled(not review_mode)
+            except Exception:
+                pass
 
         self._update_generate_button_menu(has_data=has_translated_text or has_timeline_segments)
         self.update_workflow_stage_badges()

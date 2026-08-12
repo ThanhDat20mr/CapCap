@@ -98,6 +98,9 @@ a = Analysis(
         "services.chunking_service",
         "services.asr_merge_service",
         "services.segment_regroup_service",
+        # SpeakerDiarizationService is resolved lazily through services.__getattr__.
+        # Include its concrete module so the frozen worker can import it.
+        "services.speaker_diarization_service",
         # Dynamically loaded adapters (EngineRuntime uses importlib)
         "engines.ffmpeg_adapter",
         "engines.preview_adapter",

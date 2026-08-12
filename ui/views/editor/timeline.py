@@ -1,6 +1,6 @@
 import os
 from bisect import bisect_right
-from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt, Signal
+from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView, QPushButton
 
@@ -86,6 +86,7 @@ class EditorTimeline(QGraphicsView):
         # Presentation-only track hiding. Never write this to Track.visible:
         # preview and export must continue using the real project visibility.
         self._timeline_hidden_track_ids: set[str] = set()
+        self._resize_refresh_pending = False
         self._segment_indices: dict[str, int] = {}
         # Playback repaints occur several times per second. Keep the static
         # subtitle overlap layout between edits instead of sorting every TS1
@@ -609,12 +610,34 @@ class EditorTimeline(QGraphicsView):
         # tracks with more layers (e.g. multiple blur regions) expand.
         for t in tracks:
             self._track_heights[t.id] = self._compute_track_height(t)
-        total_h = self.RULER_HEIGHT + sum(
+        # The ruler is painted as a sticky viewport overlay. Reserve one
+        # additional ruler-height in the scene so QGraphicsView's vertical
+        # scrollbar does not count that covered area as usable track space.
+        # Without this, the final track stops underneath the horizontal
+        # scrollbar and cannot be clicked even after scrolling to the end.
+        total_h = self.RULER_HEIGHT * 2 + sum(
             self._track_heights.get(t.id, self.TRACK_DEFAULT_H) for t in tracks
         )
         scene_w = self.CONTENT_LEFT_PAD + max(self._duration * self.pixels_per_second + 200, 800)
         self._scene.setSceneRect(0, 0, scene_w, total_h)
         self.layoutChanged.emit()
+        self.viewport().update()
+
+    def _refresh_scene_bounds_for_viewport(self) -> None:
+        """Refresh scroll extents after a pure widget resize.
+
+        Track/layer data has not changed in this path, so preserve the costly
+        overlap-row cache used by long subtitle tracks.  Only the scene bounds
+        and viewport paint need updating.
+        """
+        if not self._timeline:
+            return
+        tracks = [t for t in self._timeline.tracks if self.is_track_shown_on_timeline(t)]
+        total_h = self.RULER_HEIGHT * 2 + sum(
+            self._track_heights.get(t.id, self.TRACK_DEFAULT_H) for t in tracks
+        )
+        scene_w = self.CONTENT_LEFT_PAD + max(self._duration * self.pixels_per_second + 200, 800)
+        self._scene.setSceneRect(0, 0, scene_w, total_h)
         self.viewport().update()
 
     def _compute_duration(self, timeline: Timeline) -> float:
@@ -1839,6 +1862,15 @@ class EditorTimeline(QGraphicsView):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        # A splitter can emit many resize events per drag. Coalesce them to
+        # one refresh per UI frame and keep the subtitle overlap cache intact.
+        if not self._resize_refresh_pending:
+            self._resize_refresh_pending = True
+            QTimer.singleShot(16, self._flush_resize_refresh)
+
+    def _flush_resize_refresh(self) -> None:
+        self._resize_refresh_pending = False
+        self._refresh_scene_bounds_for_viewport()
         self._update_return_to_playhead_button()
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:

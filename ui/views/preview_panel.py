@@ -775,7 +775,13 @@ def build_preview_panel(gui):
     gui.video_view.setMinimumHeight(270)
     gui.video_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     gui.timeline = _import_editor_timeline()()
-    gui.timeline.setMinimumHeight(360)
+    # The outer Timeline card owns the usable minimum height.  Do not give
+    # the nested QGraphicsView the same large minimum: the card also contains
+    # its title, toolbar, margins and progress strip, which otherwise causes
+    # Qt to squeeze/clip the view (including its horizontal scrollbar) when
+    # the Preview is enlarged with the splitter.
+    gui.timeline.setMinimumHeight(0)
+    gui.timeline.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     if hasattr(gui, "voice_timing_sync_combo"):
         gui.timeline.set_voice_sync_mode(gui.voice_timing_sync_combo.currentText())
     gui.timeline.seekRequestedMs.connect(gui.set_position)
@@ -940,12 +946,43 @@ def build_preview_panel(gui):
             translator_overlay.sync_to_view()
 
     gui._sync_ocr_overlay = _sync_ocr_overlay
+    gui._preview_text_resize_refresh_pending = False
+
+    def _flush_preview_text_resize():
+        gui._preview_text_resize_refresh_pending = False
+        refresh_text = getattr(gui, "_refresh_text_layer_preview", None)
+        timeline = getattr(gui, "timeline", None)
+        if callable(refresh_text):
+            try:
+                refresh_text(str(getattr(timeline, "_selected_layer_id", "") or ""))
+            except (AttributeError, RuntimeError):
+                # The application may still be constructing its preview state
+                # or already be closing. A normal project refresh handles the
+                # former; neither case should interrupt a resize.
+                pass
+
+    def _sync_canvas_bound_overlays():
+        """Refresh overlays whose pixel layout depends on preview geometry.
+
+        ``MpvVideoView`` can reposition the top-level Text overlay itself,
+        but the text item's font size and padding are calculated from the
+        current preview-canvas height in the main window.  A splitter resize
+        therefore needs to rebuild that small payload immediately; waiting
+        for the next playback tick left Text at the old scale.
+        """
+        _sync_ocr_overlay()
+        # Preserve immediate-looking feedback (one update within a frame)
+        # without rebuilding the Text payload for every mouse-move emitted by
+        # a splitter drag.
+        if not getattr(gui, "_preview_text_resize_refresh_pending", False):
+            gui._preview_text_resize_refresh_pending = True
+            QtCore.QTimer.singleShot(16, _flush_preview_text_resize)
 
     _ocr_video = gui.video_view
     _ocr_orig_resize = _ocr_video.resizeEvent
     def _ocr_resize_handler(event):
         _ocr_orig_resize(event)
-        _sync_ocr_overlay()
+        _sync_canvas_bound_overlays()
     _ocr_video.resizeEvent = _ocr_resize_handler
     _ocr_orig_move = _ocr_video.moveEvent
     def _ocr_move_handler(event):
@@ -1120,6 +1157,7 @@ def build_preview_panel(gui):
     timeline_layout.addLayout(timeline_header_layout)
 
     timeline_body_layout = QHBoxLayout()
+    timeline_body_layout.setContentsMargins(0, 0, 0, 0)
     timeline_body_layout.setSpacing(0)
 
     from views.editor.track_labels import TrackLabelBar
@@ -1146,6 +1184,15 @@ def build_preview_panel(gui):
             gui.track_label_bar.set_text_shown(
                 "T1 Text", bool(getattr(gui, "_text_track_preview_visible", True))
             )
+            gui.track_label_bar.set_logo_shown(
+                "L1 Logo", bool(getattr(gui, "_logo_track_preview_visible", True))
+            )
+            gui.track_label_bar.set_mask_shown(
+                "M1", bool(getattr(gui, "_mask_track_preview_visible", True))
+            )
+            gui.track_label_bar.set_blur_on(
+                "B1", bool(getattr(gui, "_blur_effect_enabled", lambda: True)())
+            )
             gui.track_label_bar.set_subtitle_shown(
                 "TS1", bool(getattr(gui, "_subtitle_track_preview_visible", True))
             )
@@ -1154,7 +1201,9 @@ def build_preview_panel(gui):
 
     timeline_body_layout.addWidget(gui.track_label_bar)
     timeline_body_layout.addWidget(gui.timeline, 1)
-    timeline_layout.addLayout(timeline_body_layout)
+    # Give the scrollable timeline body all remaining card space.  The title,
+    # toolbar and progress strip keep their compact fixed height above/below.
+    timeline_layout.addLayout(timeline_body_layout, 1)
 
     gui.progress_bar = QProgressBar()
     gui.progress_bar.setFixedHeight(8)
@@ -1843,6 +1892,7 @@ def build_preview_panel(gui):
     # the native MPV surface from extending over the transport controls when
     # the splitter is dragged upward on a smaller window.
     workspace_widget.setMinimumHeight(350)
+    # Keep the original practical minimum for the editor timeline.
     timeline_card.setMinimumHeight(360)
 
     gui.preview_timeline_splitter = QSplitter(Qt.Vertical)
@@ -1856,8 +1906,36 @@ def build_preview_panel(gui):
     )
     gui.preview_timeline_splitter.addWidget(workspace_widget)
     gui.preview_timeline_splitter.addWidget(timeline_card)
+    gui.preview_timeline_splitter.handle(1).setEnabled(True)
+    gui.preview_timeline_splitter.handle(1).setCursor(Qt.SplitVCursor)
     gui.preview_timeline_splitter.setStretchFactor(0, 45)
     gui.preview_timeline_splitter.setStretchFactor(1, 55)
+
+    # Do not permit an extreme Preview expansion to clip the Timeline card
+    # below a usable viewport. The normal 45/55 layout remains unchanged;
+    # this guard applies only at the lower end of the splitter range.
+    gui._constraining_preview_timeline_splitter = False
+
+    def _keep_timeline_accessible(_pos, _index):
+        splitter = gui.preview_timeline_splitter
+        if getattr(gui, "_constraining_preview_timeline_splitter", False):
+            return
+        sizes = splitter.sizes()
+        if len(sizes) != 2:
+            return
+        min_timeline_height = 360
+        if sizes[1] >= min_timeline_height:
+            return
+        available = sum(sizes)
+        if available <= min_timeline_height:
+            return
+        gui._constraining_preview_timeline_splitter = True
+        try:
+            splitter.setSizes([max(1, available - min_timeline_height), min_timeline_height])
+        finally:
+            gui._constraining_preview_timeline_splitter = False
+
+    gui.preview_timeline_splitter.splitterMoved.connect(_keep_timeline_accessible)
     right_layout.addWidget(gui.preview_timeline_splitter, 1)
 
     def _set_default_preview_timeline_sizes():
