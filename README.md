@@ -1,6 +1,6 @@
 # CapCap
 
-![CapCap Editor Preview](https://github.com/notepower2k1/CapCap/blob/main/assets/preview.JPG)
+![CapCap Editor Preview](assets/preview.JPG)
 
 CapCap is a Windows desktop video-localization editor for creating Vietnamese or English subtitles, translated video, voice-over, and timed visual layers.
 
@@ -40,7 +40,7 @@ If CapCap is useful to you, you can support development:
 
 Scan the QR code:
 
-![Vietnam donation QR code](assets/qr.png)
+<img src="assets/qr.png"  style="width: 25%; height: auto;">
 
 ### International Donation
 
