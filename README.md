@@ -32,6 +32,22 @@ python ui/gui.py
 
 Copy `.env_example` to `.env` only if you need manual provider or remote-server configuration. Most settings are available in the app.
 
+## Support CapCap
+
+If CapCap is useful to you, you can support development:
+
+### Donate in Vietnam
+
+Scan the QR code:
+
+![Vietnam donation QR code](assets/qr.png)
+
+### International Donation
+
+[![Buy Me a Coffee](assets/buymeacoffee.png)](https://buymeacoffee.com/hcaht)
+
+Click the image or visit [Buy Me a Coffee](https://buymeacoffee.com/hcaht).
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).

@@ -3,6 +3,7 @@ import math
 import os
 import json
 import time
+import shutil
 import hashlib
 import re
 
@@ -22,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from runtime_paths import subprocess_hidden_kwargs
+from runtime_paths import asset_path, subprocess_hidden_kwargs
 
 
 
@@ -113,7 +114,7 @@ def _get_video_duration(video_path: str) -> float:
 
 MSG_STYLE = """
     QMessageBox { background-color: #0f1724; }
-    QLabel { color: #d7e3f4; }
+    QLabel { color: #ffffff; }
     QPushButton { background-color: #22344d; color: #f8fbff; border: 1px solid #34506f;
         border-radius: 8px; padding: 6px 16px; font-weight: 600; }
     QPushButton:hover { background-color: #29405d; }
@@ -363,7 +364,7 @@ class LauncherWindow(QDialog):
         root.setSpacing(16)
 
         header = QHBoxLayout()
-        title = QLabel("CapCapV7")
+        title = QLabel("CapCap V7")
         title.setStyleSheet("font-size: 26px; font-weight: 800; color: #ffffff;")
         subtitle = QLabel("Video Translation & Voiceover Studio")
         subtitle.setStyleSheet("font-size: 12px; color: #6ee7d6;")
@@ -443,6 +444,13 @@ class LauncherWindow(QDialog):
         header_text.addLayout(device_row)
         header.addLayout(header_text, 1)
 
+        action_rows = QVBoxLayout()
+        action_rows.setSpacing(6)
+        action_row_one = QHBoxLayout()
+        action_row_one.setSpacing(6)
+        action_row_two = QHBoxLayout()
+        action_row_two.setSpacing(6)
+
         self.new_btn = QPushButton("+ New Project")
         self.new_btn.setMinimumHeight(44)
         self.new_btn.setMinimumWidth(150)
@@ -460,7 +468,7 @@ class LauncherWindow(QDialog):
             }
         """)
         self.new_btn.clicked.connect(self._on_new_project)
-        header.addWidget(self.new_btn)
+        action_row_one.addWidget(self.new_btn)
 
         self.split_btn = QPushButton("Split Video")
         self.split_btn.setMinimumHeight(44)
@@ -479,7 +487,7 @@ class LauncherWindow(QDialog):
             }
         """)
         self.split_btn.clicked.connect(self._on_split_video)
-        header.addWidget(self.split_btn)
+        action_row_one.addWidget(self.split_btn)
 
         self.resource_btn = QPushButton("Manage Resources")
         self.resource_btn.setMinimumHeight(44)
@@ -498,7 +506,64 @@ class LauncherWindow(QDialog):
             }
         """)
         self.resource_btn.clicked.connect(self._on_manage_resources)
-        header.addWidget(self.resource_btn)
+        action_row_one.addWidget(self.resource_btn)
+
+        self.clean_video_btn = QPushButton("Clean Video Data")
+        self.clean_video_btn.setMinimumHeight(44)
+        self.clean_video_btn.setMinimumWidth(145)
+        self.clean_video_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3a2630;
+                color: #ffb3bd;
+                font-weight: 600;
+                font-size: 13px;
+                border-radius: 8px;
+                border: 1px solid #70404e;
+            }
+            QPushButton:hover { background-color: #52303c; }
+        """)
+        self.clean_video_btn.setToolTip("Remove generated project data and video preview caches")
+        self.clean_video_btn.clicked.connect(self._on_clean_video_data)
+        action_row_two.addWidget(self.clean_video_btn)
+
+        self.open_project_btn = QPushButton("Open Project Folder")
+        self.open_project_btn.setMinimumHeight(44)
+        self.open_project_btn.setMinimumWidth(165)
+        self.open_project_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #22344d;
+                color: #8ad7ff;
+                font-weight: 600;
+                font-size: 13px;
+                border-radius: 8px;
+                border: 1px solid #34506f;
+            }
+            QPushButton:hover { background-color: #29405d; }
+        """)
+        self.open_project_btn.setToolTip("Open the CapCap projects folder")
+        self.open_project_btn.clicked.connect(self._on_open_project_folder)
+        action_row_two.insertWidget(0, self.open_project_btn)
+
+        self.about_btn = QPushButton("About")
+        self.about_btn.setMinimumHeight(44)
+        self.about_btn.setMinimumWidth(90)
+        self.about_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #22344d;
+                color: #8ad7ff;
+                font-weight: 600;
+                font-size: 13px;
+                border-radius: 8px;
+                border: 1px solid #34506f;
+            }
+            QPushButton:hover { background-color: #29405d; }
+        """)
+        self.about_btn.clicked.connect(self._on_about)
+        action_row_two.addWidget(self.about_btn)
+        action_row_two.addStretch()
+        action_rows.addLayout(action_row_one)
+        action_rows.addLayout(action_row_two)
+        header.addLayout(action_rows)
         root.addLayout(header)
 
         self.section_label = QLabel("Recent Projects")
@@ -750,6 +815,159 @@ class LauncherWindow(QDialog):
         from views.resource_manager import open_resource_manager
         open_resource_manager(parent=self)
         self._validate_resources_for_device()
+
+    def _on_open_project_folder(self):
+        from PySide6.QtWidgets import QMessageBox
+        projects_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "projects"))
+        try:
+            os.makedirs(projects_dir, exist_ok=True)
+            if hasattr(os, "startfile"):
+                os.startfile(projects_dir)
+            else:
+                from PySide6.QtGui import QDesktopServices
+                from PySide6.QtCore import QUrl
+                QDesktopServices.openUrl(QUrl.fromLocalFile(projects_dir))
+        except Exception as exc:
+            message = QMessageBox(QMessageBox.Warning, "Open Project Folder",
+                f"Could not open the projects folder:\n\n{exc}", QMessageBox.Ok, self)
+            message.setStyleSheet(MSG_STYLE)
+            message.exec()
+
+    def _on_clean_video_data(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        confirm = QMessageBox(QMessageBox.Warning, "Clean Video Data",
+            "Remove all generated project data and video preview caches?\n\n"
+            "Source videos, downloaded models, Piper voices, CUDA files, and application resources will not be touched.",
+            QMessageBox.Yes | QMessageBox.No, self)
+        confirm.setStyleSheet(MSG_STYLE)
+        if confirm.exec() != QMessageBox.Yes:
+            return
+
+        root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        targets = [
+            os.path.join(root, "projects"),
+            os.path.join(root, "temp"),
+        ]
+        removed = 0
+        errors = []
+        for target in targets:
+            if not os.path.exists(target):
+                continue
+            try:
+                shutil.rmtree(target)
+                removed += 1
+            except Exception as exc:
+                errors.append(f"{os.path.basename(target)}: {exc}")
+        for target in targets:
+            try:
+                os.makedirs(target, exist_ok=True)
+            except OSError:
+                pass
+        # Cleaning all generated project data also resets the launcher history;
+        # no deleted project should remain listed in recent_projects.json.
+        try:
+            _save_recent_projects(None, [])
+            self._load_recent()
+        except Exception as exc:
+            errors.append(f"recent projects: {exc}")
+
+        if errors:
+            detail = "\n".join(errors)
+            message = QMessageBox(QMessageBox.Warning, "Clean Video Data",
+                f"Some data could not be removed:\n\n{detail}", QMessageBox.Ok, self)
+            message.setStyleSheet(MSG_STYLE)
+            message.exec()
+        else:
+            message = QMessageBox(QMessageBox.Information, "Clean Video Data",
+                "Generated project data and video caches were cleared.", QMessageBox.Ok, self)
+            message.setStyleSheet(MSG_STYLE)
+            message.exec()
+
+    def _on_about(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices, QPixmap
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QTextBrowser, QVBoxLayout, QHBoxLayout
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("About CapCap")
+        dialog.setMinimumSize(650, 650)
+        dialog.setStyleSheet("QDialog { background: #0a101e; color: #d7e3f4; }")
+        layout = QVBoxLayout(dialog)
+        title = QLabel("CapCap V7 — Tool Information", dialog)
+        title.setStyleSheet("font-size: 18px; font-weight: 800; color: #ffffff;")
+        layout.addWidget(title)
+
+        browser = QTextBrowser(dialog)
+        browser.setOpenExternalLinks(True)
+        browser.setStyleSheet(
+            "QTextBrowser { background: #0f1928; color: #d7e3f4; border: 1px solid #1e3045; "
+            "border-radius: 8px; padding: 10px; }"
+        )
+        browser.setHtml("""
+        <h3 style='color:#8ad7ff;'>Description</h3>
+        <p>CapCap is a Windows application that supports both CPU and GPU processing.</p>
+        <p>GPU mode provides the best overall experience and performance. GPU acceleration currently supports NVIDIA GPUs.</p>
+        <p>If CUDA is not detected correctly, first update your NVIDIA GPU driver. If needed, install CUDA 12.4 from:<br>
+        <a href='https://developer.nvidia.com/cuda-12-4-0-download-archive'>CUDA 12.4 Download Archive</a></p>
+
+        <h3 style='color:#8ad7ff;'>Tutorial / Resource Setup</h3>
+        <p>Download the resource, then place it in the matching CapCap folder:</p>
+        <table cellspacing='6'>
+        <tr><td><b>Whisper models</b></td><td><code>CapCap\\models\\faster_whisper</code></td></tr>
+        <tr><td><b>CUDA / cuDNN runtime</b></td><td><code>CapCap\\bin\\cuda12_fw</code></td></tr>
+        <tr><td><b>SenseVoice</b></td><td>Bundled by default in <code>CapCap\\models\\sensevoice</code></td></tr>
+        <tr><td><b>RapidOCR models</b></td><td>Bundled by default; optional files use <code>CapCap\\rapidocr\\models</code></td></tr>
+        <tr><td><b>Piper voices</b></td><td><code>CapCap\\models\\piper</code> (Vietnamese) or <code>CapCap\\models\\piper-en</code> (English)</td></tr>
+        <tr><td><b>Speaker Detection</b></td><td><code>CapCap\\models\\pyannote</code></td></tr>
+        </table>
+        <p>Resource Manager provides download links for supported optional resources. Extract downloaded archives into the folder shown above.</p>
+
+        <h3 style='color:#8ad7ff;'>Developer Information</h3>
+        <p>GitHub: <a href='https://github.com/notepower2k1/CapCap'>github.com/notepower2k1/CapCap</a></p>
+        """)
+        layout.addWidget(browser, 1)
+
+        donation_row = QHBoxLayout()
+        donation_row.setSpacing(18)
+        donation_label = QLabel("Donate Vietnam\nScan to support development", dialog)
+        donation_label.setStyleSheet("color:#d7e3f4; font-weight:600;")
+        qr_label = QLabel(dialog)
+        qr_label.setAlignment(Qt.AlignCenter)
+        qr_path = asset_path("qr.png")
+        qr_pixmap = QPixmap(qr_path)
+        if not qr_pixmap.isNull():
+            qr_label.setPixmap(qr_pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            qr_label.setText("QR unavailable")
+        donation_row.addWidget(donation_label)
+        donation_row.addWidget(qr_label)
+        donation_row.addStretch()
+
+        coffee_group = QHBoxLayout()
+        coffee_group.setSpacing(5)
+        coffee_text = QLabel("International Donation\nClick to Buy Me a Coffee", dialog)
+        coffee_text.setStyleSheet("color:#d7e3f4; font-weight:600;")
+        coffee_group.addWidget(coffee_text)
+        coffee_path = asset_path("buymeacoffee.png")
+        coffee_pixmap = QPixmap(coffee_path)
+        coffee_image = QLabel(dialog)
+        coffee_image.setAlignment(Qt.AlignCenter)
+        if not coffee_pixmap.isNull():
+            coffee_image.setPixmap(coffee_pixmap.scaled(190, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            coffee_image.setText("Buy Me a Coffee image unavailable")
+        coffee_image.setToolTip("Open Buy Me a Coffee")
+        coffee_image.setCursor(Qt.PointingHandCursor)
+        coffee_image.setAccessibleName("International Donation - Buy Me a Coffee")
+        coffee_image.mousePressEvent = lambda _event: QDesktopServices.openUrl(QUrl("https://buymeacoffee.com/hcaht"))
+        coffee_group.addWidget(coffee_image)
+        donation_row.addLayout(coffee_group)
+        layout.addLayout(donation_row)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=dialog)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def _on_split_video(self):
         from PySide6.QtWidgets import QMessageBox, QProgressDialog, QInputDialog
