@@ -30,6 +30,8 @@ datas = [
     # out of the installer and Whisper/OCR remain optional downloads.
     (str(project_root / "models" / "sensevoice" / "model.int8.onnx"), "models/sensevoice"),
     (str(project_root / "models" / "sensevoice" / "tokens.txt"), "models/sensevoice"),
+    (str(project_root / "bin" / "cuda12_fw" / "README.txt"), "bin/cuda12_fw"),
+    (str(project_root / "models" / "faster_whisper" / "README.txt"), "models/faster_whisper"),
     (str(project_root / "app" / "utils" / "voice_preview_utils.py"), "utils"),
     (str(project_root / ".env_example"), "."),
     (os.path.join(os.path.dirname(faster_whisper.__file__), "assets"), "faster_whisper/assets"),

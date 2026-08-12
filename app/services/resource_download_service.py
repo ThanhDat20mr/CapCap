@@ -310,11 +310,9 @@ class ResourceDownloadService:
         dev = str(device or "").strip().lower()
         if dev == "cpu":
             return [
-                ("sensevoice:model", "SenseVoice ASR model"),
                 ("ocr", "Rapid OCR engine"),
             ]
         return [
-            ("sensevoice:model", "SenseVoice ASR model"),
             ("cuda:whisper", "CUDA runtime pack"),
             ("nvidia_driver", "NVIDIA driver"),
         ]
@@ -385,17 +383,6 @@ class ResourceDownloadService:
                 "expected_filename": "cuda12_fw.zip",
                 "auto_download_supported": True,
                 "description": "GPU runtime used to accelerate supported local processing.",
-            },
-            {
-                "id": "sensevoice:model",
-                "name": "SenseVoice ASR Model (Sherpa-ONNX)",
-                "kind": "sensevoice",
-                "status": "installed" if self.is_resource_installed("sensevoice:model") else "missing",
-                "target_dir": models_path("sensevoice"),
-                "download_url": self._hf_blob_url("zipResource/sensevoice.zip"),
-                "expected_filename": "sensevoice.zip",
-                "auto_download_supported": True,
-                "description": "Multilingual speech-recognition model used for transcription.",
             },
             {
                 "id": "diarization:segmentation",
@@ -552,12 +539,6 @@ class ResourceDownloadService:
             raise ValueError(
                 "Whisper models are downloaded manually. Use Open Download Page, then extract the ZIP into models/faster_whisper."
             )
-
-        if resource_id == "sensevoice:model":
-            zip_url = self._hf_blob_url("zipResource/sensevoice.zip")
-            target_dir = models_path("sensevoice")
-            self._download_and_extract_zip(zip_url, target_dir, progress_cb)
-            return
 
         if resource_id == "cuda:whisper":
             zip_url = self._hf_blob_url("zipResource/cuda12_fw.zip")
