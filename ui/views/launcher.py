@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
 
 from runtime_paths import subprocess_hidden_kwargs
 
+CAPCAP_VERSION = "CapCap V7"
+
 
 def _recent_projects_path():
     return os.path.join(os.path.dirname(__file__), "..", "..", "recent_projects.json")
@@ -367,9 +369,18 @@ class LauncherWindow(QDialog):
         subtitle = QLabel("Video Translation & Voiceover Studio")
         subtitle.setStyleSheet("font-size: 12px; color: #6ee7d6;")
 
+        version_label = QLabel(CAPCAP_VERSION)
+        version_label.setStyleSheet(
+            "font-size: 11px; font-weight: 700; color: #8ad7ff; "
+            "background-color: #142437; border: 1px solid #2e4b68; "
+            "border-radius: 7px; padding: 3px 8px;"
+        )
+        version_label.setToolTip("Application version")
+
         header_text = QVBoxLayout()
         header_text.addWidget(title)
         header_text.addWidget(subtitle)
+        header_text.addWidget(version_label, 0, Qt.AlignLeft)
 
         has_gpu, gpu_name, cuda_ready = self._detect_gpu_with_cuda()
         gpu_usable = has_gpu and cuda_ready
