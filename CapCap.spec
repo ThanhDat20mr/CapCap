@@ -174,6 +174,24 @@ a.binaries = [m for m in a.binaries if not str(m[0]).replace("\\", "/").split("/
 # Resource Manager, not bundled into the application.
 a.binaries = [m for m in a.binaries if str(m[0]).replace("\\", "/") != "onnxruntime/capi/onnxruntime/capi/onnxruntime_providers_cuda.dll"]
 
+# Do not silently turn the installer into a CUDA runtime installer. Native
+# dependency analysis of CTranslate2 can discover these DLLs from the CUDA
+# Toolkit installed on the build machine and place duplicate copies in
+# ``_internal``. GPU mode intentionally resolves them from the separately
+# downloadable ``bin/cuda12_fw`` resource directory instead. Keeping this
+# exclusion explicit makes CPU-only installs small and keeps the Resource
+# Manager as the single source for the GPU runtime.
+_CUDA_RUNTIME_DLL_NAMES = {
+    "cublas64_12.dll",
+    "cublaslt64_12.dll",
+    "cudart64_12.dll",
+    "cufft64_11.dll",
+}
+a.binaries = [
+    m for m in a.binaries
+    if Path(str(m[0])).name.lower() not in _CUDA_RUNTIME_DLL_NAMES
+]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

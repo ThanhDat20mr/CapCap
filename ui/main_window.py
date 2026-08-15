@@ -14045,12 +14045,27 @@ class VideoTranslatorGUI(QMainWindow):
             "TTS cache": [],
             "Temp folders": [],
             "Timeline media cache": [],
+            "Launcher media cache": [],
         }
         project_temp_root = self.get_project_temp_root()
         output_root = os.path.join(self.workspace_root, "output")
         project_root = str(getattr(project_state, "project_root", "") or "").strip()
+        project_id = str(getattr(project_state, "project_id", "") or "").strip()
+        if not project_id and project_root:
+            project_id = os.path.basename(os.path.normpath(project_root))
         project_state_path = self.project_service.project_file(project_root) if project_root else ""
         allowed_roots = [root for root in [project_temp_root, output_root, project_root] if root]
+
+        # Stop active workers and pending persistence before deleting files.
+        # Otherwise a late worker/timer can recreate the selected project's
+        # cache or timeline after it has just been removed.
+        self._terminate_workers()
+        persist_timer = getattr(self, "_timeline_persist_timer", None)
+        if persist_timer is not None:
+            persist_timer.stop()
+        self._pending_timeline_persist = False
+        self._pending_mask_state_persist = False
+        self._pending_blur_state_persist = False
 
         self.cleanup_temp_preview_files()
 
@@ -14086,6 +14101,20 @@ class VideoTranslatorGUI(QMainWindow):
             if len(removed_paths) > before_count:
                 removed_groups[group_name].append(removed_paths[-1])
 
+        # Older builds stored a few per-project temporary files directly in
+        # temp/<project_id>.  Remove that exact legacy directory only; never
+        # remove the shared temp root or another project's folder.
+        if project_id:
+            legacy_project_temp = os.path.join(self.get_workspace_temp_root(), project_id)
+            before_count = len(removed_paths)
+            self._remove_path_if_safe(
+                legacy_project_temp,
+                allowed_roots=[self.get_workspace_temp_root()],
+                removed=removed_paths,
+            )
+            if len(removed_paths) > before_count:
+                removed_groups["Temp folders"].append(removed_paths[-1])
+
         # V1/A1 visual assets live in the shared temp root because they are
         # prepared in the launcher before a project context exists. Remove
         # only files whose digest belongs to this source video; caches for
@@ -14095,22 +14124,50 @@ class VideoTranslatorGUI(QMainWindow):
         )
         if source_video:
             source = os.path.abspath(source_video)
-            digest = hashlib.md5(source.encode("utf-8")).hexdigest()[:12]
+            # Some older code paths keyed cache files by the user-provided
+            # path while newer ones use the normalized absolute path. Remove
+            # both keys for this one selected source video.
+            digest_sources = {source, source_video}
+            digests = {
+                hashlib.md5(cache_source.encode("utf-8")).hexdigest()[:12]
+                for cache_source in digest_sources
+            }
+            full_digests = {
+                hashlib.md5(cache_source.encode("utf-8")).hexdigest()
+                for cache_source in digest_sources
+            }
             temp_root = self.get_workspace_temp_root()
-            timeline_cache_paths = [
-                os.path.join(temp_root, f"waveform_{digest}.wav"),
-                os.path.join(temp_root, "timeline_visuals", f"{digest}.json"),
-            ]
+            timeline_cache_paths = []
+            for digest in digests:
+                timeline_cache_paths.extend([
+                    os.path.join(temp_root, f"waveform_{digest}.wav"),
+                    os.path.join(temp_root, "timeline_visuals", f"{digest}.json"),
+                ])
             thumb_dir = os.path.join(temp_root, "timeline_thumbnails")
             if os.path.isdir(thumb_dir):
-                timeline_cache_paths.extend(
-                    glob.glob(os.path.join(thumb_dir, f"launcher_{digest}_*.jpg"))
-                )
+                for digest in digests:
+                    timeline_cache_paths.extend(
+                        glob.glob(os.path.join(thumb_dir, f"launcher_{digest}_*.jpg"))
+                    )
             for candidate in timeline_cache_paths:
                 before_count = len(removed_paths)
                 self._remove_path_if_safe(candidate, allowed_roots=[temp_root], removed=removed_paths)
                 if len(removed_paths) > before_count:
                     removed_groups["Timeline media cache"].append(removed_paths[-1])
+
+            # The launcher card thumbnail has its own full-MD5 filename.
+            # It belongs solely to this source video, so cleaning this project
+            # can safely remove it without touching other recent projects.
+            launcher_thumb_root = os.path.join(temp_root, "launcher_thumbs")
+            for digest in full_digests:
+                before_count = len(removed_paths)
+                self._remove_path_if_safe(
+                    os.path.join(launcher_thumb_root, f"{digest}.jpg"),
+                    allowed_roots=[temp_root],
+                    removed=removed_paths,
+                )
+                if len(removed_paths) > before_count:
+                    removed_groups["Launcher media cache"].append(removed_paths[-1])
 
         self._reset_project_runtime_state()
 
@@ -14131,16 +14188,23 @@ class VideoTranslatorGUI(QMainWindow):
                 "Clean Project",
                 "No removable intermediate files were found for the current project.",
             )
-        self._return_to_launcher(project_removed_from_recent=True)
+        # The project directory above has intentionally been deleted. Do not
+        # persist the in-memory timeline while returning to the launcher,
+        # because that would recreate projects/<project_id>/timeline.json.
+        self._return_to_launcher(
+            project_removed_from_recent=True,
+            persist_project_data=False,
+        )
 
-    def _return_to_launcher(self, project_removed_from_recent=True):
+    def _return_to_launcher(self, project_removed_from_recent=True, *, persist_project_data=True):
         # Keep the complete saved timeline when returning to the launcher.
         # Optional tracks (Text, Logo, Blur, Mask) are part of the project
         # state and must be available when that project is reopened.
-        try:
-            self.persist_current_timeline_project_data()
-        except Exception:
-            pass
+        if persist_project_data:
+            try:
+                self.persist_current_timeline_project_data()
+            except Exception:
+                pass
         video_path = getattr(self, "_current_video_path", "")
         if not video_path:
             video_path = os.path.normpath(self.video_path_edit.text().strip())

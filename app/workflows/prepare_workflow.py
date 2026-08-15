@@ -5,7 +5,7 @@ import re
 import subprocess
 import time
 
-from runtime_paths import bin_path, subprocess_hidden_kwargs
+from runtime_paths import bin_path, models_path, subprocess_hidden_kwargs
 from runtime_profile import is_remote_profile
 from services import ChunkingService, EngineRuntime, ProjectService, SegmentRegroupService, SegmentService
 
@@ -340,7 +340,11 @@ class PrepareWorkflow:
         is_sensevoice = transcription_engine == "sensevoice"
         sensevoice_model_dir = ""
         if is_sensevoice:
-            sensevoice_model_dir = os.path.join(self.workspace_root, "models", "sensevoice")
+            # Development resources live beside the project; PyInstaller
+            # bundles the ready-to-use SenseVoice model under _internal.
+            # Never construct workspace_root/models directly here or the
+            # frozen worker will miss its bundled model at Transcript time.
+            sensevoice_model_dir = models_path("sensevoice")
         # Faster-Whisper accepts a model name (for example ``base``) or a
         # resolved local model directory. Do not prepend ``models/`` here:
         # doing so turns a selected Base/Small model into an invalid path and
