@@ -18,6 +18,54 @@ class PreviewController:
     def __init__(self, gui):
         self.gui = gui
 
+    def _extract_fast_preview_blur_regions(self, start_seconds: float, duration_seconds: float) -> list[dict]:
+        """Return visible B1 layers rebased to a trimmed Fast Preview clip.
+
+        Fast Preview first creates a new clip starting at zero, whereas B1
+        timings are stored in project/video time.  Rebase overlapping layers
+        so FFmpeg's ``between(t, start, end)`` gates remain correct.
+        """
+        result: list[dict] = []
+        timeline = getattr(getattr(self.gui, "timeline", None), "_timeline", None)
+        clip_start = max(0.0, float(start_seconds or 0.0))
+        clip_end = clip_start + max(0.1, float(duration_seconds or 0.0))
+        if timeline is None:
+            return result
+        for track in list(getattr(timeline, "tracks", []) or []):
+            track_type = getattr(getattr(track, "type", None), "value", getattr(track, "type", ""))
+            if str(track_type).lower() != "blur" or not bool(getattr(track, "visible", True)):
+                continue
+            for layer in list(getattr(track, "layers", []) or []):
+                if not bool(getattr(layer, "visible", True)):
+                    continue
+                try:
+                    layer_start = max(0.0, float(getattr(layer, "start", 0.0) or 0.0))
+                    layer_end = float(getattr(layer, "end", 0.0) or 0.0)
+                    # Legacy layers with no end are treated as active for the
+                    # whole source video, matching the preview player.
+                    if layer_end <= layer_start:
+                        layer_end = clip_end
+                    overlap_start = max(layer_start, clip_start)
+                    overlap_end = min(layer_end, clip_end)
+                    if overlap_end <= overlap_start:
+                        continue
+                    result.append({
+                        "x": float(getattr(layer, "position_x", 0.0) or 0.0),
+                        "y": float(getattr(layer, "position_y", 0.0) or 0.0),
+                        "width": float(getattr(layer, "width", 0.0) or 0.0),
+                        "height": float(getattr(layer, "height", 0.0) or 0.0),
+                        "blur_strength": float(getattr(layer, "blur_strength", 20.0) or 20.0),
+                        "blur_opacity": float(getattr(layer, "blur_opacity", 1.0) or 1.0),
+                        "pixelate": bool(getattr(layer, "pixelate", False)),
+                        "pixelate_size": int(getattr(layer, "pixelate_size", 12) or 12),
+                        "start": overlap_start - clip_start,
+                        "end": overlap_end - clip_start,
+                    })
+                except (TypeError, ValueError):
+                    continue
+        print(f"[Preview] Fast Preview extracted {len(result)} active blur layer(s).")
+        return result
+
     def _extract_overlay_layers(self):
         mask_regions = []
         logo_layers = []
@@ -999,6 +1047,7 @@ class PreviewController:
                 text_canvas_width, text_canvas_height = 1920, 1080
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
         mask_regions, logo_layers, text_layers = self._extract_overlay_layers()
+        blur_regions = self._extract_fast_preview_blur_regions(start_seconds, duration_seconds)
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         preview_output = os.path.join(out_dir, f"{video_name}_preview5s_{int(time.time())}.mp4")
         preview_srt_path = ""
@@ -1048,6 +1097,7 @@ class PreviewController:
             video_filter_state=self.gui.get_video_filter_state() if hasattr(self.gui, "get_video_filter_state") else {},
             original_audio_gain_db=original_audio_gain_db,
             mask_regions=mask_regions,
+            blur_regions=blur_regions,
             logo_layers=logo_layers,
             text_image_layers=text_image_layers,
             temp_dir=self.gui.get_project_temp_dir("preview"),

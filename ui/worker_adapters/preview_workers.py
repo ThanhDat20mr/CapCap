@@ -104,7 +104,7 @@ class PreviewMuxWorker(QThread):
 class QuickPreviewWorker(QThread):
     finished = Signal(str, str)
 
-    def __init__(self, video_path, output_path, mode, start_seconds, duration_seconds, srt_path="", ass_path="", audio_path="", subtitle_style=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, original_audio_gain_db=0.0, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, temp_dir=""):
+    def __init__(self, video_path, output_path, mode, start_seconds, duration_seconds, srt_path="", ass_path="", audio_path="", subtitle_style=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, original_audio_gain_db=0.0, mask_regions=None, blur_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, temp_dir=""):
         super().__init__()
         self.video_path = video_path
         self.output_path = output_path
@@ -123,6 +123,7 @@ class QuickPreviewWorker(QThread):
         self.video_filter_state = video_filter_state or {}
         self.original_audio_gain_db = float(original_audio_gain_db or 0.0)
         self.mask_regions = mask_regions or []
+        self.blur_regions = blur_regions or []
         self.logo_layers = logo_layers or []
         self.text_ass_path = text_ass_path
         self.text_image_layers = text_image_layers or []
@@ -170,6 +171,7 @@ class QuickPreviewWorker(QThread):
                     current_video,
                     self.ass_path,
                     self.output_path,
+                    blur_region=self.blur_regions,
                     mask_regions=self.mask_regions,
                     logo_layers=self.logo_layers,
                     text_ass_path=self.text_ass_path,
@@ -187,11 +189,13 @@ class QuickPreviewWorker(QThread):
                     raise RuntimeError("Failed to render subtitle preview clip.")
             elif self.mode in ("subtitle", "both") and self.srt_path and os.path.exists(self.srt_path):
                 engine = EngineRuntime()
+                subtitle_style = dict(self.subtitle_style)
+                subtitle_style["blur_region"] = self.blur_regions
                 ok = engine.embed_subtitles(
                     current_video,
                     self.srt_path,
                     self.output_path,
-                    subtitle_style=self.subtitle_style,
+                    subtitle_style=subtitle_style,
                     mask_regions=self.mask_regions,
                     logo_layers=self.logo_layers,
                     text_ass_path=self.text_ass_path,

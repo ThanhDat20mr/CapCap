@@ -1888,12 +1888,17 @@ def build_preview_panel(gui):
     workspace_widget = QWidget()
     workspace_widget.setObjectName("previewWorkspace")
     workspace_widget.setLayout(workspace_row)
+    gui.preview_workspace_widget = workspace_widget
+    gui.preview_workspace_layout = workspace_row
+    gui.timeline_card = timeline_card
     # 270 px preview + transport row + card margins/spacing.  This prevents
     # the native MPV surface from extending over the transport controls when
     # the splitter is dragged upward on a smaller window.
     workspace_widget.setMinimumHeight(350)
     # Keep the original practical minimum for the editor timeline.
     timeline_card.setMinimumHeight(360)
+    gui._responsive_workspace_minimum_height = 350
+    gui._responsive_timeline_minimum_height = 360
 
     gui.preview_timeline_splitter = QSplitter(Qt.Vertical)
     gui.preview_timeline_splitter.setObjectName("previewTimelineSplitter")
@@ -1923,7 +1928,9 @@ def build_preview_panel(gui):
         sizes = splitter.sizes()
         if len(sizes) != 2:
             return
-        min_timeline_height = 360
+        min_timeline_height = int(
+            getattr(gui, "_responsive_timeline_minimum_height", 360) or 360
+        )
         if sizes[1] >= min_timeline_height:
             return
         available = sum(sizes)
@@ -1945,7 +1952,7 @@ def build_preview_panel(gui):
             preview_height = int(round(available * 0.45))
             splitter.setSizes([preview_height, max(1, available - preview_height)])
 
-    # Apply the default after Qt knows the real window height.  From then on,
-    # the splitter preserves the user's allocation while resizing the window.
-    QtCore.QTimer.singleShot(0, _set_default_preview_timeline_sizes)
+    # MainWindow calls this from its first show event, when the splitter has
+    # real dimensions but before the editor's first visible paint.
+    gui._set_default_preview_timeline_sizes = _set_default_preview_timeline_sizes
     return right_panel

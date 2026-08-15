@@ -218,10 +218,15 @@ class VideoTranslatorGUI(QMainWindow):
             self.setWindowIcon(QIcon(self.logo_path))
         self.setWindowFlag(Qt.FramelessWindowHint)
         
-        # Maximize and prevent resizing
+        # Start maximized, but keep the window genuinely resizable.  Locking
+        # it to the first monitor's pixel size prevented Qt from adapting the
+        # layout when users moved between laptop/desktop displays or changed
+        # DPI scaling.
         self.setWindowState(Qt.WindowMaximized)
-        # To strictly prevent resizing after maximizing:
-        self.setFixedSize(QApplication.primaryScreen().availableGeometry().size())
+        self.setMinimumSize(1024, 640)
+        self._responsive_layout_pending = False
+        self._responsive_layout_mode = "desktop"
+        self._initial_layout_finalized = False
         
         # Stylesheet for Premium Dark Mode
         self.setStyleSheet("""
@@ -858,6 +863,169 @@ class VideoTranslatorGUI(QMainWindow):
 
     def setup_ui(self):
         build_main_window_ui(self)
+
+    def prepare_responsive_layout(self):
+        """Apply only the target-screen responsive profile while hidden."""
+        screen = self.screen() or QApplication.primaryScreen()
+        geometry = screen.availableGeometry() if screen is not None else None
+        if geometry is None:
+            self.apply_responsive_layout()
+            return
+        self.apply_responsive_layout(geometry.width(), geometry.height())
+
+    def prepare_initial_editor_layout(self):
+        """Resolve the complete first editor layout while the window is hidden.
+
+        Unlike the old post-show timers, this gives the central widget and
+        splitter their final screen-sized geometry first, activates Qt's
+        layouts, and then applies the initial 45/55 workspace allocation.
+        The first visible paint is therefore already the settled layout.
+        """
+        if getattr(self, "_initial_layout_finalized", False):
+            return
+        screen = self.screen() or QApplication.primaryScreen()
+        geometry = screen.availableGeometry() if screen is not None else None
+        if geometry is not None:
+            self.setGeometry(geometry)
+        self.ensurePolished()
+        central = self.centralWidget()
+        if central is not None:
+            central.setGeometry(self.contentsRect())
+            layout = central.layout()
+            if layout is not None:
+                layout.activate()
+        self.prepare_responsive_layout()
+        if central is not None and central.layout() is not None:
+            central.layout().activate()
+        set_default_splitter = getattr(self, "_set_default_preview_timeline_sizes", None)
+        if callable(set_default_splitter):
+            set_default_splitter()
+        self._initial_layout_finalized = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if getattr(self, "_initial_layout_finalized", False):
+            return
+        # Fallback for non-launcher entry points. The normal Launcher flow
+        # calls prepare_initial_editor_layout() before show().
+        self.prepare_initial_editor_layout()
+
+    def resizeEvent(self, event):
+        """Apply responsive layout changes after Qt settles a resize/DPI move."""
+        super().resizeEvent(event)
+        if not getattr(self, "_initial_layout_finalized", False):
+            return
+        if not getattr(self, "_responsive_layout_pending", False):
+            self._responsive_layout_pending = True
+            QTimer.singleShot(0, self.apply_responsive_layout)
+
+    def apply_responsive_layout(self, available_width=None, available_height=None):
+        """Keep the editor usable from 1280x720 upward without altering
+        the normal desktop composition.
+
+        Width controls the two side panels; available height controls the
+        Preview/Timeline minimums.  Content remains reachable through the
+        existing inspector and timeline scroll areas instead of being clipped.
+        """
+        self._responsive_layout_pending = False
+        central = self.centralWidget()
+        width = int(available_width or (central.width() if central is not None else self.width()) or self.width())
+        height = int(available_height or (central.height() if central is not None else self.height()) or self.height())
+        compact_width = width < 1500
+        compact_height = height < 850
+        tight_height = height < 760
+        mode = "compact" if (compact_width or compact_height) else "desktop"
+        self._responsive_layout_mode = mode
+
+        root_layout = getattr(self, "root_layout", None)
+        content_layout = getattr(self, "content_layout", None)
+        header_layout = getattr(self, "header_layout", None)
+        if root_layout is not None:
+            margin = 8 if compact_height else 15
+            root_layout.setContentsMargins(margin, margin, margin, margin)
+            root_layout.setSpacing(8 if compact_height else 15)
+        if content_layout is not None:
+            content_layout.setSpacing(8 if compact_width else 15)
+        if header_layout is not None:
+            header_layout.setContentsMargins(10 if compact_width else 18, 8 if compact_height else 14,
+                                             10 if compact_width else 18, 8 if compact_height else 14)
+            header_layout.setSpacing(6 if compact_width else 12)
+
+        # Narrower side panels leave a meaningful preview width on 1366/1280
+        # laptops while the cards themselves remain scrollable.
+        left_panel = getattr(self, "left_panel_scroll_area", None)
+        if left_panel is not None:
+            left_panel.setFixedWidth(320 if compact_width else 420)
+        inspector_width = 320 if compact_width else 400
+        inspector_max = 440 if compact_width else 560
+        self._responsive_inspector_width = inspector_width
+        for attr in (
+            "subtitle_inspector_card", "audio_inspector_card", "blur_inspector_card",
+            "logo_inspector_card", "mask_inspector_card", "text_inspector_card",
+            "default_inspector_card", "video_inspector_card",
+        ):
+            card = getattr(self, attr, None)
+            if card is not None:
+                card.setMinimumWidth(inspector_width)
+                card.setMaximumWidth(inspector_max)
+        self._sync_subtitle_inspector_shell_width()
+        stack = getattr(self, "inspector_stack", None)
+        if stack is not None:
+            for index in range(stack.count()):
+                scroll = stack.widget(index)
+                if isinstance(scroll, QScrollArea):
+                    scroll.setHorizontalScrollBarPolicy(
+                        Qt.ScrollBarAsNeeded if compact_width else Qt.ScrollBarAlwaysOff
+                    )
+
+        # The fixed minimums are intentionally reduced only on short displays.
+        # Timeline tracks remain available through their own scrollbars.
+        workspace_min = 350
+        timeline_min = 360
+        video_min = 270
+        if compact_height:
+            workspace_min, timeline_min, video_min = 260, 255, 190
+        if tight_height:
+            workspace_min, timeline_min, video_min = 220, 210, 170
+        self._responsive_workspace_minimum_height = workspace_min
+        self._responsive_timeline_minimum_height = timeline_min
+        workspace = getattr(self, "preview_workspace_widget", None)
+        timeline_card = getattr(self, "timeline_card", None)
+        video_view = getattr(self, "video_view", None)
+        if workspace is not None:
+            workspace.setMinimumHeight(workspace_min)
+        if timeline_card is not None:
+            timeline_card.setMinimumHeight(timeline_min)
+        if video_view is not None:
+            video_view.setMinimumHeight(video_min)
+
+        # Reduce header chrome in compact mode without removing actions.
+        for button in (getattr(self, "run_all_btn", None), getattr(self, "export_btn", None),
+                       getattr(self, "more_actions_btn", None)):
+            if button is not None:
+                button.setMinimumHeight(34 if compact_height else 42)
+        preview_button = getattr(self, "preview_5s_btn", None)
+        if preview_button is not None:
+            preview_button.setVisible(not compact_width)
+        more_button = getattr(self, "more_actions_btn", None)
+        if more_button is not None:
+            more_button.setMinimumWidth(84 if compact_width else 180)
+        logo = getattr(self, "header_logo_label", None)
+        if logo is not None:
+            logo.setVisible(not compact_width)
+        brand = getattr(self, "header_brand_label", None)
+        if brand is not None:
+            brand.setVisible(not compact_width)
+
+        # Ensure altered minimums are immediately reflected in splitter bounds
+        # and native preview overlay geometry.
+        splitter = getattr(self, "preview_timeline_splitter", None)
+        if splitter is not None:
+            sizes = splitter.sizes()
+            if len(sizes) == 2 and sum(sizes) > timeline_min and sizes[1] < timeline_min:
+                splitter.setSizes([max(1, sum(sizes) - timeline_min), timeline_min])
+        self.sync_left_panel_container_width()
+        QTimer.singleShot(0, self._resync_preview_region_overlays)
 
     def _run_deferred_startup_stage1(self):
         if getattr(self, "_deferred_startup_stage1_done", False):
@@ -4512,7 +4680,12 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "video_view") and hasattr(self.video_view, "set_preview_scale_mode"):
             self.video_view.set_preview_scale_mode(self.get_output_scale_mode_key())
         self._sync_preview_framing_to_player()
+        self._sync_preview_output_canvas_dimensions()
         self.update_subtitle_preview_style()
+        # update_subtitle_preview_style establishes the new output canvas
+        # render dimensions. Refresh Text afterwards so it cannot reuse the
+        # previous Ratio's height/scale payload.
+        self._refresh_text_layer_preview(getattr(getattr(self, "timeline", None), "_selected_layer_id", ""))
         self.apply_preview_blur_region()
         self.refresh_ui_state()
 
@@ -4520,12 +4693,15 @@ class VideoTranslatorGUI(QMainWindow):
         if hasattr(self, "video_view") and hasattr(self.video_view, "set_preview_scale_mode"):
             self.video_view.set_preview_scale_mode(self.get_output_scale_mode_key())
         self._sync_preview_framing_to_player()
+        self._sync_preview_output_canvas_dimensions()
         self.update_subtitle_preview_style()
+        self._refresh_text_layer_preview(getattr(getattr(self, "timeline", None), "_selected_layer_id", ""))
         self.apply_preview_blur_region()
         self.refresh_ui_state()
 
     def on_preview_framing_changed(self, *_args):
         self._sync_preview_framing_to_player()
+        self._refresh_text_layer_preview(getattr(getattr(self, "timeline", None), "_selected_layer_id", ""))
         self.apply_preview_blur_region()
         self.refresh_ui_state()
 
@@ -4996,6 +5172,18 @@ class VideoTranslatorGUI(QMainWindow):
             except Exception:
                 pass
         return source_w, source_h
+
+    def _sync_preview_output_canvas_dimensions(self):
+        """Set the current output canvas before any preview-layer refresh.
+
+        Text can exist without TS1 subtitles, so it must not depend on the
+        subtitle-style path to learn that Ratio/Quality changed.
+        """
+        view = getattr(self, "video_view", None)
+        if view is None or not hasattr(view, "set_subtitle_render_dimensions"):
+            return
+        width, height = self._subtitle_render_dimensions()
+        view.set_subtitle_render_dimensions(width, height)
 
     def _resolved_subtitle_font_name(self, requested_font: str) -> str:
         """Use Qt's actual font fallback for both preview and ASS export.
@@ -6907,7 +7095,14 @@ class VideoTranslatorGUI(QMainWindow):
         if render_h <= 1:
             _render_w, render_h = self._subtitle_render_dimensions()
         preview_rect = self.video_view.get_preview_canvas_rect()
-        preview_scale = max(1.0, float(preview_rect.height() or self.video_view.height() or 1.0)) / max(1, render_h)
+        # Preview canvases can be smaller than the output canvas on laptops
+        # or after moving the Preview/Timeline splitter. Preserve the real
+        # source-to-preview scale in both directions; the old 1.0 floor kept
+        # Text at export size instead of matching the visible canvas.
+        preview_scale = max(
+            0.01,
+            float(preview_rect.height() or self.video_view.height() or 1.0) / max(1, render_h),
+        )
         preview_text_scale = preview_scale * TEXT_LAYER_EXPORT_SCALE
         items = []
         is_editable = (
@@ -9497,7 +9692,8 @@ class VideoTranslatorGUI(QMainWindow):
         if bool(getattr(self, "_inspector_collapsed", False)):
             target_width = handle_width
         else:
-            widest = 400
+            responsive_width = int(getattr(self, "_responsive_inspector_width", 0) or 0)
+            widest = responsive_width if responsive_width > 0 else 400
             for attr in ("subtitle_inspector_card", "audio_inspector_card", "default_inspector_card"):
                 card = getattr(self, attr, None)
                 if card is None:
@@ -9510,11 +9706,14 @@ class VideoTranslatorGUI(QMainWindow):
                     if raw_min > 5000 or raw_min < 0:
                         raw_min = 0
                     raw_hint = int(card.sizeHint().width() or 0)
-                    candidate = raw_max or raw_hint or raw_min or 400
+                    candidate = raw_max or raw_hint or raw_min or widest
                     widest = max(widest, candidate)
                 except Exception:
                     pass
-            widest = max(400, min(widest, 560))
+            if responsive_width > 0:
+                widest = max(responsive_width, min(widest, 440))
+            else:
+                widest = max(400, min(widest, 560))
             target_width = handle_width + widest
         shell.setMinimumWidth(target_width)
         shell.setMaximumWidth(target_width)
@@ -14145,6 +14344,7 @@ def _relaunch_launcher():
         return
     LauncherWindow.add_recent(None, video_path)
     new_window = VideoTranslatorGUI()
+    new_window.prepare_initial_editor_layout()
     new_window.show()
     def _init():
         new_window._current_video_path = os.path.abspath(video_path)

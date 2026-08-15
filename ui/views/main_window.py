@@ -31,16 +31,19 @@ def build_main_window_ui(gui):
     root_layout = QVBoxLayout(central_widget)
     root_layout.setContentsMargins(15, 15, 15, 15)
     root_layout.setSpacing(15)
+    gui.root_layout = root_layout
 
     scroll_area = _build_left_panel(gui)
     root_layout.addWidget(_build_header_bar(gui))
 
     content_layout = QHBoxLayout()
     content_layout.setSpacing(15)
+    gui.content_layout = content_layout
     right_panel = build_preview_panel(gui)
 
     content_layout.addWidget(scroll_area)
     content_layout.addWidget(right_panel, 1)
+    gui.right_panel = right_panel
     root_layout.addLayout(content_layout, 1)
 
     _connect_ui_signals(gui)
@@ -49,6 +52,10 @@ def build_main_window_ui(gui):
     _initialize_ui_state(gui)
     QTimer.singleShot(0, gui.sync_left_panel_container_width)
     QTimer.singleShot(0, gui.sync_runtime_log_view)
+    # Configure the static responsive profile before the editor is shown.
+    # The first show event only finalizes geometry that Qt cannot know until
+    # the window has a real viewport.
+    gui.prepare_responsive_layout()
 
 
 def _build_header_bar(gui):
@@ -57,6 +64,8 @@ def _build_header_bar(gui):
     layout = QHBoxLayout(header)
     layout.setContentsMargins(18, 14, 18, 14)
     layout.setSpacing(12)
+    gui.header_bar = header
+    gui.header_layout = layout
 
     logo_label = QLabel()
     logo_label.setFixedSize(34, 34)
@@ -67,11 +76,13 @@ def _build_header_bar(gui):
             white_logo = _tint_pixmap(logo_pixmap, QColor("#FFFFFF"))
             logo_label.setPixmap(white_logo.scaled(30, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation))
     layout.addWidget(logo_label)
+    gui.header_logo_label = logo_label
 
     brand_label = QLabel("CapCap")
     brand_label.setObjectName("heroTitle")
     brand_label.setStyleSheet("color: #ffffff; font-size: 18px; font-weight: 800;")
     layout.addWidget(brand_label)
+    gui.header_brand_label = brand_label
 
     gui.project_title_label = QLabel("Project: No video selected")
     gui.project_title_label.setObjectName("statusHeadline")
@@ -109,6 +120,8 @@ def _build_header_bar(gui):
     gui.download_subtitle_action.triggered.connect(gui.download_subtitle)
     gui.download_original_action = more_menu.addAction("Export Source SRT…")
     gui.download_original_action.triggered.connect(gui.download_original_script)
+    gui.preview_5s_action = more_menu.addAction("Fast Preview (5 seconds)")
+    gui.preview_5s_action.triggered.connect(gui.preview_5s_btn.click)
     more_menu.addSeparator()
     gui.clean_project_action = more_menu.addAction("Clean")
     gui.clean_project_action.triggered.connect(gui.clean_current_project)

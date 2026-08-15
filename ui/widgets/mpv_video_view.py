@@ -615,41 +615,76 @@ class _BlurRegionOverlayWindow(QWidget):
                 return True
         return False
 
+    def _source_display_rect(self) -> QRectF:
+        """Preview-space rectangle occupied by the uncropped source video."""
+        if self._target_view is not None:
+            rect = self._target_view.get_video_content_rect()
+            if rect.width() > 0 and rect.height() > 0:
+                return QRectF(rect)
+        return QRectF(0, 0, float(self.width()), float(self.height()))
+
+    def _visible_canvas_rect(self) -> QRectF:
+        """The selected output canvas actually visible in the preview."""
+        if self._target_view is not None:
+            rect = self._target_view.get_preview_canvas_rect()
+            if rect.width() > 0 and rect.height() > 0:
+                return QRectF(rect)
+        return QRectF(0, 0, float(self.width()), float(self.height()))
+
     def region_rect(self, index: int | None = None) -> QRectF:
+        """Map a source-normalized region into the visible output canvas.
+
+        The source rect can extend beyond the canvas in Fill mode.  Preview
+        interaction must use only the visible portion, matching the export
+        source-to-canvas transform and the Text layer's canvas bounds.
+        """
         if index is None:
             index = self._active_index
         if index < 0 or index >= len(self._regions):
             return QRectF()
-        content_rect = self._target_view.get_video_content_rect() if self._target_view else QRectF(0, 0, float(self.width()), float(self.height()))
+        content_rect = self._source_display_rect()
         width = max(1.0, float(content_rect.width()))
         height = max(1.0, float(content_rect.height()))
         normalized_rect = self._regions[index]
-        return QRectF(
+        mapped = QRectF(
             content_rect.x() + normalized_rect.x() * width,
             content_rect.y() + normalized_rect.y() * height,
             normalized_rect.width() * width,
             normalized_rect.height() * height,
         )
+        return mapped.intersected(self._visible_canvas_rect())
 
     def _set_region_rect(self, rect: QRectF, index: int | None = None):
         if index is None:
             index = self._active_index
         if index < 0 or index >= len(self._regions):
             return
-        content_rect = self._target_view.get_video_content_rect() if self._target_view else QRectF(0, 0, float(self.width()), float(self.height()))
+        content_rect = self._source_display_rect()
+        visible_rect = self._visible_canvas_rect()
         width = max(1.0, float(content_rect.width()))
         height = max(1.0, float(content_rect.height()))
+        # Stored geometry remains source-normalized, but editing is bounded
+        # by the output canvas. In Fill mode the source display rect is wider
+        # or taller than the canvas, so using it as the bound exposed areas
+        # that export later crops away.
+        bounds = visible_rect if visible_rect.width() > 0 and visible_rect.height() > 0 else content_rect
         bounded = QRectF(rect)
-        bounded.setWidth(max(self.MIN_WIDTH, bounded.width()))
-        bounded.setHeight(max(self.MIN_HEIGHT, bounded.height()))
-        if bounded.left() < content_rect.left():
-            bounded.moveLeft(content_rect.left())
-        if bounded.top() < content_rect.top():
-            bounded.moveTop(content_rect.top())
-        if bounded.right() > content_rect.right():
-            bounded.moveRight(content_rect.right())
-        if bounded.bottom() > content_rect.bottom():
-            bounded.moveBottom(content_rect.bottom())
+        min_width = min(float(self.MIN_WIDTH), max(1.0, bounds.width()))
+        min_height = min(float(self.MIN_HEIGHT), max(1.0, bounds.height()))
+        bounded.setWidth(max(min_width, bounded.width()))
+        bounded.setHeight(max(min_height, bounded.height()))
+        if bounded.width() > bounds.width():
+            bounded.setWidth(bounds.width())
+        if bounded.height() > bounds.height():
+            bounded.setHeight(bounds.height())
+        if bounded.left() < bounds.left():
+            bounded.moveLeft(bounds.left())
+        if bounded.top() < bounds.top():
+            bounded.moveTop(bounds.top())
+        if bounded.right() > bounds.right():
+            bounded.moveRight(bounds.right())
+        if bounded.bottom() > bounds.bottom():
+            bounded.moveBottom(bounds.bottom())
 
         self._regions[index] = QRectF(
             max(0.0, (bounded.x() - content_rect.x()) / width),
@@ -1306,6 +1341,10 @@ class MpvVideoView(QWidget):
         self.preview_scale_mode = "fit"
         self.preview_fill_focus_x = 0.5
         self.preview_fill_focus_y = 0.5
+        # Fill framing is a project/output setting. It must not change from
+        # ordinary mouse drags over the preview; a future explicit framing
+        # tool can opt in through set_preview_framing_edit_enabled().
+        self._preview_framing_edit_enabled = False
         self._framing_drag_active = False
         self._framing_drag_start = QPointF()
         self._framing_drag_focus = (0.5, 0.5)
@@ -1555,6 +1594,8 @@ class MpvVideoView(QWidget):
         self.reposition_subtitle()
         self.blur_overlay.sync_to_view()
         self.mask_overlay.sync_to_view()
+        if self.text_overlay is not None:
+            self.text_overlay.sync_to_view()
         self.update()
 
     def set_preview_scale_mode(self, scale_mode: str):
@@ -1565,9 +1606,14 @@ class MpvVideoView(QWidget):
         self.reposition_subtitle()
         self.blur_overlay.sync_to_view()
         self.mask_overlay.sync_to_view()
+        if self.text_overlay is not None:
+            self.text_overlay.sync_to_view()
         self.update()
         self.reposition_subtitle()
         self.blur_overlay.sync_to_view()
+        self.mask_overlay.sync_to_view()
+        if self.text_overlay is not None:
+            self.text_overlay.sync_to_view()
         self.update()
 
     def set_preview_fill_focus(self, focus_x: float, focus_y: float):
@@ -1578,6 +1624,9 @@ class MpvVideoView(QWidget):
         self._update_ratio_badge()
         self.reposition_subtitle()
         self.blur_overlay.sync_to_view()
+        self.mask_overlay.sync_to_view()
+        if self.text_overlay is not None:
+            self.text_overlay.sync_to_view()
         self.update()
 
     def _video_surface_rect(self):
@@ -1763,11 +1812,20 @@ class MpvVideoView(QWidget):
         item.update()
 
     def _can_drag_framing(self) -> bool:
+        if not bool(getattr(self, "_preview_framing_edit_enabled", False)):
+            return False
         if str(getattr(self, "preview_scale_mode", "fit") or "fit").strip().lower() != "fill":
             return False
         canvas_rect = self.get_preview_canvas_rect()
         content_rect = self.get_video_content_rect()
         return content_rect.width() > canvas_rect.width() + 0.5 or content_rect.height() > canvas_rect.height() + 0.5
+
+    def set_preview_framing_edit_enabled(self, enabled: bool):
+        """Opt in to Fill-focus dragging from a dedicated future tool only."""
+        self._preview_framing_edit_enabled = bool(enabled)
+        if not self._preview_framing_edit_enabled:
+            self._framing_drag_active = False
+            self.unsetCursor()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self._can_drag_framing():

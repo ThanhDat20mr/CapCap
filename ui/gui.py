@@ -206,6 +206,9 @@ if __name__ == "__main__":
 
     window = VideoTranslatorGUI()
     runtime_logs.attach(window)
+    # Resolve all responsive sizes and splitter geometry while the editor is
+    # hidden, so the first frame after the Launcher is already settled.
+    window.prepare_initial_editor_layout()
     window.show()
 
     def _init_video():
