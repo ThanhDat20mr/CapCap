@@ -28,7 +28,9 @@ from runtime_paths import asset_path, subprocess_hidden_kwargs, workspace_root
 
 
 def _recent_projects_path():
-    return os.path.join(os.path.dirname(__file__), "..", "..", "recent_projects.json")
+    # ``__file__`` lives inside ``_internal`` in a frozen build. Recent
+    # project data belongs beside the executable, not inside bundled assets.
+    return os.path.join(workspace_root(), "recent_projects.json")
 
 
 def _load_recent_projects(settings=None):
@@ -53,7 +55,7 @@ def _project_pipeline_status(video_path: str) -> tuple[str, str]:
     name = os.path.splitext(os.path.basename(video_path))[0] or "project"
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").lower() or "project"
     digest = hashlib.sha1(os.path.abspath(video_path).encode("utf-8")).hexdigest()[:8]
-    state_path = os.path.join(os.path.dirname(__file__), "..", "..", "projects", f"{slug}_{digest}", "project.json")
+    state_path = os.path.join(workspace_root(), "projects", f"{slug}_{digest}", "project.json")
     try:
         with open(os.path.normpath(state_path), "r", encoding="utf-8") as handle:
             state = json.load(handle)
@@ -332,7 +334,7 @@ class LauncherWindow(QDialog):
         super().__init__()
         self.selected_video = ""
         self.selected_device = "cuda"
-        self._thumbnail_dir = os.path.join(os.path.dirname(__file__), "..", "..", "temp", "launcher_thumbs")
+        self._thumbnail_dir = os.path.join(workspace_root(), "temp", "launcher_thumbs")
 
         from runtime_paths import asset_path
         from PySide6.QtGui import QIcon
@@ -546,7 +548,7 @@ class LauncherWindow(QDialog):
 
         self.about_btn = QPushButton("About / Help")
         self.about_btn.setMinimumHeight(44)
-        self.about_btn.setMinimumWidth(90)
+        self.about_btn.setMinimumWidth(145)
         self.about_btn.setStyleSheet("""
             QPushButton {
                 background-color: #22344d;
@@ -831,7 +833,7 @@ class LauncherWindow(QDialog):
 
     def _on_open_project_folder(self):
         from PySide6.QtWidgets import QMessageBox
-        projects_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "projects"))
+        projects_dir = os.path.join(workspace_root(), "projects")
         try:
             os.makedirs(projects_dir, exist_ok=True)
             if hasattr(os, "startfile"):
@@ -857,21 +859,57 @@ class LauncherWindow(QDialog):
         if confirm.exec() != QMessageBox.Yes:
             return
 
-        root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        # Keep generated project/cache data in the explicit writable runtime
+        # root rather than deriving it from a module location.
+        root = workspace_root()
         targets = [
             os.path.join(root, "projects"),
             os.path.join(root, "temp"),
         ]
+
+        # Project cards can still own loaded thumbnail pixmaps from temp.
+        # Detach them and process their deferred deletion before removing the
+        # cache tree; this avoids a common first-click Windows file lock.
+        try:
+            from PySide6.QtWidgets import QApplication
+            for index in reversed(range(self.grid.count())):
+                item = self.grid.takeAt(index)
+                widget = item.widget() if item is not None else None
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+            QApplication.processEvents()
+        except Exception:
+            pass
+
         removed = 0
         errors = []
         for target in targets:
             if not os.path.exists(target):
                 continue
-            try:
-                shutil.rmtree(target)
-                removed += 1
-            except Exception as exc:
-                errors.append(f"{os.path.basename(target)}: {exc}")
+            last_error = None
+            # FFmpeg/thumbnail work can release a file just after the user
+            # confirms cleanup. Retry briefly instead of making the user
+            # click Clean Video Data a second time.
+            for attempt in range(5):
+                try:
+                    shutil.rmtree(target)
+                    removed += 1
+                    last_error = None
+                    break
+                except FileNotFoundError:
+                    last_error = None
+                    break
+                except OSError as exc:
+                    last_error = exc
+                    if attempt < 4:
+                        try:
+                            QApplication.processEvents()
+                        except Exception:
+                            pass
+                        time.sleep(0.25 * (attempt + 1))
+            if last_error is not None:
+                errors.append(f"{os.path.basename(target)}: {last_error}")
         for target in targets:
             try:
                 os.makedirs(target, exist_ok=True)
