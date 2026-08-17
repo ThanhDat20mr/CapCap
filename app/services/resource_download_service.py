@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 
-from runtime_paths import app_path, join_root, models_path, subprocess_hidden_kwargs
+from runtime_paths import app_path, bin_path, bundle_root, join_root, models_path, subprocess_hidden_kwargs
 
 
 class ResourceDownloadService:
@@ -213,6 +215,36 @@ class ResourceDownloadService:
             return "installed"
         return "partial"
 
+    def _usable_piper_voice_count(self, language: str = "") -> int:
+        """Count local Piper voices that can actually be loaded.
+
+        Resource-pack completeness is not meaningful to users: they may
+        intentionally install only a subset or add their own voices. A voice
+        is usable when its ONNX model and matching JSON config are both
+        present in the language's storage folder.
+        """
+        normalized_language = str(language or "").strip().lower().split("-", 1)[0]
+        folder_name = "piper-en" if normalized_language == "en" else "piper"
+        roots = [
+            os.path.join(self.workspace_root, "models", folder_name),
+            os.path.join(bundle_root(), "models", folder_name),
+        ]
+        seen_names: set[str] = set()
+        for root in roots:
+            if not os.path.isdir(root):
+                continue
+            try:
+                for model_path in Path(root).rglob("*.onnx"):
+                    if not model_path.is_file() or model_path.stat().st_size <= 0:
+                        continue
+                    config_path = Path(f"{model_path}.json")
+                    if not config_path.is_file() or config_path.stat().st_size <= 0:
+                        continue
+                    seen_names.add(str(model_path.name).lower())
+            except OSError:
+                continue
+        return len(seen_names)
+
     def _whisper_cache_root(self) -> str:
         return models_path("faster_whisper")
 
@@ -256,6 +288,21 @@ class ResourceDownloadService:
     ]
 
     def _ocr_model_dir(self) -> str:
+        # Do not make a lightweight availability check depend on importing the
+        # entire RapidOCR runtime. In a frozen build a missing lazy submodule
+        # used to turn an import exception into the misleading message
+        # "Rapid OCR engine missing", even when all bundled models existed.
+        candidates = [
+            os.path.join(bundle_root(), "rapidocr"),
+            os.path.join(self.workspace_root, "rapidocr"),
+        ]
+        import sys
+        meipass = getattr(sys, "_MEIPASS", "") or ""
+        if meipass:
+            candidates.append(os.path.join(meipass, "rapidocr"))
+        for candidate in candidates:
+            if os.path.isdir(os.path.join(candidate, "models")):
+                return candidate
         try:
             import rapidocr
             models_dir = os.path.dirname(rapidocr.__file__)
@@ -263,12 +310,6 @@ class ResourceDownloadService:
                 return models_dir
         except Exception:
             pass
-        import sys
-        meipass = getattr(sys, "_MEIPASS", "") or ""
-        if meipass:
-            bundled = os.path.join(meipass, "rapidocr")
-            if os.path.isdir(os.path.join(bundled, "models")):
-                return bundled
         return ""
 
     def _ocr_model_status(self) -> str:
@@ -284,6 +325,110 @@ class ResourceDownloadService:
 
     def is_ocr_ready(self) -> bool:
         return self._ocr_model_status() == "installed"
+
+    @staticmethod
+    def is_sensevoice_runtime_ready() -> bool:
+        """Verify the bundled runtime can be imported before entering editor."""
+        try:
+            import sherpa_onnx  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    def validate_sensevoice_runtime(self) -> list[tuple[str, str]]:
+        """Return actionable first-run checks for the bundled default ASR."""
+        issues: list[tuple[str, str]] = []
+        model_dir = models_path("sensevoice")
+        model_path = os.path.join(model_dir, "model.int8.onnx")
+        tokens_path = os.path.join(model_dir, "tokens.txt")
+        if not os.path.isfile(model_path):
+            issues.append(("sensevoice:model", f"SenseVoice model is missing: {model_path}"))
+        if not os.path.isfile(tokens_path):
+            issues.append(("sensevoice:tokens", f"SenseVoice tokens file is missing: {tokens_path}"))
+        try:
+            import sherpa_onnx  # noqa: F401
+        except Exception as exc:
+            issues.append(("sensevoice:runtime", f"SenseVoice runtime could not load: {exc}"))
+        silero_path = bin_path("silero_vad.onnx")
+        if not os.path.isfile(silero_path):
+            issues.append(("sensevoice:vad", f"Silero VAD model is missing: {silero_path}"))
+        return issues
+
+    def validate_ocr_runtime(self) -> list[tuple[str, str]]:
+        """Verify selected OCR can start, not just that a model folder exists."""
+        issues: list[tuple[str, str]] = []
+        model_dir = self._ocr_model_dir()
+        if self._ocr_model_status() != "installed":
+            issues.append(("ocr:models", f"RapidOCR models are missing from: {model_dir or 'bundled OCR resources'}"))
+        try:
+            from rapidocr import RapidOCR  # noqa: F401
+        except Exception as exc:
+            issues.append(("ocr:runtime", f"RapidOCR runtime could not load: {exc}"))
+        return issues
+
+    def validate_piper_voice_runtime(self, voice_id: str) -> list[tuple[str, str]]:
+        """Check the chosen local Piper voice before a default Both run."""
+        voice_id = str(voice_id or "").strip()
+        if not voice_id or voice_id.startswith(("edge:", "f5:")):
+            return []
+        issues: list[tuple[str, str]] = []
+        entry = self._find_voice_entry(voice_id)
+        if not entry:
+            return [(f"voice:{voice_id}", f"Selected local voice is not available: {voice_id}")]
+        model_path, config_path = self._voice_local_paths(entry)
+        if not os.path.isfile(model_path):
+            issues.append((f"voice:{voice_id}:model", f"Piper voice model is missing: {model_path}"))
+        if not os.path.isfile(config_path):
+            issues.append((f"voice:{voice_id}:config", f"Piper voice config is missing: {config_path}"))
+        try:
+            from piper import PiperVoice  # noqa: F401
+        except Exception as exc:
+            issues.append(("piper:runtime", f"Piper runtime could not load: {exc}"))
+        return issues
+
+    def validate_pipeline_runtime(self) -> list[tuple[str, str]]:
+        """Check local executables and writable working folders before a worker starts."""
+        issues: list[tuple[str, str]] = []
+        ffmpeg_path = bin_path("ffmpeg", "ffmpeg.exe")
+        if not os.path.isfile(ffmpeg_path):
+            issues.append(("ffmpeg", f"FFmpeg is missing: {ffmpeg_path}"))
+        else:
+            try:
+                result = subprocess.run(
+                    [ffmpeg_path, "-version"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                    **subprocess_hidden_kwargs(),
+                )
+                if result.returncode != 0:
+                    issues.append(("ffmpeg", "FFmpeg could not start. Reinstall or re-extract CapCap."))
+            except Exception as exc:
+                issues.append(("ffmpeg", f"FFmpeg could not start: {exc}"))
+
+        # A GUI can launch from a protected folder, then fail only when the
+        # worker first writes project/temp output. Detect that exact case up
+        # front and give the user a recovery path instead of a generic 500.
+        for directory_name in ("projects", "temp"):
+            target_dir = os.path.join(self.workspace_root, directory_name)
+            probe_path = os.path.join(target_dir, f".capcap_write_probe_{uuid.uuid4().hex}")
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+                with open(probe_path, "x", encoding="utf-8") as handle:
+                    handle.write("ok")
+                os.remove(probe_path)
+            except OSError as exc:
+                try:
+                    if os.path.exists(probe_path):
+                        os.remove(probe_path)
+                except OSError:
+                    pass
+                issues.append((
+                    f"workspace:{directory_name}",
+                    f"CapCap cannot write its {directory_name} folder ({target_dir}): {exc}. "
+                    "Move CapCap to a writable folder or adjust folder permissions.",
+                ))
+        return issues
 
     @staticmethod
     def is_nvidia_driver_available() -> bool:
@@ -310,9 +455,15 @@ class ResourceDownloadService:
         dev = str(device or "").strip().lower()
         if dev == "cpu":
             return [
-                ("ocr", "Rapid OCR engine"),
+                # SenseVoice is the bundled default transcription engine.
+                # RapidOCR is validated only when the user explicitly picks
+                # OCR as the subtitle source.
+                ("sensevoice:model", "SenseVoice model"),
+                ("sensevoice:runtime", "SenseVoice runtime"),
             ]
         return [
+            ("sensevoice:model", "SenseVoice model"),
+            ("sensevoice:runtime", "SenseVoice runtime"),
             ("cuda:whisper", "CUDA runtime pack"),
             ("nvidia_driver", "NVIDIA driver"),
         ]
@@ -321,6 +472,8 @@ class ResourceDownloadService:
         rid = str(requirement_id or "").strip()
         if rid == "ocr":
             return self.is_ocr_ready()
+        if rid == "sensevoice:runtime":
+            return self.is_sensevoice_runtime_ready()
         if rid == "nvidia_driver":
             return self.is_nvidia_driver_available()
         return self.is_resource_installed(rid)
@@ -377,12 +530,13 @@ class ResourceDownloadService:
                 "id": "cuda:whisper",
                 "name": "GPU Acceleration Pack (CUDA 12, ~1.6 GB)",
                 "kind": "cuda",
+                "required_for": "GPU Mode",
                 "status": "installed" if self.is_resource_installed("cuda:whisper") else "missing",
                 "target_dir": join_root("bin", "cuda12_fw"),
                 "download_url": self._hf_blob_url("zipResource/cuda12_fw.zip"),
                 "expected_filename": "cuda12_fw.zip",
                 "auto_download_supported": True,
-                "description": "GPU runtime used to accelerate supported local processing.",
+                "description": "Required for GPU Mode. Provides the CUDA runtime used to accelerate supported local processing.",
             },
             {
                 "id": "diarization:segmentation",
@@ -409,33 +563,39 @@ class ResourceDownloadService:
         ]
 
         vietnamese_entries = self._piper_voice_entries("vi")
-        if vietnamese_entries:
+        vietnamese_count = self._usable_piper_voice_count("vi")
+        if vietnamese_entries or vietnamese_count:
+            count = vietnamese_count
             resources.append(
                 {
                     "id": "voice:pack",
-                    "name": "Local Vietnamese Voices (Piper)",
+                    "name": "Vietnamese Voices (Piper)",
                     "kind": "voice",
-                    "status": self._voice_pack_status("vi"),
+                    "status": "installed" if count else "missing",
+                    "status_label": f"{count} voice{'s' if count != 1 else ''} available",
                     "target_dir": models_path("piper"),
                     "download_url": self._hf_blob_url("zipResource/piper.zip"),
                     "expected_filename": "piper.zip",
                     "auto_download_supported": True,
-                    "description": "Offline Vietnamese voices used for text-to-speech dubbing.",
+                    "description": "Offline Vietnamese voices detected in the Piper storage folder.",
                 }
             )
         english_entries = self._piper_voice_entries("en")
-        if english_entries:
+        english_count = self._usable_piper_voice_count("en")
+        if english_entries or english_count:
+            count = english_count
             resources.append(
                 {
                     "id": "voice:pack-en",
                     "name": "English Voices (Piper)",
                     "kind": "voice",
-                    "status": self._voice_pack_status("en"),
+                    "status": "installed" if count else "missing",
+                    "status_label": f"{count} voice{'s' if count != 1 else ''} available",
                     "target_dir": models_path("piper-en"),
                     "download_url": self._hf_blob_url("zipResource/piper-en.zip"),
                     "expected_filename": "piper-en.zip",
                     "auto_download_supported": True,
-                    "description": "Offline English voices used for text-to-speech dubbing.",
+                    "description": "Offline English voices detected in the Piper storage folder.",
                 }
             )
         return resources

@@ -549,6 +549,10 @@ def build_start_group(gui, left_layout):
     fast_voice_layout.addWidget(QLabel("Voice type"))
     fast_voice_layout.addWidget(gui.voice_gender_combo)
     voice_setup_layout.addWidget(gui.fast_voice_panel)
+    # Voice preview belongs to the global/default voice configuration.  It is
+    # deliberately kept outside the per-speaker diarization controls below.
+    voice_setup_layout.addWidget(gui.preview_voice_btn)
+    voice_setup_layout.addWidget(gui.voice_preview_meta_label)
     # These legacy tuning controls are retained for internal compatibility
     # after removing the Voice Tuning panel, but must never become orphaned
     # top-level widgets.
@@ -583,12 +587,6 @@ def build_start_group(gui, left_layout):
     gui.detected_speakers_card.hide()
     voice_layout.addWidget(gui.detected_speakers_card)
 
-    voice_preview_card, voice_preview_layout = _section_card()
-    voice_preview_title = QLabel("Preview")
-    voice_preview_title.setObjectName("sectionTitle")
-    voice_preview_layout.addWidget(voice_preview_title)
-    voice_preview_layout.addWidget(gui.preview_voice_btn)
-    voice_layout.addWidget(voice_preview_card)
     voice_page.layout().addWidget(voice_card)
 
     subtitle_card, subtitle_layout = _build_collapsible_section("Subtitle Style", start_expanded=True)

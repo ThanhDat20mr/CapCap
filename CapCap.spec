@@ -5,7 +5,7 @@ import os
 import glob as _glob
 import faster_whisper
 import rapidocr
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 project_root = Path(r"D:\CodingTime\CapCap")
 ui_root = project_root / "ui"
@@ -44,6 +44,13 @@ datas = [
     (str(project_root / "ui" / "views" / "editor"), "views/editor"),
 ]
 datas += collect_data_files("piper")
+
+# RapidOCR selects its ONNX implementation through runtime configuration.
+# Listing only ``rapidocr`` misses these dynamically imported modules in a
+# frozen worker and can make a bundled OCR install look intermittently
+# unavailable. Collect the package's submodules, while leaving the unused
+# Torch backend excluded by the existing package exclusions below.
+rapidocr_hiddenimports = collect_submodules("rapidocr")
 
 # Exclude heavy packages we don't use
 excludes = [
@@ -156,7 +163,7 @@ a = Analysis(
         "cv2",
         "omegaconf",
         "pyclipper",
-    ],
+    ] + rapidocr_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
