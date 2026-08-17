@@ -54,14 +54,12 @@ class TranslationOrchestrator:
                     translated_texts, providers_used, batch_warnings = self._run_ai_batches(
                         polisher=polisher,
                         provider_type=provider_type,
-                        base_segments=segments,
                         source_texts=source_texts,
                         translated_texts=None,
                         src_lang=normalized_src,
                         target_lang=target_lang,
                         style_instruction=merged_style,
                         polish_batch_size=polish_batch_size,
-                        batch_callback=batch_callback,
                     )
                     warnings.extend(batch_warnings)
 
@@ -256,14 +254,12 @@ class TranslationOrchestrator:
         *,
         polisher,
         provider_type: str,
-        base_segments: list[dict],
         source_texts: list[str],
         translated_texts: list[str] | None,
         src_lang: str,
         target_lang: str,
         style_instruction: str,
         polish_batch_size: int,
-        batch_callback=None,
     ) -> tuple[list[str], list[str], list[str]]:
         warnings = []
         providers_used = set()
