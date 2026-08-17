@@ -20,6 +20,7 @@ datas = [
     (str(project_root / "app" / "voice_preview_catalog.json"), "app"),
     (str(project_root / "app" / "voice_download_catalog.json"), "app"),
     (str(project_root / "app" / "voice_preview_catalog.release.json"), "app"),
+    (str(project_root / "app" / "translation" / "prompts"), "app/translation/prompts"),
     (str(project_root / "models" / "piper" / "ngochuyen.onnx"), "models/piper"),
     (str(project_root / "models" / "piper" / "ngochuyen.onnx.json"), "models/piper"),
     (str(project_root / "models" / "pyannote" / "model.int8.onnx"), "models/pyannote"),
@@ -113,7 +114,6 @@ a = Analysis(
         "engines.demucs_adapter",
         "engines.ocr_adapter",
         # Lazy-loaded translation providers
-        "translation.providers.ai_polisher",
         "translation.providers.gemini_polisher",
         "translation.providers.google_web_translator",
         "translation.providers.microsoft_translator",

@@ -6,6 +6,7 @@ import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services import EngineRuntime, ProjectService
+from translation import render_prompt
 
 # Force-load from app/utils/ (ui/utils/ may shadow it)
 _vpu_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "utils", "voice_preview_utils.py")
@@ -536,16 +537,13 @@ class VoiceWorkflow:
             f"[target_words={target_words}] "
             f"{source_text}"
         )
-        prompt = (
-            f"[mode=dubbing_rewrite][action={action}] "
-            "Rewrite for dubbing timing. Follow metadata as hard constraints. "
-            "Return one shorter spoken Vietnamese line than the draft. "
-            "Target target_words or fewer. "
-            "Preserve names, numbers, products, and key claims exactly."
-        )
         cleaned_style = " ".join(str(style_instruction or "").split()).strip()
-        if cleaned_style:
-            prompt += f" Extra tone/style instruction: {cleaned_style}"
+        style_clause = f" Extra tone/style instruction: {cleaned_style}" if cleaned_style else ""
+        prompt = render_prompt(
+            "dubbing_timing.instruction.md",
+            action=action,
+            style_clause=style_clause,
+        )
         rewritten_segments = self.engine_runtime.rewrite_translation_segments(
             [{"start": 0.0, "end": duration_sec, "text": source_line, "source_text": source_line}],
             [{"start": 0.0, "end": duration_sec, "text": draft_text}],
@@ -583,16 +581,12 @@ class VoiceWorkflow:
             f"[speech_cost={speech_cost}] "
             f"{source_text}"
         )
-        prompt = (
-            "[mode=dubbing_rewrite][action=translate_for_dubbing] "
-            "Create short spoken Vietnamese for dubbing. "
-            "Use duration, max_words_vi, and speech_cost as hard constraints. "
-            "Return one concise spoken line that is shorter than subtitle-style wording when needed. "
-            "Preserve names, numbers, products, and key claims exactly."
-        )
         cleaned_style = " ".join(str(style_instruction or "").split()).strip()
-        if cleaned_style:
-            prompt += f" Extra tone/style instruction: {cleaned_style}"
+        style_clause = f" Extra tone/style instruction: {cleaned_style}" if cleaned_style else ""
+        prompt = render_prompt(
+            "dubbing_initial.instruction.md",
+            style_clause=style_clause,
+        )
         try:
             rewritten_segments = self.engine_runtime.rewrite_translation_segments(
                 [{"start": 0.0, "end": duration_sec, "text": source_line, "source_text": source_line}],

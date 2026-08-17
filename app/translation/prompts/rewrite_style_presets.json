@@ -1,0 +1,30 @@
+[
+  {
+    "label": "Natural short video",
+    "instruction": "Make the Vietnamese sound natural, concise, conversational, and easy to read quickly in short videos."
+  },
+  {
+    "label": "TikTok natural",
+    "instruction": "Make the Vietnamese feel natural, modern, and casual like a strong TikTok creator voice, while keeping the meaning accurate and concise."
+  },
+  {
+    "label": "Punchy viral",
+    "instruction": "Make the Vietnamese feel punchy and attention-grabbing for short videos, but keep the meaning accurate and avoid exaggeration."
+  },
+  {
+    "label": "Sales voiceover",
+    "instruction": "Make the Vietnamese sound persuasive, benefit-driven, and smooth for a sales voiceover, but keep claims grounded in the original meaning."
+  },
+  {
+    "label": "Short storytelling",
+    "instruction": "Make the Vietnamese flow like short-form storytelling: natural, engaging, emotionally clear, and easy to follow line by line."
+  },
+  {
+    "label": "Neutral dubbing",
+    "instruction": "Make the Vietnamese smooth, neutral, clear, and easy for voice dubbing."
+  },
+  {
+    "label": "Clean subtitle",
+    "instruction": "Make the Vietnamese compact, clean, and very easy to scan as on-screen subtitles."
+  }
+]

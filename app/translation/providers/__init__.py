@@ -1,13 +1,11 @@
 from importlib import import_module
 
 __all__ = [
-    "AIPolisherProvider",
     "OpenAICompatiblePolisherProvider",
     "GoogleWebTranslatorProvider",
 ]
 
 _MODULE_MAP = {
-    "AIPolisherProvider": ".ai_polisher",
     "OpenAICompatiblePolisherProvider": ".gemini_polisher",
     "GoogleWebTranslatorProvider": ".google_web_translator",
 }
