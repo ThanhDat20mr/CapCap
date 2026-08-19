@@ -1,4 +1,4 @@
-# CapCap
+# <img src="assets/capcap.png"  style="width: 5%; height: auto;"> CapCap 
 
 ![CapCap Editor Preview](assets/preview.JPG)
 ### [Demo + Tutorial](https://www.tiktok.com/@nguyenthach617/video/7674305087023369493)
