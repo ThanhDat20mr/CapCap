@@ -5,6 +5,12 @@
 
 CapCap is a Windows desktop video-localization editor for creating Vietnamese or English subtitles, translated video, voice-over, and timed visual layers.
 
+## Upcoming Features
+
+We're continuously improving CapCap.
+
+[View the development roadmap](https://github.com/users/notepower2k1/projects/2)
+
 ## Highlights
 
 - Guided workflow: **Prepare → Transcript → Translate → TTS → Export**
