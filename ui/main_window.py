@@ -1715,7 +1715,14 @@ class VideoTranslatorGUI(QMainWindow):
         raw = state.settings.get("speaker_voice_assignments", {}) if state is not None else {}
         return dict(raw) if isinstance(raw, dict) else {}
 
-    def _save_speaker_voice_assignment(self, speaker: str, *, name: str | None = None, voice: str | None = None) -> None:
+    def _save_speaker_voice_assignment(
+        self,
+        speaker: str,
+        *,
+        name: str | None = None,
+        voice: str | None = None,
+        voice_gender_filter: str | None = None,
+    ) -> None:
         state = getattr(self, "current_project_state", None)
         speaker = str(speaker or "").strip()
         if state is None or not speaker:
@@ -1726,19 +1733,39 @@ class VideoTranslatorGUI(QMainWindow):
             entry["name"] = str(name or "").strip()
         if voice is not None:
             entry["voice"] = str(voice or "").strip()
+        if voice_gender_filter is not None:
+            entry["voice_gender_filter"] = str(voice_gender_filter or "Any").strip() or "Any"
         assignments[speaker] = entry
         state.set_setting("speaker_voice_assignments", assignments)
         self.project_service.save_project(state)
         self._voiceover_force_refresh = True
 
-    def _voice_display_entries(self) -> list[tuple[str, str]]:
-        combo = getattr(self, "free_voice_combo", None)
-        if combo is None:
-            return []
-        entries = []
-        for index in range(combo.count()):
-            entries.append((str(combo.itemText(index) or ""), str(combo.itemData(index) or "")))
-        return [(label, value) for label, value in entries if value]
+    def _voice_display_entries(
+        self,
+        *,
+        gender: str = "any",
+        include_voice: str = "",
+    ) -> list[tuple[str, str]]:
+        """Return gender-filtered voices for a speaker row independently.
+
+        ``free_voice_combo`` intentionally represents only Voice Setup.  A
+        speaker's filter/search must never depend on that combo's contents.
+        Keep an already assigned voice visible while filtering so changing a
+        filter cannot silently replace the speaker's mapping.
+        """
+        wanted_gender = self._normalize_gender_value(gender)
+        assigned = str(include_voice or "").strip()
+        entries: list[tuple[str, str]] = []
+        for entry in sorted(list(getattr(self, "voice_catalog_entries", []) or []), key=self._voice_entry_sort_key):
+            value = self._voice_catalog_data_value(entry)
+            if not value:
+                continue
+            entry_gender = self._normalize_gender_value(str(entry.get("gender", "")))
+            label = str(entry.get("name", entry.get("id", "Voice")) or "Voice")
+            gender_match = wanted_gender not in {"male", "female"} or entry_gender in {wanted_gender, "", "any"}
+            if gender_match or value == assigned:
+                entries.append((label, value))
+        return entries
 
     def refresh_detected_speakers_section(self) -> None:
         card = getattr(self, "detected_speakers_card", None)
@@ -1763,7 +1790,6 @@ class VideoTranslatorGUI(QMainWindow):
                 self.timeline.set_highlighted_speaker("")
             return
         assignments = self._speaker_voice_assignments()
-        voice_entries = self._voice_display_entries()
         for position, speaker in enumerate(speakers):
             entry = dict(assignments.get(speaker, {}) or {})
             display_name = self._speaker_display_name(speaker, position)
@@ -1787,18 +1813,52 @@ class VideoTranslatorGUI(QMainWindow):
             speaker_label.setToolTip(f"Timeline ID: {speaker}")
             header.addWidget(speaker_label, 1)
             row_layout.addLayout(header)
+            row_layout.addWidget(QLabel("Voice type"))
+            gender_combo = QComboBox()
+            gender_combo.addItems(["Any", "Male", "Female"])
+            saved_gender = str(entry.get("voice_gender_filter", "Any") or "Any").strip().title()
+            gender_combo.setCurrentText(saved_gender if saved_gender in {"Any", "Male", "Female"} else "Any")
+            row_layout.addWidget(gender_combo)
             row_layout.addWidget(QLabel("Voice"))
             voice_combo = QComboBox()
-            voice_combo.addItem("Use default voice", "")
-            for label, value in voice_entries:
-                voice_combo.addItem(label, value)
             assigned_voice = str(entry.get("voice", "") or "")
-            voice_index = voice_combo.findData(assigned_voice)
-            voice_combo.setCurrentIndex(voice_index if voice_index >= 0 else 0)
             row_layout.addWidget(voice_combo)
+
+            def _refresh_speaker_voice_combo(
+                *,
+                combo=voice_combo,
+                filter_combo=gender_combo,
+                assigned=assigned_voice,
+            ):
+                # ``"Use default voice"`` intentionally has an empty value;
+                # do not fall back to the original assignment in that case.
+                current_assigned = (
+                    str(combo.currentData() or "")
+                    if combo.count()
+                    else str(assigned or "")
+                )
+                combo.blockSignals(True)
+                combo.clear()
+                combo.addItem("Use default voice", "")
+                for label, value in self._voice_display_entries(
+                    gender=filter_combo.currentText(),
+                    include_voice=current_assigned,
+                ):
+                    combo.addItem(label, value)
+                voice_index = combo.findData(current_assigned)
+                combo.setCurrentIndex(voice_index if voice_index >= 0 else 0)
+                combo.blockSignals(False)
+
+            _refresh_speaker_voice_combo()
             voice_combo.currentIndexChanged.connect(
                 lambda _index, sp=speaker, combo=voice_combo: self._save_speaker_voice_assignment(
                     sp, voice=str(combo.currentData() or "")
+                )
+            )
+            gender_combo.currentTextChanged.connect(
+                lambda value, sp=speaker, refresh=_refresh_speaker_voice_combo: (
+                    self._save_speaker_voice_assignment(sp, voice_gender_filter=value),
+                    refresh(),
                 )
             )
             voice_combo.activated.connect(
@@ -1831,7 +1891,7 @@ class VideoTranslatorGUI(QMainWindow):
             reassign_row.addWidget(reassign_button)
             row_layout.addLayout(reassign_row)
             row.mousePressEvent = lambda event, sp=speaker, original=row.mousePressEvent: (
-                self.highlight_timeline_speaker(sp), original(event)
+                self.toggle_timeline_speaker_highlight(sp), original(event)
             )[-1]
             layout.addWidget(row)
         layout.addStretch()
@@ -1839,6 +1899,15 @@ class VideoTranslatorGUI(QMainWindow):
     def highlight_timeline_speaker(self, speaker: str) -> None:
         if hasattr(self, "timeline"):
             self.timeline.set_highlighted_speaker(speaker)
+
+    def toggle_timeline_speaker_highlight(self, speaker: str) -> None:
+        """Toggle the presentation-only speaker highlight from its card."""
+        timeline = getattr(self, "timeline", None)
+        if timeline is None:
+            return
+        selected = str(speaker or "").strip()
+        current = str(getattr(timeline, "_highlighted_speaker", "") or "").strip()
+        timeline.set_highlighted_speaker("" if selected and selected == current else selected)
 
     def _apply_speaker_voice_assignments(self, segments: list[dict]) -> list[dict]:
         assignments = self._speaker_voice_assignments()
@@ -2256,15 +2325,14 @@ class VideoTranslatorGUI(QMainWindow):
         _load_all()
         dialog.exec()
 
-    def _missing_resource_entries(self, *, include_whisper: bool = False, include_voice: bool = False) -> list[tuple[str, str]]:
+    def _missing_resource_entries(self, *, include_whisper: bool = False, include_voice: bool = False, include_ocr: bool = False, validate_pipeline_runtime: bool = False) -> list[tuple[str, str]]:
         service = self._resource_service()
         missing: list[tuple[str, str]] = []
 
         if include_whisper and not is_remote_profile():
-            engine = os.getenv("TRANSCRIPTION_ENGINE", _default_asr_engine()).strip().lower()
+            engine = self.get_transcription_engine()
             if engine == "sensevoice":
-                if not service.is_resource_installed("sensevoice:model"):
-                    missing.append(("sensevoice:model", "SenseVoice model"))
+                missing.extend(service.validate_sensevoice_runtime())
             else:
                 model_name = self.get_whisper_model_name()
                 resource_id = f"whisper:{model_name}"
@@ -2282,6 +2350,15 @@ class VideoTranslatorGUI(QMainWindow):
                         voice_label = str(voice_entry.get("name", voice_name)).strip() or voice_name
                     missing.append((resource_id, f"Local voice: {voice_label}"))
 
+        if include_ocr:
+            missing.extend(service.validate_ocr_runtime())
+
+        if include_voice and not is_remote_profile():
+            missing.extend(service.validate_piper_voice_runtime(self.get_active_voice_name()))
+
+        if validate_pipeline_runtime and not is_remote_profile():
+            missing.extend(service.validate_pipeline_runtime())
+
         deduped: list[tuple[str, str]] = []
         seen = set()
         for item in missing:
@@ -2291,18 +2368,24 @@ class VideoTranslatorGUI(QMainWindow):
             deduped.append(item)
         return deduped
 
-    def ensure_required_resources(self, action_label: str, *, include_whisper: bool = False, include_voice: bool = False) -> bool:
-        missing = self._missing_resource_entries(include_whisper=include_whisper, include_voice=include_voice)
+    def ensure_required_resources(self, action_label: str, *, include_whisper: bool = False, include_voice: bool = False, include_ocr: bool = False, validate_pipeline_runtime: bool = False) -> bool:
+        missing = self._missing_resource_entries(
+            include_whisper=include_whisper,
+            include_voice=include_voice,
+            include_ocr=include_ocr,
+            validate_pipeline_runtime=validate_pipeline_runtime,
+        )
         if not missing:
             return True
 
         missing_lines = "\n".join(f"- {label}" for _resource_id, label in missing)
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle("Missing Resources")
-        box.setText(f"{action_label} cannot start because some required resources are missing.")
+        box.setWindowTitle("CapCap Cannot Start This Step")
+        box.setText(f"{action_label} cannot start because a required local component is unavailable.")
         box.setInformativeText(
-            "Open Manage Resources for download links and target folders:\n\n"
+            "The exact cause is listed below. Use Manage Resources for downloadable "
+            "models, or fix the shown folder/permission problem before trying again:\n\n"
             f"{missing_lines}"
         )
         open_btn = box.addButton("Manage Resources", QMessageBox.AcceptRole)
@@ -8779,6 +8862,8 @@ class VideoTranslatorGUI(QMainWindow):
         mode = str(config["mode"])
         if engine_name == "whisper" and not self.ensure_required_resources("Range Transcription", include_whisper=True):
             return
+        if engine_name == "ocr" and not self.ensure_required_resources("Range Transcription", include_ocr=True):
+            return
         if engine_name == "ocr" and not pending:
             overlay = getattr(self, "ocr_region_overlay", None)
             if overlay is None:
@@ -12658,8 +12743,13 @@ class VideoTranslatorGUI(QMainWindow):
         self.refresh_ui_state()
 
     def run_transcription(self):
-        is_ocr = os.getenv("TRANSCRIPTION_ENGINE", _default_asr_engine()).strip().lower() == "ocr"
-        if not is_ocr and not self.ensure_required_resources("Transcription", include_whisper=True):
+        is_ocr = self.get_transcription_engine() == "ocr"
+        if not self.ensure_required_resources(
+            "Transcription",
+            include_whisper=not is_ocr,
+            include_ocr=is_ocr,
+            validate_pipeline_runtime=True,
+        ):
             return
         self.subtitle_controller.run_transcription()
 
@@ -13827,8 +13917,14 @@ class VideoTranslatorGUI(QMainWindow):
             return
         mode = self.get_output_mode_key()
         include_voice = target_stage == "tts" and mode in ("voice", "both")
-        is_ocr = os.getenv("TRANSCRIPTION_ENGINE", _default_asr_engine()).strip().lower() == "ocr"
-        if not self.ensure_required_resources("Generate", include_whisper=not is_ocr, include_voice=include_voice):
+        is_ocr = self.get_transcription_engine() == "ocr"
+        if not self.ensure_required_resources(
+            "Generate",
+            include_whisper=not is_ocr,
+            include_voice=include_voice,
+            include_ocr=is_ocr,
+            validate_pipeline_runtime=True,
+        ):
             return
         self.pipeline_controller.run_all_pipeline(target_stage=target_stage)
 
@@ -13851,8 +13947,14 @@ class VideoTranslatorGUI(QMainWindow):
     def run_all_pipeline(self):
         mode = self.get_output_mode_key()
         include_voice = mode in ("voice", "both")
-        is_ocr = os.getenv("TRANSCRIPTION_ENGINE", _default_asr_engine()).strip().lower() == "ocr"
-        if not self.ensure_required_resources("Generate", include_whisper=not is_ocr, include_voice=include_voice):
+        is_ocr = self.get_transcription_engine() == "ocr"
+        if not self.ensure_required_resources(
+            "Generate",
+            include_whisper=not is_ocr,
+            include_voice=include_voice,
+            include_ocr=is_ocr,
+            validate_pipeline_runtime=True,
+        ):
             return
         self.pipeline_controller.run_all_pipeline(target_stage="full")
 

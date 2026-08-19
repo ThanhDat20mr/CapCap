@@ -8,6 +8,7 @@ import time
 from runtime_paths import bin_path, models_path, subprocess_hidden_kwargs
 from runtime_profile import is_remote_profile
 from services import ChunkingService, EngineRuntime, ProjectService, SegmentRegroupService, SegmentService
+from services.resource_download_service import ResourceDownloadService
 
 
 class PrepareWorkflow:
@@ -338,6 +339,29 @@ class PrepareWorkflow:
         if speaker_diarization_num_speakers < 2:
             speaker_diarization_num_speakers = -1
         is_sensevoice = transcription_engine == "sensevoice"
+
+        # The GUI runs the same checks before launching the worker.  Repeat
+        # them here because a frozen worker can have a different import or
+        # resource-path failure.  This turns an otherwise opaque HTTP 500
+        # into the component/folder that actually needs attention.
+        if not is_remote_profile():
+            resource_service = ResourceDownloadService(self.workspace_root)
+            readiness_issues = resource_service.validate_pipeline_runtime()
+            if is_ocr:
+                readiness_issues.extend(resource_service.validate_ocr_runtime())
+            elif is_sensevoice:
+                readiness_issues.extend(resource_service.validate_sensevoice_runtime())
+            if prefetch_voice_name:
+                readiness_issues.extend(
+                    resource_service.validate_piper_voice_runtime(prefetch_voice_name)
+                )
+            if readiness_issues:
+                details = "\n".join(f"- {detail}" for _code, detail in readiness_issues)
+                raise RuntimeError(
+                    "CapCap startup readiness check failed. Resolve the following before retrying:\n"
+                    f"{details}"
+                )
+
         sensevoice_model_dir = ""
         if is_sensevoice:
             # Development resources live beside the project; PyInstaller

@@ -141,12 +141,19 @@ class CapCapRemoteHandler(BaseHTTPRequestHandler):
             tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
             _log("[Remote API] Request failed:")
             _log(tb)
+            log_paths = [os.path.join(tempfile.gettempdir(), "capcap_remote_api_errors.log")]
             try:
-                log_path = os.path.join(tempfile.gettempdir(), "capcap_remote_api_errors.log")
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(f"[{datetime.now().isoformat()}] {self.path}\n{tb}\n\n")
+                from runtime_paths import temp_path
+                log_paths.insert(0, temp_path("capcap_remote_api_errors.log"))
             except Exception:
                 pass
+            for log_path in dict.fromkeys(log_paths):
+                try:
+                    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(f"[{datetime.now().isoformat()}] {self.path}\n{tb}\n\n")
+                except Exception:
+                    pass
             _json_response(self, 500, {"ok": False, "error": str(exc)})
 
     def log_message(self, format, *args):

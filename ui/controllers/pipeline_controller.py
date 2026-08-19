@@ -34,6 +34,7 @@ class PipelineController:
         self.prepare_run_id = 0
         self.prepare_status_timer = None
         self.prepare_status_phase = ""
+        self.active_processing_device = "cpu"
 
     def _app_root(self):
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -129,7 +130,7 @@ class PipelineController:
         except Exception:
             pass
 
-    def _start_local_worker_server(self):
+    def _start_local_worker_server(self, processing_device: str = ""):
         self._stop_local_worker_server()
         app_root = self._app_root()
         server_script = os.path.join(app_root, "app", "remote_api_server.py")
@@ -142,6 +143,10 @@ class PipelineController:
         env["CAPCAP_REMOTE_API_TOKEN"] = token
         env["CAPCAP_REMOTE_PRELOAD_MODELS"] = "0"
         env["CAPCAP_RUN_REMOTE_API_SERVER"] = "1" if getattr(sys, "frozen", False) else "0"
+        env["CAPCAP_DEVICE"] = (
+            "cuda" if str(processing_device or os.getenv("CAPCAP_DEVICE", "cpu")).strip().lower() == "cuda"
+            else "cpu"
+        )
 
         process_kwargs = subprocess_hidden_kwargs()
         if os.name == "nt":
@@ -329,15 +334,19 @@ class PipelineController:
         # Start the background worker
         self.gui.log(f"[Pipeline] Starting prepare workflow for: {video_path}")
         try:
-            self._start_local_worker_server()
-            self.gui.log(f"[Pipeline] Local worker process started at {self.local_worker_api_url}")
+            self.active_processing_device = (
+                "cuda" if os.getenv("CAPCAP_DEVICE", "cpu").strip().lower() == "cuda" else "cpu"
+            )
+            self._start_local_worker_server(self.active_processing_device)
+            self.gui.log(
+                f"[Pipeline] Local worker process started at {self.local_worker_api_url} "
+                f"(device={self.active_processing_device})"
+            )
         except Exception as exc:
             self.pipeline_fail(f"Could not start local worker process: {exc}")
             return
         self._start_prepare_status_polling()
-        cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
-        default_engine = "sensevoice"
-        transcription_engine = os.getenv("TRANSCRIPTION_ENGINE", default_engine)
+        transcription_engine = self.gui.get_transcription_engine()
         # Transcript-only is a true stop point: PrepareWorkflow still
         # extracts audio and transcribes, but does not call translation.
         skip_translation = self.gui.is_skip_translation() or self.target_stage == "transcript"

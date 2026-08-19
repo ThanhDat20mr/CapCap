@@ -26,9 +26,10 @@ _STATUS_STYLES = {
 }
 
 
-def _status_pill_widget(status_key: str, parent: QWidget) -> QLabel:
+def _status_pill_widget(status_key: str, parent: QWidget, label_override: str = "") -> QLabel:
     status = str(status_key or "").strip().lower()
-    label, fg, bg = _STATUS_STYLES.get(status, _STATUS_STYLES["missing"])
+    default_label, fg, bg = _STATUS_STYLES.get(status, _STATUS_STYLES["missing"])
+    label = str(label_override or default_label).strip() or default_label
     pill = QLabel(label, parent)
     pill.setAlignment(Qt.AlignCenter)
     pill.setStyleSheet(
@@ -122,8 +123,8 @@ def open_resource_manager(workspace_root: str = None, parent=None,
 
     dialog._resource_rows = {}
 
-    def _show_status_pill(row, status_key: str):
-        new_pill = _status_pill_widget(status_key, dialog)
+    def _show_status_pill(row, status_key: str, status_label: str = ""):
+        new_pill = _status_pill_widget(status_key, dialog, status_label)
         row["header_row"].replaceWidget(row["status_pill"], new_pill)
         row["status_pill"].deleteLater()
         row["status_pill"] = new_pill
@@ -142,7 +143,21 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         name_label.setStyleSheet("color: #f8fbff; font-weight: 700; font-size: 14px; background-color: transparent;")
         header_row.addWidget(name_label, 1)
 
-        status_pill = _status_pill_widget(item.get("status", "missing"), dialog)
+        required_for = str(item.get("required_for", "") or "").strip()
+        if required_for:
+            required_label = QLabel(f"Required for {required_for}", dialog)
+            required_label.setStyleSheet(
+                "color: #ffd28a; font-size: 10px; font-weight: 700; "
+                "background-color: #4a3520; border: 1px solid #8b6734; "
+                "border-radius: 6px; padding: 2px 6px;"
+            )
+            header_row.addWidget(required_label, 0, Qt.AlignVCenter)
+
+        status_pill = _status_pill_widget(
+            item.get("status", "missing"),
+            dialog,
+            item.get("status_label", ""),
+        )
         header_row.addWidget(status_pill, 0, Qt.AlignVCenter | Qt.AlignRight)
 
         outer.addLayout(header_row)
@@ -253,7 +268,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             item = resources.get(resource_id, row.get("item", {}))
             row["item"] = item
             status = str(item.get("status", "missing")).strip().lower()
-            _show_status_pill(row, status)
+            _show_status_pill(row, status, str(item.get("status_label", "") or ""))
 
     def _populate():
         for i in reversed(range(content_layout.count())):
@@ -276,15 +291,15 @@ def open_resource_manager(workspace_root: str = None, parent=None,
             content_layout.addWidget(cpu_card)
 
         if gpu_items:
-            cpu_mode = os.getenv("CAPCAP_DEVICE", "cuda").strip().lower() == "cpu"
-            if not cpu_mode:
-                gpu_card, gpu_layout = _make_section("GPU Resource", expanded=False)
-                for item in gpu_items:
-                    _add_card(item, gpu_layout)
-                content_layout.addWidget(gpu_card)
-            else:
-                for item in gpu_items:
-                    _add_card(item, content_layout)
+            # GPU resources remain relevant in CPU Mode: users need a clear
+            # place to find the GPU Acceleration Pack before switching modes.
+            # Previously this header was conditionally removed based on the
+            # process environment, which made "GPU Resource" appear to vanish
+            # after launcher/device-state refreshes.
+            gpu_card, gpu_layout = _make_section("GPU Resource", expanded=False)
+            for item in gpu_items:
+                _add_card(item, gpu_layout)
+            content_layout.addWidget(gpu_card)
 
         for item in voice_items:
             _add_card(item, content_layout)

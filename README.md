@@ -1,9 +1,15 @@
-# CapCap
+# <img src="assets/capcap.png"  style="width: 5%; height: auto;"> CapCap 
 
 ![CapCap Editor Preview](assets/preview.JPG)
-[Demo](https://www.tiktok.com/@nguyenthach617/video/7674305087023369493)
+### [Demo + Tutorial](https://www.tiktok.com/@nguyenthach617/video/7674305087023369493)
 
 CapCap is a Windows desktop video-localization editor for creating Vietnamese or English subtitles, translated video, voice-over, and timed visual layers.
+
+## Upcoming Features
+
+We're continuously improving CapCap.
+
+[View the development roadmap](https://github.com/users/notepower2k1/projects/2)
 
 ## Highlights
 

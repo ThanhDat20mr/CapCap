@@ -23,12 +23,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from runtime_paths import asset_path, subprocess_hidden_kwargs
+from runtime_paths import asset_path, subprocess_hidden_kwargs, workspace_root
 
 
 
 def _recent_projects_path():
-    return os.path.join(os.path.dirname(__file__), "..", "..", "recent_projects.json")
+    # ``__file__`` lives inside ``_internal`` in a frozen build. Recent
+    # project data belongs beside the executable, not inside bundled assets.
+    return os.path.join(workspace_root(), "recent_projects.json")
 
 
 def _load_recent_projects(settings=None):
@@ -53,7 +55,7 @@ def _project_pipeline_status(video_path: str) -> tuple[str, str]:
     name = os.path.splitext(os.path.basename(video_path))[0] or "project"
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").lower() or "project"
     digest = hashlib.sha1(os.path.abspath(video_path).encode("utf-8")).hexdigest()[:8]
-    state_path = os.path.join(os.path.dirname(__file__), "..", "..", "projects", f"{slug}_{digest}", "project.json")
+    state_path = os.path.join(workspace_root(), "projects", f"{slug}_{digest}", "project.json")
     try:
         with open(os.path.normpath(state_path), "r", encoding="utf-8") as handle:
             state = json.load(handle)
@@ -332,7 +334,7 @@ class LauncherWindow(QDialog):
         super().__init__()
         self.selected_video = ""
         self.selected_device = "cuda"
-        self._thumbnail_dir = os.path.join(os.path.dirname(__file__), "..", "..", "temp", "launcher_thumbs")
+        self._thumbnail_dir = os.path.join(workspace_root(), "temp", "launcher_thumbs")
 
         from runtime_paths import asset_path
         from PySide6.QtGui import QIcon
@@ -422,7 +424,7 @@ class LauncherWindow(QDialog):
         def _select_cpu(checked):
             if checked:
                 self.gpu_btn.setChecked(False)
-                self.selected_device = "cpu"
+                self._set_selected_device("cpu")
                 self._validate_resources_for_device()
             elif not self.gpu_btn.isChecked():
                 self.cpu_btn.setChecked(True)
@@ -430,7 +432,7 @@ class LauncherWindow(QDialog):
         def _select_gpu(checked):
             if checked:
                 self.cpu_btn.setChecked(False)
-                self.selected_device = "cuda"
+                self._set_selected_device("cuda")
                 self._validate_resources_for_device()
             elif not self.cpu_btn.isChecked():
                 self.gpu_btn.setChecked(True)
@@ -544,9 +546,9 @@ class LauncherWindow(QDialog):
         self.open_project_btn.clicked.connect(self._on_open_project_folder)
         action_row_two.insertWidget(0, self.open_project_btn)
 
-        self.about_btn = QPushButton("About")
+        self.about_btn = QPushButton("About / Help")
         self.about_btn.setMinimumHeight(44)
-        self.about_btn.setMinimumWidth(90)
+        self.about_btn.setMinimumWidth(145)
         self.about_btn.setStyleSheet("""
             QPushButton {
                 background-color: #22344d;
@@ -561,6 +563,7 @@ class LauncherWindow(QDialog):
         self.about_btn.clicked.connect(self._on_about)
         action_row_two.addWidget(self.about_btn)
         action_row_two.addStretch()
+
         action_rows.addLayout(action_row_one)
         action_rows.addLayout(action_row_two)
         header.addLayout(action_rows)
@@ -640,7 +643,7 @@ class LauncherWindow(QDialog):
             reply.setStyleSheet(MSG_STYLE)
             return
 
-        LauncherWindow._selected_device = self.selected_device
+        self._set_selected_device(self.selected_device)
         self.loading_label.show()
         self.loading_label.setText("Preparing thumbnails and waveform...\nLarge videos may continue preparing in the editor.")
         self.new_btn.setEnabled(False)
@@ -687,7 +690,10 @@ class LauncherWindow(QDialog):
         print(f"[Launcher] Saving CAPCAP_DEVICE={device}, GPU={gpu_name}")
         os.environ["CAPCAP_DEVICE"] = device
         os.environ["CAPCAP_GPU_NAME"] = gpu_name
-        env_path = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
+        # ``__file__`` points inside _internal in a PyInstaller build. The
+        # writable package root is the only place both later GUI launches and
+        # the spawned worker can consistently read.
+        env_path = os.path.join(workspace_root(), ".env")
         try:
             lines = []
             if os.path.exists(env_path):
@@ -705,6 +711,15 @@ class LauncherWindow(QDialog):
                 f.writelines(lines)
         except Exception as e:
             print(f"[Launcher] Failed to write .env: {e}")
+
+    def _set_selected_device(self, device: str) -> None:
+        """Apply the launcher choice immediately and make it authoritative."""
+        normalized = "cuda" if str(device or "").strip().lower() == "cuda" else "cpu"
+        self.selected_device = normalized
+        LauncherWindow._selected_device = normalized
+        # The Main UI and its local worker inherit this exact value. Do not
+        # wait for thumbnail preprocessing to finish before publishing it.
+        os.environ["CAPCAP_DEVICE"] = normalized
 
     def _resource_service(self):
         from runtime_paths import workspace_root
@@ -818,7 +833,7 @@ class LauncherWindow(QDialog):
 
     def _on_open_project_folder(self):
         from PySide6.QtWidgets import QMessageBox
-        projects_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "projects"))
+        projects_dir = os.path.join(workspace_root(), "projects")
         try:
             os.makedirs(projects_dir, exist_ok=True)
             if hasattr(os, "startfile"):
@@ -844,21 +859,57 @@ class LauncherWindow(QDialog):
         if confirm.exec() != QMessageBox.Yes:
             return
 
-        root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        # Keep generated project/cache data in the explicit writable runtime
+        # root rather than deriving it from a module location.
+        root = workspace_root()
         targets = [
             os.path.join(root, "projects"),
             os.path.join(root, "temp"),
         ]
+
+        # Project cards can still own loaded thumbnail pixmaps from temp.
+        # Detach them and process their deferred deletion before removing the
+        # cache tree; this avoids a common first-click Windows file lock.
+        try:
+            from PySide6.QtWidgets import QApplication
+            for index in reversed(range(self.grid.count())):
+                item = self.grid.takeAt(index)
+                widget = item.widget() if item is not None else None
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+            QApplication.processEvents()
+        except Exception:
+            pass
+
         removed = 0
         errors = []
         for target in targets:
             if not os.path.exists(target):
                 continue
-            try:
-                shutil.rmtree(target)
-                removed += 1
-            except Exception as exc:
-                errors.append(f"{os.path.basename(target)}: {exc}")
+            last_error = None
+            # FFmpeg/thumbnail work can release a file just after the user
+            # confirms cleanup. Retry briefly instead of making the user
+            # click Clean Video Data a second time.
+            for attempt in range(5):
+                try:
+                    shutil.rmtree(target)
+                    removed += 1
+                    last_error = None
+                    break
+                except FileNotFoundError:
+                    last_error = None
+                    break
+                except OSError as exc:
+                    last_error = exc
+                    if attempt < 4:
+                        try:
+                            QApplication.processEvents()
+                        except Exception:
+                            pass
+                        time.sleep(0.25 * (attempt + 1))
+            if last_error is not None:
+                errors.append(f"{os.path.basename(target)}: {last_error}")
         for target in targets:
             try:
                 os.makedirs(target, exist_ok=True)
@@ -922,6 +973,23 @@ class LauncherWindow(QDialog):
         <tr><td><b>Speaker Detection</b></td><td><code>CapCap\\models\\pyannote</code></td></tr>
         </table>
         <p>Resource Manager provides download links for supported optional resources. Extract downloaded archives into the folder shown above.</p>
+
+        <h3 style='color:#8ad7ff;'>How to Setup</h3>
+        <p>CapCap has two processing modes: <b>CPU Mode</b> and <b>GPU Mode</b>.</p>
+        <p><b>CPU Mode:</b> Ready to use immediately without additional downloads. Optional resources add more models, voices, or features.</p>
+        <p><b>GPU Mode:</b> Requires the <b>GPU Acceleration Pack</b>. Download and extract it into <code>CapCap\\bin</code>. Whisper Medium is optional but recommended for better GPU transcription quality.</p>
+        <p>Other resources are optional enhancements. CapCap works without them unless you select a feature that needs one.</p>
+
+        <h3 style='color:#8ad7ff;'>How to Use</h3>
+        <p><b>Left side:</b> Workflow progress, configuration, and options.</p>
+        <p><b>Right side — Top:</b> Video Preview and action buttons on the left; the selected Timeline layer's Inspector on the right.</p>
+        <p><b>Right side — Bottom:</b> Timeline Editor and timeline editing actions.</p>
+        <ol>
+        <li>Use the setup guidance above and download any resources you need.</li>
+        <li>Open Settings and select the Subtitle Source and AI Translation provider.</li>
+        <li>In Language, select the input and output languages.</li>
+        <li>Click <b>Generate</b>: choose <b>Full Pipeline</b> to run automatically, or <b>Step-by-Step</b> for individual phase control.</li>
+        </ol>
 
         <h3 style='color:#8ad7ff;'>Developer Information</h3>
         <p>GitHub: <a href='https://github.com/notepower2k1/CapCap'>github.com/notepower2k1/CapCap</a></p>
@@ -1082,7 +1150,7 @@ class LauncherWindow(QDialog):
                 self._gpu_label.setText(f"GPU: {gpu_name}  \u2713 CUDA ready")
                 self._gpu_label.setStyleSheet("font-size: 11px; color: #4ecdc4;")
             else:
-                self._gpu_label.setText(f"GPU: {gpu_name}  \u2717 CUDA pack missing")
+                self._gpu_label.setText(f"GPU: {gpu_name}  \u2717 Need GPU Acceleration Pack")
                 self._gpu_label.setStyleSheet("font-size: 11px; color: #ffa500;")
         else:
             self._gpu_label.setText("CPU only")

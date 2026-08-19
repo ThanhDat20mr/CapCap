@@ -43,7 +43,25 @@ def remote_api_post(path: str, payload: dict, *, timeout: int | None = None, ret
                 headers=remote_api_headers(),
                 timeout=timeout or remote_api_timeout_seconds(),
             )
-            response.raise_for_status()
+            if not response.ok:
+                # ``raise_for_status`` loses the JSON body returned by the
+                # local worker, leaving packaged builds to show only a vague
+                # HTTP 500 URL. Preserve the server's actual root cause.
+                detail = ""
+                try:
+                    error_payload = response.json()
+                    if isinstance(error_payload, dict):
+                        detail = str(error_payload.get("error") or "").strip()
+                except (ValueError, TypeError):
+                    pass
+                if not detail:
+                    detail = str(response.text or "").strip()
+                endpoint = str(path or "/")
+                if detail:
+                    raise RuntimeError(
+                        f"Local worker {endpoint} failed ({response.status_code}): {detail}"
+                    )
+                response.raise_for_status()
             data = response.json()
             if not isinstance(data, dict):
                 raise RuntimeError("Remote API returned an invalid response.")
