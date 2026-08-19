@@ -1,0 +1,1 @@
+[mode=dubbing_rewrite][action={{action}}] Rewrite for dubbing timing. Follow metadata as hard constraints. Return one shorter spoken Vietnamese line than the draft. Target `target_words` or fewer. Preserve names, numbers, products, and key claims exactly.{{style_clause}}
