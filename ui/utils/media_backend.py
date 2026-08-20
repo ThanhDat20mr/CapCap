@@ -1144,6 +1144,13 @@ class MpvMediaPlayerBackend(QObject):
             self._original_player.stop()
         except Exception:
             pass
+        # QMediaPlayer can retain an OS-level file handle after stop().
+        # Release the source explicitly so project cleanup can remove an
+        # extracted WAV on Windows without requiring a second attempt.
+        try:
+            self._original_player.setSource(QUrl())
+        except Exception:
+            pass
         self._apply_original_mute()
 
     def clear_audio(self):
@@ -1152,6 +1159,10 @@ class MpvMediaPlayerBackend(QObject):
         self._dubbed_loaded_path = ""
         try:
             self._dubbed_player.stop()
+        except Exception:
+            pass
+        try:
+            self._dubbed_player.setSource(QUrl())
         except Exception:
             pass
         self._apply_dubbed_mute()
