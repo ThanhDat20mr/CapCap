@@ -5,20 +5,11 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QProgressDialog, QTextEdit, QVBoxLayout
 
 from worker_adapters import RewriteTranslationWorker, TranscriptionWorker, TranslationWorker
-from translation import TranslationOrchestrator
+from translation import TranslationOrchestrator, load_prompt_options
 
 
 class SubtitleController:
-    REWRITE_STYLE_PRESETS = [
-        ("Natural short video", "Make the Vietnamese sound natural, concise, conversational, and easy to read quickly in short videos."),
-        ("TikTok natural", "Make the Vietnamese feel natural, modern, and casual like a strong TikTok creator voice, while keeping the meaning accurate and concise."),
-        ("Punchy viral", "Make the Vietnamese feel punchy and attention-grabbing for short videos, but keep the meaning accurate and avoid exaggeration."),
-        ("Sales voiceover", "Make the Vietnamese sound persuasive, benefit-driven, and smooth for a sales voiceover, but keep claims grounded in the original meaning."),
-        ("Short storytelling", "Make the Vietnamese flow like short-form storytelling: natural, engaging, emotionally clear, and easy to follow line by line."),
-        ("Neutral dubbing", "Make the Vietnamese smooth, neutral, clear, and easy for voice dubbing."),
-        ("Clean subtitle", "Make the Vietnamese compact, clean, and very easy to scan as on-screen subtitles."),
-        ("Custom", "custom"),
-    ]
+    REWRITE_STYLE_PRESETS_FILE = "rewrite_style_presets.json"
 
     def __init__(self, gui):
         self.gui = gui
@@ -593,8 +584,9 @@ class SubtitleController:
         layout.addLayout(scope_row)
 
         style_combo = QComboBox(dialog)
-        for label, instruction in self.REWRITE_STYLE_PRESETS:
+        for label, instruction in load_prompt_options(self.REWRITE_STYLE_PRESETS_FILE):
             style_combo.addItem(label, instruction)
+        style_combo.addItem("Custom", "custom")
         layout.addWidget(style_combo)
 
         custom_style_cb = QCheckBox("Add extra custom instruction", dialog)
